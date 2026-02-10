@@ -1,0 +1,6 @@
+nir,nom,prenom,statut,base_brute,type_cotisation,taux_patronal,montant_patronal,taux_salarial,montant_salarial,periode_debut,periode_fin
+1850175123456,DUPONT,Jean,non-cadre,-1500.00,maladie,13.00,-195.00,0.00,0.00,01/01/2026,31/01/2026
+1920683987654,MARTIN,Sophie,cadre,4500.00,vieillesse plafonnee,10.00,450.00,6.90,310.50,01/01/2026,31/01/2026
+2780599456789,DURAND,Pierre,non-cadre,5000.00,vieillesse plafonnee,8.55,427.50,6.90,345.00,01/01/2026,31/01/2026
+1850175123456,DUPONT,Jean,non-cadre,3200.00,maladie,13.00,500.00,0.00,0.00,01/01/2026,31/01/2026
+1850175123456,DUPONT,Jean,non-cadre,3200.00,maladie,13.00,500.00,0.00,0.00,01/01/2026,31/01/2026

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bordereau_cotisations>
+    <employeur>
+        <siret>12345678900012</siret>
+        <siren>123456789</siren>
+        <raison_sociale>SOCIETE TEST SARL</raison_sociale>
+        <effectif>15</effectif>
+    </employeur>
+    <periode>
+        <date_debut>01/01/2026</date_debut>
+        <date_fin>31/01/2026</date_fin>
+    </periode>
+    <ligne_cotisation>
+        <type_cotisation>Maladie</type_cotisation>
+        <base>3200.00</base>
+        <taux_patronal>13.00</taux_patronal>
+        <montant_patronal>416.00</montant_patronal>
+    </ligne_cotisation>
+    <ligne_cotisation>
+        <type_cotisation>Vieillesse plafonnee</type_cotisation>
+        <base>3200.00</base>
+        <taux_patronal>8.55</taux_patronal>
+        <montant_patronal>273.60</montant_patronal>
+    </ligne_cotisation>
+    <ligne_cotisation>
+        <type_cotisation>Vieillesse deplafonnee</type_cotisation>
+        <base>3200.00</base>
+        <taux_patronal>2.11</taux_patronal>
+        <montant_patronal>67.52</montant_patronal>
+    </ligne_cotisation>
+    <ligne_cotisation>
+        <type_cotisation>Allocations familiales</type_cotisation>
+        <base>3200.00</base>
+        <taux_patronal>3.25</taux_patronal>
+        <montant_patronal>104.00</montant_patronal>
+    </ligne_cotisation>
+    <ligne_cotisation>
+        <type_cotisation>AT/MP</type_cotisation>
+        <base>3200.00</base>
+        <taux_patronal>2.08</taux_patronal>
+        <montant_patronal>66.56</montant_patronal>
+    </ligne_cotisation>
+</bordereau_cotisations>

@@ -1,0 +1,16 @@
+nir,nom,prenom,statut,base_brute,type_cotisation,taux_patronal,montant_patronal,taux_salarial,montant_salarial,periode_debut,periode_fin
+1850175123456,DUPONT,Jean,non-cadre,3200.00,maladie,13.00,416.00,0.00,0.00,01/01/2026,31/01/2026
+1850175123456,DUPONT,Jean,non-cadre,3200.00,vieillesse plafonnee,8.55,273.60,6.90,220.80,01/01/2026,31/01/2026
+1850175123456,DUPONT,Jean,non-cadre,3200.00,vieillesse deplafonnee,2.11,67.52,2.40,76.80,01/01/2026,31/01/2026
+1850175123456,DUPONT,Jean,non-cadre,3200.00,allocations familiales,3.25,104.00,0.00,0.00,01/01/2026,31/01/2026
+1850175123456,DUPONT,Jean,non-cadre,3200.00,at/mp,2.08,66.56,0.00,0.00,01/01/2026,31/01/2026
+1920683987654,MARTIN,Sophie,cadre,4500.00,maladie,13.00,585.00,0.00,0.00,01/01/2026,31/01/2026
+1920683987654,MARTIN,Sophie,cadre,4500.00,vieillesse plafonnee,8.55,384.75,6.90,310.50,01/01/2026,31/01/2026
+1920683987654,MARTIN,Sophie,cadre,4500.00,vieillesse deplafonnee,2.11,94.95,2.40,108.00,01/01/2026,31/01/2026
+1920683987654,MARTIN,Sophie,cadre,4500.00,allocations familiales,5.25,236.25,0.00,0.00,01/01/2026,31/01/2026
+1920683987654,MARTIN,Sophie,cadre,4500.00,at/mp,2.08,93.60,0.00,0.00,01/01/2026,31/01/2026
+2780599456789,DURAND,Pierre,non-cadre,2800.00,maladie,7.00,196.00,0.00,0.00,01/01/2026,31/01/2026
+2780599456789,DURAND,Pierre,non-cadre,2800.00,vieillesse plafonnee,8.55,239.40,6.90,193.20,01/01/2026,31/01/2026
+2780599456789,DURAND,Pierre,non-cadre,2800.00,vieillesse deplafonnee,2.11,59.08,2.40,67.20,01/01/2026,31/01/2026
+2780599456789,DURAND,Pierre,non-cadre,2800.00,allocations familiales,3.25,91.00,0.00,0.00,01/01/2026,31/01/2026
+2780599456789,DURAND,Pierre,non-cadre,2800.00,at/mp,2.08,58.24,0.00,0.00,01/01/2026,31/01/2026
