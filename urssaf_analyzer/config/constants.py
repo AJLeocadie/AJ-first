@@ -456,4 +456,13 @@ SUPPORTED_EXTENSIONS = {
     ".xls": "excel",
     ".xml": "xml",
     ".dsn": "dsn",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".png": "image",
+    ".bmp": "image",
+    ".tiff": "image",
+    ".tif": "image",
+    ".gif": "image",
+    ".webp": "image",
+    ".txt": "texte",
 }

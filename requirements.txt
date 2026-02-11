@@ -25,6 +25,12 @@ click>=8.1.0
 # Utilities
 python-dateutil>=2.8.0
 
+# Database (Supabase)
+supabase>=2.0.0
+
+# OCR (optional)
+Pillow>=10.0.0
+
 # Development
 pytest>=7.4.0
 pytest-cov>=4.1.0
