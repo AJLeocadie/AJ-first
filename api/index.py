@@ -388,6 +388,66 @@ async def rapport_charges_sociales():
 
 
 # ==============================
+# API SIMULATION PAIE / COTISATIONS
+# ==============================
+
+@app.get("/api/simulation/bulletin")
+async def simulation_bulletin(
+    brut_mensuel: float = Query(...),
+    effectif: int = Query(10),
+    est_cadre: bool = Query(False),
+    taux_at: float = Query(0.0208),
+    taux_vm: float = Query(0),
+):
+    """Simule un bulletin de paie complet avec toutes les cotisations."""
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    rules = ContributionRules(
+        effectif_entreprise=effectif,
+        taux_at=Decimal(str(taux_at)),
+        taux_versement_mobilite=Decimal(str(taux_vm)),
+    )
+    bulletin = rules.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre)
+    # Convert Decimal in lignes
+    for l in bulletin["lignes"]:
+        l["montant_patronal"] = float(l["montant_patronal"])
+        l["montant_salarial"] = float(l["montant_salarial"])
+    return bulletin
+
+
+@app.get("/api/simulation/rgdu")
+async def simulation_rgdu(
+    brut_annuel: float = Query(...),
+    effectif: int = Query(10),
+):
+    """Simule le calcul de la RGDU (Reduction Generale Degressive Unique)."""
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    rules = ContributionRules(effectif_entreprise=effectif)
+    return rules.detail_rgdu(Decimal(str(brut_annuel)))
+
+
+@app.get("/api/simulation/net-imposable")
+async def simulation_net_imposable(
+    brut_mensuel: float = Query(...),
+    effectif: int = Query(10),
+    est_cadre: bool = Query(False),
+):
+    """Calcule le net imposable (assiette fiscale PAS)."""
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    rules = ContributionRules(effectif_entreprise=effectif)
+    result = rules.calculer_net_imposable(Decimal(str(brut_mensuel)), est_cadre)
+    # Ensure all values are float
+    return {k: float(v) if isinstance(v, Decimal) else v for k, v in result.items()}
+
+
+@app.get("/api/simulation/taxe-salaires")
+async def simulation_taxe_salaires(brut_annuel: float = Query(...)):
+    """Simule la taxe sur les salaires (employeurs non assujettis TVA)."""
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    rules = ContributionRules()
+    return rules.calculer_taxe_salaires(Decimal(str(brut_annuel)))
+
+
+# ==============================
 # API FACTURES / OCR
 # ==============================
 
