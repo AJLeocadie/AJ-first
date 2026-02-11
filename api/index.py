@@ -516,19 +516,229 @@ async def comptabiliser_facture(
 def _piece_to_dict(piece) -> dict:
     return {
         "type_document": piece.type_document.value if hasattr(piece.type_document, 'value') else str(piece.type_document),
-        "numero": piece.numero,
+        "numero": getattr(piece, 'numero_piece', '') or getattr(piece, 'numero', ''),
         "date_piece": piece.date_piece.isoformat() if piece.date_piece else None,
         "emetteur": {"nom": piece.emetteur.nom, "siret": piece.emetteur.siret, "tva_intra": piece.emetteur.tva_intra} if piece.emetteur else None,
         "destinataire": {"nom": piece.destinataire.nom, "siret": piece.destinataire.siret, "tva_intra": piece.destinataire.tva_intra} if piece.destinataire else None,
         "montant_ht": float(piece.montant_ht),
         "montant_tva": float(piece.montant_tva),
         "montant_ttc": float(piece.montant_ttc),
-        "confiance": float(piece.confiance),
-        "ecriture_manuscrite": piece.ecriture_manuscrite,
+        "confiance": float(getattr(piece, 'confiance_extraction', 0) or getattr(piece, 'confiance', 0)),
+        "ecriture_manuscrite": bool(getattr(piece, 'champs_manuscrits', None)),
         "lignes": [{"description": l.description, "quantite": float(l.quantite),
                      "prix_unitaire": float(l.prix_unitaire), "montant_ht": float(l.montant_ht)}
                     for l in piece.lignes] if piece.lignes else [],
     }
+
+
+# ==============================
+# API SIMULATION INDEPENDANTS
+# ==============================
+
+@app.get("/api/simulation/micro-entrepreneur")
+async def simulation_micro(
+    chiffre_affaires: float = Query(...),
+    activite: str = Query("prestations_bnc"),
+    acre: bool = Query(False),
+    prelevement_liberatoire: bool = Query(False),
+):
+    """Simule les cotisations et impots d'un micro-entrepreneur."""
+    from urssaf_analyzer.regimes.independant import calculer_cotisations_micro, ActiviteMicro
+    try:
+        act = ActiviteMicro(activite)
+    except ValueError:
+        raise HTTPException(400, f"Activite inconnue. Valeurs: {[a.value for a in ActiviteMicro]}")
+    return calculer_cotisations_micro(
+        Decimal(str(chiffre_affaires)), act, acre=acre,
+        prelevement_liberatoire=prelevement_liberatoire,
+    )
+
+
+@app.get("/api/simulation/tns")
+async def simulation_tns(
+    revenu_net: float = Query(...),
+    type_statut: str = Query("gerant_majoritaire"),
+    acre: bool = Query(False),
+):
+    """Simule les cotisations TNS (travailleur non salarie)."""
+    from urssaf_analyzer.regimes.independant import calculer_cotisations_tns, TypeIndependant
+    try:
+        ts = TypeIndependant(type_statut)
+    except ValueError:
+        raise HTTPException(400, f"Statut inconnu. Valeurs: {[t.value for t in TypeIndependant]}")
+    return calculer_cotisations_tns(Decimal(str(revenu_net)), ts, acre=acre)
+
+
+@app.get("/api/simulation/impot-independant")
+async def simulation_impot_independant(
+    benefice: float = Query(...),
+    nb_parts: float = Query(1),
+    autres_revenus: float = Query(0),
+):
+    """Simule l'impot sur le revenu d'un independant."""
+    from urssaf_analyzer.regimes.independant import calculer_impot_independant
+    return calculer_impot_independant(
+        Decimal(str(benefice)), nb_parts=Decimal(str(nb_parts)),
+        autres_revenus_foyer=Decimal(str(autres_revenus)),
+    )
+
+
+@app.get("/api/simulation/guso")
+async def simulation_guso(
+    salaire_brut: float = Query(...),
+    nb_heures: float = Query(8),
+):
+    """Simule les cotisations GUSO (spectacle occasionnel)."""
+    from urssaf_analyzer.regimes.guso_agessa import calculer_cotisations_guso
+    return calculer_cotisations_guso(Decimal(str(salaire_brut)), Decimal(str(nb_heures)))
+
+
+@app.get("/api/simulation/artistes-auteurs")
+async def simulation_artistes_auteurs(
+    revenus_bruts: float = Query(...),
+    est_bda: bool = Query(True),
+):
+    """Simule les cotisations artistes-auteurs (ex-AGESSA/MDA)."""
+    from urssaf_analyzer.regimes.guso_agessa import calculer_cotisations_artistes_auteurs
+    return calculer_cotisations_artistes_auteurs(Decimal(str(revenus_bruts)), est_bda=est_bda)
+
+
+# ==============================
+# API CONVENTIONS COLLECTIVES
+# ==============================
+
+@app.get("/api/conventions-collectives")
+async def lister_conventions_api():
+    """Liste toutes les conventions collectives disponibles."""
+    from urssaf_analyzer.regimes.guso_agessa import lister_conventions
+    return lister_conventions()
+
+
+@app.get("/api/conventions-collectives/recherche")
+async def rechercher_conventions_api(q: str = Query(..., min_length=2)):
+    from urssaf_analyzer.regimes.guso_agessa import rechercher_conventions
+    resultats = rechercher_conventions(q)
+    return [{"idcc": cc.idcc, "titre": cc.titre, "brochure": cc.brochure,
+             "specificites": cc.specificites} for cc in resultats]
+
+
+@app.get("/api/conventions-collectives/{idcc}")
+async def get_convention_api(idcc: str):
+    from urssaf_analyzer.regimes.guso_agessa import get_convention_collective
+    cc = get_convention_collective(idcc)
+    if not cc:
+        raise HTTPException(404, f"Convention IDCC {idcc} non trouvee.")
+    return {"idcc": cc.idcc, "titre": cc.titre, "brochure": cc.brochure,
+            "code_naf_principaux": cc.code_naf_principaux, "specificites": cc.specificites}
+
+
+# ==============================
+# API DOCUMENTS JURIDIQUES (KBIS, STATUTS)
+# ==============================
+
+@app.post("/api/documents/extraire")
+async def extraire_document_juridique(fichier: UploadFile = File(...)):
+    """Extrait les informations d'un document juridique (KBIS, statuts, etc.)."""
+    from urssaf_analyzer.ocr.image_reader import LecteurMultiFormat
+    from urssaf_analyzer.ocr.legal_document_extractor import LegalDocumentExtractor
+    contenu = await fichier.read()
+    lecteur = LecteurMultiFormat()
+    resultat = lecteur.lire_contenu_brut(contenu, fichier.filename or "")
+    avertissements = list(resultat.avertissements)
+    if resultat.manuscrit_detecte:
+        avertissements += [a.message for a in resultat.avertissements_manuscrit[:5]]
+    extracteur = LegalDocumentExtractor()
+    info = extracteur.extraire(resultat.texte)
+    return {
+        "info_entreprise": extracteur.info_to_dict(info),
+        "document": {"format": resultat.format_detecte.value, "est_scan": resultat.est_scan,
+                      "manuscrit_detecte": resultat.manuscrit_detecte, "confiance_ocr": resultat.confiance_ocr},
+        "avertissements": avertissements,
+    }
+
+
+@app.post("/api/documents/lire")
+async def lire_document(fichier: UploadFile = File(...)):
+    """Lit un document de tout format et retourne le texte + metadonnees."""
+    from urssaf_analyzer.ocr.image_reader import LecteurMultiFormat
+    lecteur = LecteurMultiFormat()
+    contenu = await fichier.read()
+    resultat = lecteur.lire_contenu_brut(contenu, fichier.filename or "")
+    return {
+        "texte": resultat.texte[:10000], "format": resultat.format_detecte.value,
+        "taille": resultat.taille_octets, "nb_pages": resultat.nb_pages,
+        "est_image": resultat.est_image, "est_scan": resultat.est_scan,
+        "manuscrit_detecte": resultat.manuscrit_detecte, "confiance_ocr": resultat.confiance_ocr,
+        "avertissements": resultat.avertissements,
+        "avertissements_manuscrit": [
+            {"zone": a.zone, "message": a.message, "confiance": a.confiance, "ligne": a.ligne_numero}
+            for a in resultat.avertissements_manuscrit[:20]
+        ],
+    }
+
+
+# ==============================
+# API VERIFICATION DOCUMENTS OBLIGATOIRES
+# ==============================
+
+@app.get("/api/compliance/verifier/{operation}")
+async def verifier_documents_obligatoires(
+    operation: str,
+    documents_fournis: str = Query("", description="Noms separes par virgules"),
+):
+    """Verifie les documents obligatoires pour une operation."""
+    from urssaf_analyzer.compliance.document_checker import DocumentChecker, TypeOperation
+    try:
+        op = TypeOperation(operation)
+    except ValueError:
+        raise HTTPException(400, f"Operation inconnue. Valeurs: {[o.value for o in TypeOperation]}")
+    docs = [d.strip() for d in documents_fournis.split(",") if d.strip()] if documents_fournis else []
+    checker = DocumentChecker()
+    resultat = checker.verifier_operation(op, docs)
+    return {
+        "operation": resultat.operation.value, "est_complet": resultat.est_complet,
+        "taux_completude": resultat.taux_completude, "resume": resultat.resume,
+        "documents_requis": [
+            {"nom": d.nom, "description": d.description, "niveau": d.niveau.value,
+             "statut": d.statut.value, "reference_legale": d.reference_legale}
+            for d in resultat.documents_requis
+        ],
+        "alertes": [
+            {"titre": a.titre, "description": a.description, "niveau": a.niveau.value,
+             "reference_legale": a.reference_legale, "action_requise": a.action_requise}
+            for a in resultat.alertes
+        ],
+    }
+
+
+@app.get("/api/compliance/operations")
+async def lister_operations():
+    from urssaf_analyzer.compliance.document_checker import TypeOperation
+    return [{"code": o.value, "libelle": o.value.replace("_", " ").capitalize()} for o in TypeOperation]
+
+
+# ==============================
+# API SUPABASE / PATCH MENSUEL
+# ==============================
+
+@app.get("/api/supabase/status")
+async def supabase_status():
+    from urssaf_analyzer.database.supabase_client import HAS_SUPABASE
+    if not HAS_SUPABASE:
+        return {"connected": False, "message": "Module supabase non installe"}
+    from urssaf_analyzer.database.supabase_client import SupabaseClient
+    client = SupabaseClient()
+    return {"connected": client.is_connected, "url": client.url[:30] + "..." if client.url else ""}
+
+
+@app.post("/api/supabase/patch-mensuel")
+async def patch_mensuel(annee: int = Form(2026), mois: int = Form(1)):
+    from urssaf_analyzer.database.supabase_client import SupabaseClient, generer_donnees_patch_mensuel
+    client = SupabaseClient()
+    if not client.is_connected:
+        return {"status": "offline", "message": "Supabase non connecte. Configurez SUPABASE_URL et SUPABASE_KEY."}
+    donnees = generer_donnees_patch_mensuel(annee, mois)
+    return client.executer_patch_mensuel(annee, mois, donnees)
 
 
 # ==============================
@@ -540,20 +750,22 @@ FRONTEND_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>URSSAF Analyzer - Plateforme Complete</title>
+<title>URSSAF Analyzer v3 - Plateforme Professionnelle</title>
 <style>
 :root {
-    --bleu: #003d7a;
-    --bleu-clair: #e8f0fe;
-    --bleu-hover: #00509e;
-    --rouge: #d32f2f;
-    --orange: #f57c00;
-    --jaune: #fbc02d;
-    --vert: #388e3c;
-    --gris: #757575;
-    --bg: #f5f7fa;
+    --bleu: #1a365d;
+    --bleu2: #2b6cb0;
+    --bleu-clair: #ebf4ff;
+    --bleu-hover: #2c5282;
+    --rouge: #c53030;
+    --orange: #dd6b20;
+    --vert: #276749;
+    --vert-clair: #f0fff4;
+    --gris: #718096;
+    --bg: #f7fafc;
     --card-bg: #ffffff;
-    --shadow: 0 4px 12px rgba(0,0,0,0.08);
+    --shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);
+    --shadow-lg: 0 10px 15px rgba(0,0,0,0.1);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: #333; }
