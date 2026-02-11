@@ -1004,14 +1004,14 @@ tr:hover{background:var(--bc)}
 <nav>
 <div class="logo">URSSAF Analyzer</div>
 <div class="nls">
-<div class="nl active" onclick="showS('dashboard')">Dashboard</div>
-<div class="nl" onclick="showS('analyse')">Analyse</div>
-<div class="nl" onclick="showS('factures')">Factures</div>
-<div class="nl" onclick="showS('compta')">Comptabilite</div>
-<div class="nl" onclick="showS('simulation')">Simulation</div>
-<div class="nl" onclick="showS('veille')">Veille</div>
-<div class="nl" onclick="showS('documents')">Documents</div>
-<div class="nl" onclick="showS('portefeuille')">Portefeuille</div>
+<div class="nl active" onclick="showS('dashboard',this)">Dashboard</div>
+<div class="nl" onclick="showS('analyse',this)">Analyse</div>
+<div class="nl" onclick="showS('factures',this)">Factures</div>
+<div class="nl" onclick="showS('compta',this)">Comptabilite</div>
+<div class="nl" onclick="showS('simulation',this)">Simulation</div>
+<div class="nl" onclick="showS('veille',this)">Veille</div>
+<div class="nl" onclick="showS('documents',this)">Documents</div>
+<div class="nl" onclick="showS('portefeuille',this)">Portefeuille</div>
 </div>
 <div class="logout" onclick="window.location.href='/'">Deconnexion</div>
 </nav>
@@ -1114,12 +1114,12 @@ tr:hover{background:var(--bc)}
 <!-- ===== COMPTABILITE ===== -->
 <div class="sec" id="s-compta">
 <div class="tabs">
-<div class="tab active" onclick="showCT('journal')">Journal</div>
-<div class="tab" onclick="showCT('balance')">Balance</div>
-<div class="tab" onclick="showCT('resultat')">Resultat</div>
-<div class="tab" onclick="showCT('tva')">TVA</div>
-<div class="tab" onclick="showCT('social')">Social</div>
-<div class="tab" onclick="showCT('plan')">Plan comptable</div>
+<div class="tab active" onclick="showCT('journal',this)">Journal</div>
+<div class="tab" onclick="showCT('balance',this)">Balance</div>
+<div class="tab" onclick="showCT('resultat',this)">Resultat</div>
+<div class="tab" onclick="showCT('tva',this)">TVA</div>
+<div class="tab" onclick="showCT('social',this)">Social</div>
+<div class="tab" onclick="showCT('plan',this)">Plan comptable</div>
 </div>
 <div class="card">
 <div style="display:flex;gap:10px;margin-bottom:15px">
@@ -1138,11 +1138,11 @@ tr:hover{background:var(--bc)}
 <!-- ===== SIMULATION ===== -->
 <div class="sec" id="s-simulation">
 <div class="tabs">
-<div class="tab active" onclick="showSimTab('bulletin')">Bulletin paie</div>
-<div class="tab" onclick="showSimTab('micro')">Micro-entrepreneur</div>
-<div class="tab" onclick="showSimTab('tns')">TNS</div>
-<div class="tab" onclick="showSimTab('guso')">GUSO</div>
-<div class="tab" onclick="showSimTab('ir')">Impot revenu</div>
+<div class="tab active" onclick="showSimTab('bulletin',this)">Bulletin paie</div>
+<div class="tab" onclick="showSimTab('micro',this)">Micro-entrepreneur</div>
+<div class="tab" onclick="showSimTab('tns',this)">TNS</div>
+<div class="tab" onclick="showSimTab('guso',this)">GUSO</div>
+<div class="tab" onclick="showSimTab('ir',this)">Impot revenu</div>
 </div>
 <div class="card">
 <div class="tc active" id="sim-bulletin">
@@ -1261,7 +1261,7 @@ tr:hover{background:var(--bc)}
 
 <script>
 /* === NAV === */
-function showS(n){document.querySelectorAll('.sec').forEach(s=>s.classList.remove('active'));document.querySelectorAll('.nl').forEach(l=>l.classList.remove('active'));document.getElementById('s-'+n).classList.add('active');event.target.classList.add('active');if(n==='compta')loadCompta();if(n==='portefeuille')rechEnt();if(n==='dashboard')loadDash();}
+function showS(n,el){document.querySelectorAll('.sec').forEach(s=>s.classList.remove('active'));document.querySelectorAll('.nl').forEach(l=>l.classList.remove('active'));var sec=document.getElementById('s-'+n);if(sec)sec.classList.add('active');if(el)el.classList.add('active');if(n==='compta')loadCompta();if(n==='portefeuille')rechEnt();if(n==='dashboard')loadDash();}
 
 /* === DASHBOARD === */
 let analysisData=null;
@@ -1405,7 +1405,7 @@ document.getElementById('fact-res').style.display='block';document.getElementByI
 }
 
 /* === COMPTABILITE === */
-function showCT(n){document.querySelectorAll('#s-compta .tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('#s-compta .tc').forEach(t=>t.classList.remove('active'));event.target.classList.add('active');document.getElementById('ct-'+n).classList.add('active');loadCompta();}
+function showCT(n,el){document.querySelectorAll('#s-compta .tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('#s-compta .tc').forEach(t=>t.classList.remove('active'));if(el)el.classList.add('active');document.getElementById('ct-'+n).classList.add('active');loadCompta();}
 async function loadCompta(){
 try{const j=await(await fetch('/api/comptabilite/journal')).json();let h=j.length?'':'<p>Aucune ecriture.</p>';j.forEach(e=>{h+='<div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin:8px 0"><strong>'+e.date+' | '+e.journal+' | '+e.piece+'</strong> - '+e.libelle+' <span class="badge '+(e.validee?'badge-pos':'badge-neg')+'">'+(e.validee?'Validee':'Brouillon')+'</span><table style="margin-top:8px"><tr><th>Compte</th><th>Libelle</th><th class="num">Debit</th><th class="num">Credit</th></tr>';e.lignes.forEach(l=>{h+='<tr><td>'+l.compte+'</td><td>'+l.libelle+'</td><td class="num">'+l.debit.toFixed(2)+'</td><td class="num">'+l.credit.toFixed(2)+'</td></tr>';});h+='</table></div>';});document.getElementById('ct-journal-c').innerHTML=h;}catch(e){}
 try{const b=await(await fetch('/api/comptabilite/balance')).json();let h=b.length?'<table><tr><th>Compte</th><th>Libelle</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Solde D</th><th class="num">Solde C</th></tr>':'<p>Aucune donnee.</p>';b.forEach(r=>{h+='<tr><td>'+r.compte+'</td><td>'+r.libelle+'</td><td class="num">'+r.total_debit.toFixed(2)+'</td><td class="num">'+r.total_credit.toFixed(2)+'</td><td class="num">'+r.solde_debiteur.toFixed(2)+'</td><td class="num">'+r.solde_crediteur.toFixed(2)+'</td></tr>';});if(b.length)h+='</table>';document.getElementById('ct-balance-c').innerHTML=h;}catch(e){}
@@ -1418,7 +1418,7 @@ async function rechPC(t){const url=t?'/api/comptabilite/plan-comptable?terme='+e
 async function validerEcr(){try{const r=await fetch('/api/comptabilite/valider',{method:'POST'});const d=await r.json();alert('Validees: '+d.nb_validees+(d.erreurs.length?' | Erreurs: '+d.erreurs.join(', '):''));loadCompta();}catch(e){alert(e.message);}}
 
 /* === SIMULATION === */
-function showSimTab(n){document.querySelectorAll('#s-simulation .tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('#s-simulation .tc').forEach(t=>t.classList.remove('active'));event.target.classList.add('active');document.getElementById('sim-'+n).classList.add('active');}
+function showSimTab(n,el){document.querySelectorAll('#s-simulation .tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('#s-simulation .tc').forEach(t=>t.classList.remove('active'));if(el)el.classList.add('active');document.getElementById('sim-'+n).classList.add('active');}
 async function simBulletin(){try{const r=await(await fetch('/api/simulation/bulletin?brut_mensuel='+document.getElementById('sim-brut').value+'&effectif='+document.getElementById('sim-eff').value+'&est_cadre='+document.getElementById('sim-cadre').value)).json();let h='<div class="g3"><div class="sc"><div class="val">'+r.brut_mensuel.toFixed(2)+'</div><div class="lab">Brut</div></div><div class="sc"><div class="val">'+r.net_a_payer.toFixed(2)+'</div><div class="lab">Net a payer</div></div><div class="sc"><div class="val">'+r.cout_total_employeur.toFixed(2)+'</div><div class="lab">Cout employeur</div></div></div>';h+='<table style="margin-top:15px"><tr><th>Rubrique</th><th class="num">Patronal</th><th class="num">Salarial</th></tr>';(r.lignes||[]).forEach(l=>{h+='<tr><td>'+l.libelle+'</td><td class="num">'+l.montant_patronal.toFixed(2)+'</td><td class="num">'+l.montant_salarial.toFixed(2)+'</td></tr>';});h+='</table>';document.getElementById('sim-bull-res').innerHTML=h;}catch(e){alert(e.message);}}
 async function simMicro(){try{const r=await(await fetch('/api/simulation/micro-entrepreneur?chiffre_affaires='+document.getElementById('sim-ca').value+'&activite='+document.getElementById('sim-act').value+'&acre='+document.getElementById('sim-acre').value)).json();let h='<div class="g4">';for(const[k,v] of Object.entries(r)){if(typeof v==='number')h+='<div class="sc"><div class="val">'+v.toFixed(2)+'</div><div class="lab">'+k.replace(/_/g,' ')+'</div></div>';}h+='</div>';document.getElementById('sim-micro-res').innerHTML=h;}catch(e){alert(e.message);}}
 async function simTNS(){try{const r=await(await fetch('/api/simulation/tns?revenu_net='+document.getElementById('sim-rev').value+'&type_statut='+document.getElementById('sim-stat').value+'&acre='+document.getElementById('sim-tacre').value)).json();let h='<div class="g4">';for(const[k,v] of Object.entries(r)){if(typeof v==='number')h+='<div class="sc"><div class="val">'+v.toFixed(2)+'</div><div class="lab">'+k.replace(/_/g,' ')+'</div></div>';}h+='</div>';document.getElementById('sim-tns-res').innerHTML=h;}catch(e){alert(e.message);}}
