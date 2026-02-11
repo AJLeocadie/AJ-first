@@ -1263,6 +1263,8 @@ tr:hover{background:var(--bc)}
 /* === NAV === */
 function showS(n,el){document.querySelectorAll('.sec').forEach(s=>s.classList.remove('active'));document.querySelectorAll('.nl').forEach(l=>l.classList.remove('active'));var sec=document.getElementById('s-'+n);if(sec)sec.classList.add('active');if(el)el.classList.add('active');if(n==='compta')loadCompta();if(n==='portefeuille')rechEnt();if(n==='dashboard')loadDash();}
 
+document.addEventListener('click',function(e){var a=e.target.closest('.anomalie[data-toggle]');if(a)a.classList.toggle('open');});
+
 /* === DASHBOARD === */
 let analysisData=null;
 function loadDash(){
@@ -1288,7 +1290,7 @@ const impact=c.montant_impact||0;
 const neg=impact>0;
 const dest=categToDest(c.categorie||'');
 const destCls={'URSSAF':'badge-urssaf','Fiscal':'badge-fiscal','France Travail':'badge-ft','GUSO':'badge-guso'}[dest]||'badge-urssaf';
-h+='<div class="anomalie '+(neg?'neg':'pos')+'" onclick="this.classList.toggle(\'open\')">';
+h+='<div class="anomalie '+(neg?'neg':'pos')+'" data-toggle="1">';
 h+='<div class="head"><div><strong>'+(c.titre||'Ecart')+'</strong>';
 h+='<span class="dest '+destCls+'">'+dest+'</span>';
 h+=' <span class="badge '+(neg?'badge-neg':'badge-pos')+'">'+(neg?'Defavorable':'Favorable')+'</span></div>';
