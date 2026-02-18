@@ -2154,7 +2154,7 @@ var el=document.querySelector("#s-"+name+" .card")||document.querySelector("#res
 if(!el){toast("Rien a exporter.","warn");return;}
 var tables=el.querySelectorAll("table");
 if(tables.length===0){toast("Aucune donnee tabulaire.","warn");return;}
-var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll("tr");for(var i=0;i<rows.length;i++){var cells=rows[i].querySelectorAll("th,td");var line=[];for(var j=0;j<cells.length;j++){var txt=cells[j].textContent.replace(/"/g,'""');line.push('"'+txt+'"');}csv+=line.join(";")+"\n";}csv+="\n";}
+var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll("tr");for(var i=0;i<rows.length;i++){var cells=rows[i].querySelectorAll("th,td");var line=[];for(var j=0;j<cells.length;j++){var txt=cells[j].textContent.replace(/"/g,'""');line.push('"'+txt+'"');}csv+=line.join(";")+"\\n";}csv+="\\n";}
 var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="clara_"+name+".csv";a.click();toast("Export telecharge.","ok");}
 
 /* === TOAST === */
