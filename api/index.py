@@ -164,11 +164,13 @@ async def analyser_documents(
             chemins.append(chemin)
 
         try:
-            resultats = orchestrator.analyser(chemins)
+            orchestrator.analyser_documents(chemins, format_rapport)
         except URSSAFAnalyzerError as e:
             raise HTTPException(422, str(e))
         except Exception as e:
             raise HTTPException(500, f"Erreur interne : {str(e)}")
+
+        result = orchestrator.result
 
         if integrer:
             for f in fichiers:
@@ -188,14 +190,37 @@ async def analyser_documents(
             log_action("utilisateur", "analyse", f"{len(fichiers)} fichiers")
 
         if format_rapport == "html":
-            gen = GenerateurRapports()
-            html = gen.generer_rapport_html(resultats)
+            html = orchestrator.report_generator._construire_html(result)
             return HTMLResponse(html)
 
+        findings = result.findings
+        constats = []
+        for f in findings:
+            constats.append({
+                "id": f.id,
+                "categorie": f.categorie.value,
+                "severite": f.severite.value,
+                "titre": f.titre,
+                "description": f.description,
+                "montant_impact": float(f.montant_impact) if f.montant_impact else 0,
+                "score_risque": f.score_risque,
+                "recommandation": f.recommandation,
+                "reference_legale": f.reference_legale,
+            })
+        recommandations = orchestrator.report_generator._generer_recommandations(findings)
+
         return {
-            "synthese": resultats.get("synthese", {}),
-            "constats": resultats.get("constats", []),
-            "recommandations": resultats.get("recommandations", []),
+            "synthese": {
+                "nb_constats": len(findings),
+                "nb_anomalies": result.nb_anomalies,
+                "nb_incoherences": result.nb_incoherences,
+                "nb_critiques": result.nb_critiques,
+                "impact_financier_total": float(result.impact_total),
+                "score_risque_global": result.score_risque_global,
+                "nb_fichiers": len(result.documents_analyses),
+            },
+            "constats": constats,
+            "recommandations": recommandations,
             "limites": {"fichiers_max": 20, "taille_max_mo": 50}}
 
 
