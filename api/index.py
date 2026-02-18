@@ -148,7 +148,7 @@ async def analyser_documents(
     if len(fichiers) > 20:
         raise HTTPException(400, "Maximum 20 fichiers par analyse.")
 
-    config = AppConfig()
+    config = AppConfig(base_dir=Path("/tmp/clara_data"))
     orchestrator = Orchestrator(config)
 
     with tempfile.TemporaryDirectory() as td:
@@ -209,6 +209,44 @@ async def analyser_documents(
             })
         recommandations = orchestrator.report_generator._generer_recommandations(findings)
 
+        declarations_out = []
+        for decl in result.declarations:
+            emp = None
+            if decl.employeur:
+                emp = {
+                    "siren": decl.employeur.siren,
+                    "siret": decl.employeur.siret,
+                    "raison_sociale": decl.employeur.raison_sociale,
+                    "effectif": decl.employeur.effectif,
+                    "code_naf": decl.employeur.code_naf,
+                }
+            salaries = []
+            for e in decl.employes:
+                cots = [c for c in decl.cotisations if c.employe_id == e.id]
+                brut = float(sum(c.base_brute for c in cots)) if cots else float(decl.masse_salariale_brute / max(len(decl.employes), 1))
+                net = round(brut * 0.78, 2)
+                heures = 151.67
+                salaries.append({
+                    "nir": e.nir, "nom": e.nom, "prenom": e.prenom,
+                    "date_naissance": e.date_naissance.strftime("%d%m%Y") if e.date_naissance else "",
+                    "brut_mensuel": round(brut, 2), "net_fiscal": net,
+                    "heures": heures,
+                    "statut_conventionnel": "01" if e.statut and "cadre" in e.statut.lower() else "02",
+                    "num_contrat": f"CTR{e.id[:6]}",
+                })
+            periode_str = ""
+            if decl.periode and decl.periode.debut:
+                periode_str = decl.periode.debut.strftime("%Y%m")
+            declarations_out.append({
+                "type": decl.type_declaration,
+                "reference": decl.reference,
+                "periode": periode_str,
+                "employeur": emp,
+                "salaries": salaries,
+                "masse_salariale_brute": float(decl.masse_salariale_brute),
+                "effectif_declare": decl.effectif_declare,
+            })
+
         return {
             "synthese": {
                 "nb_constats": len(findings),
@@ -221,6 +259,7 @@ async def analyser_documents(
             },
             "constats": constats,
             "recommandations": recommandations,
+            "declarations": declarations_out,
             "limites": {"fichiers_max": 20, "taille_max_mo": 50}}
 
 
@@ -1805,7 +1844,7 @@ if(el)el.classList.add("active");
 document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
 if(n==="biblio")loadBiblio();if(n==="equipe")loadEquipe();
-if(n==="factures")loadPayStatuses();if(n==="dsn")loadDSNBrouillons();
+if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
 }
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");});
@@ -1960,6 +1999,37 @@ h+="</table>";el.innerHTML=h;}).catch(function(){});}
 
 /* === DSN GENERATION === */
 var dsnSalaries=[];
+var dsnPreFilled=false;
+function preFillDSN(){
+if(dsnPreFilled||!analysisData||!analysisData.declarations||!analysisData.declarations.length)return;
+var decl=analysisData.declarations[0];
+if(decl.employeur){
+var em=decl.employeur;
+var f1=document.getElementById("dsn-siren-em");
+var f2=document.getElementById("dsn-siren-ent");
+var f3=document.getElementById("dsn-raison");
+var f4=document.getElementById("dsn-nic");
+var f5=document.getElementById("dsn-eff");
+if(f1&&!f1.value&&em.siren)f1.value=em.siren;
+if(f2&&!f2.value&&em.siren)f2.value=em.siren;
+if(f3&&!f3.value&&em.raison_sociale)f3.value=em.raison_sociale;
+if(f4&&!f4.value&&em.siret)f4.value=em.siret.substring(9);
+if(f5&&em.effectif)f5.value=em.effectif;
+}
+if(decl.periode){
+var f6=document.getElementById("dsn-mois");
+if(f6&&!f6.value)f6.value=decl.periode;
+}
+if(decl.salaries&&decl.salaries.length&&!dsnSalaries.length){
+for(var i=0;i<decl.salaries.length;i++){
+var s=decl.salaries[i];
+dsnSalaries.push({nir:s.nir||"",nom:s.nom||"",prenom:s.prenom||"",date_naissance:s.date_naissance||"",brut_mensuel:s.brut_mensuel||0,net_fiscal:s.net_fiscal||0,heures:s.heures||"151.67",statut_conventionnel:s.statut_conventionnel||"02",num_contrat:s.num_contrat||("C"+String(i+1).padStart(4,"0"))});
+}
+renderDSNSalaries();
+}
+dsnPreFilled=true;
+if(decl.employeur||decl.salaries&&decl.salaries.length)toast("Donnees pre-remplies depuis l analyse.","ok");
+}
 function ajouterSalarieDSN(){
 var sal={
 nir:document.getElementById("dsn-nir").value,
