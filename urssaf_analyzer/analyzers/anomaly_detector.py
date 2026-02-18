@@ -5,6 +5,7 @@ Detecte :
 - Erreurs de calcul (base * taux != montant)
 - Assiettes de cotisation aberrantes (negatives, excessives)
 - Plafonnement PASS non applique ou mal applique
+- Gestion des cas particuliers : apprentis, contrats aides
 """
 
 from decimal import Decimal, ROUND_HALF_UP
@@ -12,10 +13,22 @@ from decimal import Decimal, ROUND_HALF_UP
 from urssaf_analyzer.analyzers.base_analyzer import BaseAnalyzer
 from urssaf_analyzer.config.constants import (
     ContributionType, Severity, FindingCategory,
-    TOLERANCE_MONTANT, TOLERANCE_TAUX, PASS_MENSUEL,
+    TOLERANCE_MONTANT, TOLERANCE_TAUX, PASS_MENSUEL, SMIC_MENSUEL_BRUT,
 )
-from urssaf_analyzer.models.documents import Declaration, Finding, Cotisation
+from urssaf_analyzer.models.documents import Declaration, Finding, Cotisation, Employe
 from urssaf_analyzer.rules.contribution_rules import ContributionRules
+
+# Mots-cles identifiant un apprenti dans le champ statut
+_APPRENTI_KEYWORDS = ("apprenti", "apprentissage", "alternance", "alternant",
+                       "contrat pro", "professionnalisation")
+
+
+def _est_apprenti(employe: Employe | None) -> bool:
+    """Determine si un employe est en contrat d'apprentissage ou alternance."""
+    if not employe:
+        return False
+    s = employe.statut.lower()
+    return any(kw in s for kw in _APPRENTI_KEYWORDS)
 
 
 class AnomalyDetector(BaseAnalyzer):
@@ -35,12 +48,20 @@ class AnomalyDetector(BaseAnalyzer):
             if effectif > 0:
                 self.rules = ContributionRules(effectif, self.rules.taux_at)
 
+            # Index des employes par id pour lookup rapide
+            employes_par_id = {e.id: e for e in decl.employes}
+
             for cotisation in decl.cotisations:
-                findings.extend(self._verifier_cotisation(cotisation, decl))
+                employe = employes_par_id.get(cotisation.employe_id)
+                findings.extend(self._verifier_cotisation(cotisation, decl, employe))
         return findings
 
-    def _verifier_cotisation(self, c: Cotisation, decl: Declaration) -> list[Finding]:
+    def _verifier_cotisation(
+        self, c: Cotisation, decl: Declaration, employe: Employe | None = None,
+    ) -> list[Finding]:
         findings = []
+        est_apprenti = _est_apprenti(employe)
+        nom_employe = f"{employe.prenom} {employe.nom}" if employe else "Employe"
 
         # 1. Valeurs aberrantes
         if c.base_brute < 0:
@@ -49,17 +70,28 @@ class AnomalyDetector(BaseAnalyzer):
                 severite=Severity.HAUTE,
                 titre="Base brute negative",
                 description=(
-                    f"La base brute de cotisation {c.type_cotisation.value} "
-                    f"est negative : {c.base_brute}"
+                    f"La base brute de cotisation {c.type_cotisation.value} pour "
+                    f"{nom_employe} est negative : {c.base_brute} EUR.\\n\\n"
+                    f"Qu'est-ce que cela signifie ?\\n"
+                    f"La base brute est le salaire sur lequel sont calculees les cotisations. "
+                    f"Elle ne peut pas etre negative, sauf cas exceptionnel de regularisation.\\n\\n"
+                    f"Que faire ?\\n"
+                    f"1. Verifier la saisie dans le logiciel de paie\\n"
+                    f"2. Si c'est une regularisation, verifier qu'un bulletin rectificatif precedent justifie ce montant\\n"
+                    f"3. Contacter votre editeur de paie si l'erreur persiste"
                 ),
                 valeur_constatee=str(c.base_brute),
                 valeur_attendue=">= 0",
                 montant_impact=abs(c.base_brute),
                 score_risque=80,
-                recommandation="Verifier la saisie et corriger la base de cotisation.",
+                recommandation=(
+                    "Verifier la saisie dans le logiciel de paie. "
+                    "Une base negative peut indiquer une erreur de parametrage "
+                    "ou une regularisation non documentee."
+                ),
                 detecte_par=self.nom,
                 documents_concernes=[c.source_document_id],
-                reference_legale="Art. L242-1 CSS",
+                reference_legale="Art. L242-1 CSS - Assiette des cotisations de securite sociale",
             ))
 
         if c.montant_patronal < 0:
@@ -69,19 +101,28 @@ class AnomalyDetector(BaseAnalyzer):
                 titre="Montant patronal negatif",
                 description=(
                     f"Le montant patronal pour {c.type_cotisation.value} "
-                    f"est negatif : {c.montant_patronal}"
+                    f"({nom_employe}) est negatif : {c.montant_patronal} EUR.\\n\\n"
+                    f"Qu'est-ce que cela signifie ?\\n"
+                    f"L'employeur ne devrait pas avoir un montant de cotisation negatif, "
+                    f"sauf en cas de trop-percu ou de regularisation.\\n\\n"
+                    f"Que faire ?\\n"
+                    f"Verifier si un trop-percu anterieur justifie ce montant. "
+                    f"Dans le cas contraire, corriger la saisie."
                 ),
                 valeur_constatee=str(c.montant_patronal),
                 valeur_attendue=">= 0",
                 montant_impact=abs(c.montant_patronal),
                 score_risque=80,
-                recommandation="Verifier si un trop-percu ou une erreur de signe.",
+                recommandation="Verifier si un trop-percu ou une regularisation justifie ce montant.",
                 detecte_par=self.nom,
                 documents_concernes=[c.source_document_id],
+                reference_legale="Art. L242-1 CSS",
             ))
 
         # 2. Verification des taux
-        if c.taux_patronal > 0:
+        # Les apprentis ont des regimes specifiques : ne pas flaguer les ecarts
+        # lies aux exonerations apprenti (base reduite, taux differents)
+        if c.taux_patronal > 0 and not est_apprenti:
             conforme, taux_attendu = self.rules.verifier_taux(
                 c.type_cotisation, c.taux_patronal, c.base_brute, est_patronal=True
             )
@@ -92,26 +133,74 @@ class AnomalyDetector(BaseAnalyzer):
                         (c.assiette * c.taux_patronal) - (c.assiette * taux_attendu)
                     ).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
+                ct_label = c.type_cotisation.value.replace("_", " ")
                 findings.append(Finding(
                     categorie=FindingCategory.ANOMALIE,
                     severite=Severity.HAUTE if ecart_montant > Decimal("100") else Severity.MOYENNE,
-                    titre=f"Taux patronal incorrect - {c.type_cotisation.value}",
+                    titre=f"Taux patronal incorrect - {ct_label}",
                     description=(
-                        f"Le taux patronal applique ({c.taux_patronal:.4f}) differe "
-                        f"du taux reglementaire ({taux_attendu:.4f}) pour "
-                        f"{c.type_cotisation.value}."
+                        f"Pour {nom_employe}, le taux patronal applique pour "
+                        f"{ct_label} est de {c.taux_patronal:.4f} "
+                        f"({float(c.taux_patronal)*100:.2f}%), alors que le taux "
+                        f"reglementaire 2026 est de {taux_attendu:.4f} "
+                        f"({float(taux_attendu)*100:.2f}%).\\n\\n"
+                        f"Impact estime : {ecart_montant} EUR sur cette ligne.\\n\\n"
+                        f"Qu'est-ce que cela signifie ?\\n"
+                        f"Chaque cotisation sociale a un taux fixe par la loi. "
+                        f"Un ecart peut provenir d'un bareme non mis a jour dans "
+                        f"le logiciel de paie, ou d'une specificite sectorielle.\\n\\n"
+                        f"Que faire ?\\n"
+                        f"1. Verifier que votre logiciel de paie utilise les baremes 2026\\n"
+                        f"2. Si un accord de branche prevoit un taux specifique, verifier sa conformite\\n"
+                        f"3. Corriger le taux si necessaire et recalculer les bulletins concernes"
                     ),
-                    valeur_constatee=f"{c.taux_patronal:.4f}",
-                    valeur_attendue=f"{taux_attendu:.4f}",
+                    valeur_constatee=f"{c.taux_patronal:.4f} ({float(c.taux_patronal)*100:.2f}%)",
+                    valeur_attendue=f"{taux_attendu:.4f} ({float(taux_attendu)*100:.2f}%)",
                     montant_impact=ecart_montant,
                     score_risque=70,
                     recommandation=(
-                        "Verifier le parametrage du logiciel de paie. "
-                        "S'assurer que les taux 2026 sont a jour."
+                        "Verifier le parametrage du logiciel de paie et s'assurer "
+                        "que les taux 2026 sont a jour. Si l'ecart est lie a un "
+                        "accord de branche, documenter cette specificite."
                     ),
                     detecte_par=self.nom,
                     documents_concernes=[c.source_document_id],
-                    reference_legale="Bareme URSSAF 2026",
+                    reference_legale="Bareme URSSAF 2026 - Art. L241-6 et D242-1 CSS",
+                ))
+
+        # Pour les apprentis, generer une note informative (pas une erreur)
+        if est_apprenti and c.taux_patronal > 0:
+            conforme, taux_attendu = self.rules.verifier_taux(
+                c.type_cotisation, c.taux_patronal, c.base_brute, est_patronal=True
+            )
+            if not conforme and taux_attendu is not None:
+                ct_label = c.type_cotisation.value.replace("_", " ")
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.FAIBLE,
+                    titre=f"Apprenti - taux specifique {ct_label}",
+                    description=(
+                        f"{nom_employe} est identifie(e) comme apprenti(e). "
+                        f"Le taux applique ({c.taux_patronal:.4f}) differe du taux "
+                        f"standard ({taux_attendu:.4f}), ce qui est normal pour "
+                        f"un contrat d'apprentissage.\\n\\n"
+                        f"Les apprentis beneficient d'exonerations specifiques "
+                        f"de cotisations sociales (Art. L6243-2 Code du travail). "
+                        f"Verifiez que les exonerations appliquees correspondent "
+                        f"bien au regime en vigueur."
+                    ),
+                    valeur_constatee=f"{c.taux_patronal:.4f}",
+                    valeur_attendue=f"{taux_attendu:.4f} (standard)",
+                    montant_impact=Decimal("0"),
+                    score_risque=15,
+                    recommandation=(
+                        "Aucune action requise si l'exoneration apprenti est "
+                        "correctement appliquee. Verifier la coherence avec le "
+                        "contrat d'apprentissage enregistre."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[c.source_document_id],
+                    reference_legale="Art. L6243-2 Code du travail - Exoneration apprentis",
                 ))
 
         # 3. Verification du calcul base * taux = montant
@@ -121,39 +210,66 @@ class AnomalyDetector(BaseAnalyzer):
             )
             ecart = abs(c.montant_patronal - montant_calcule)
             if ecart > TOLERANCE_MONTANT:
+                ct_label = c.type_cotisation.value.replace("_", " ")
                 findings.append(Finding(
                     categorie=FindingCategory.ANOMALIE,
                     severite=Severity.MOYENNE,
-                    titre=f"Erreur de calcul - {c.type_cotisation.value}",
+                    titre=f"Erreur de calcul - {ct_label}",
                     description=(
-                        f"Le montant patronal ({c.montant_patronal}) ne correspond pas "
-                        f"au calcul assiette x taux ({c.assiette} x {c.taux_patronal} "
-                        f"= {montant_calcule}). Ecart : {ecart}."
+                        f"Pour {nom_employe}, le montant patronal ({c.montant_patronal} EUR) "
+                        f"ne correspond pas au calcul attendu :\\n"
+                        f"  Assiette ({c.assiette}) x Taux ({c.taux_patronal}) = "
+                        f"{montant_calcule} EUR\\n"
+                        f"  Ecart constate : {ecart} EUR\\n\\n"
+                        f"Qu'est-ce que cela signifie ?\\n"
+                        f"Le montant inscrit sur le bulletin ne correspond pas au "
+                        f"produit de la base par le taux. Cela peut etre du a un "
+                        f"arrondi, une proratisation, ou une erreur de saisie.\\n\\n"
+                        f"Que faire ?\\n"
+                        f"Verifier si un prorata temps partiel ou une regularisation "
+                        f"explique l'ecart. Sinon, corriger dans le logiciel de paie."
                     ),
                     valeur_constatee=str(c.montant_patronal),
                     valeur_attendue=str(montant_calcule),
                     montant_impact=ecart,
                     score_risque=60,
-                    recommandation="Verifier le calcul de cette ligne de cotisation.",
+                    recommandation=(
+                        "Verifier le calcul de cette ligne. Un ecart peut "
+                        "provenir d'un arrondi ou d'une proratisation."
+                    ),
                     detecte_par=self.nom,
                     documents_concernes=[c.source_document_id],
                 ))
 
         # 4. Verification du plafonnement PASS
         if c.type_cotisation == ContributionType.VIEILLESSE_PLAFONNEE:
-            if c.assiette > PASS_MENSUEL + TOLERANCE_MONTANT:
+            # Pour les apprentis, la base peut etre reduite (assiette forfaitaire)
+            if est_apprenti and c.assiette < SMIC_MENSUEL_BRUT:
+                # Normal pour un apprenti : assiette forfaitaire
+                pass
+            elif c.assiette > PASS_MENSUEL + TOLERANCE_MONTANT:
                 excedent = c.assiette - PASS_MENSUEL
                 findings.append(Finding(
                     categorie=FindingCategory.DEPASSEMENT_SEUIL,
                     severite=Severity.HAUTE,
                     titre="Depassement du plafond de securite sociale (PASS)",
                     description=(
-                        f"L'assiette de la vieillesse plafonnee ({c.assiette}) "
-                        f"depasse le PASS mensuel ({PASS_MENSUEL}). "
-                        f"Excedent : {excedent}."
+                        f"Pour {nom_employe}, l'assiette de la vieillesse plafonnee "
+                        f"({c.assiette} EUR) depasse le PASS mensuel 2026 "
+                        f"({PASS_MENSUEL} EUR). Excedent : {excedent} EUR.\\n\\n"
+                        f"Qu'est-ce que le PASS ?\\n"
+                        f"Le Plafond Annuel de la Securite Sociale (PASS) est un "
+                        f"seuil fixe chaque annee. En 2026, il est de {PASS_MENSUEL} EUR "
+                        f"par mois. La cotisation vieillesse plafonnee ne peut pas "
+                        f"porter sur un montant superieur.\\n\\n"
+                        f"Que faire ?\\n"
+                        f"1. Verifier que le logiciel de paie applique bien le plafond\\n"
+                        f"2. Si le salaire depasse le PASS, seule la fraction jusqu'au "
+                        f"plafond est soumise a cette cotisation\\n"
+                        f"3. La part au-dela doit etre soumise a la vieillesse deplafonnee"
                     ),
                     valeur_constatee=str(c.assiette),
-                    valeur_attendue=f"<= {PASS_MENSUEL}",
+                    valeur_attendue=f"<= {PASS_MENSUEL} EUR",
                     montant_impact=excedent * c.taux_patronal if c.taux_patronal > 0 else excedent,
                     score_risque=85,
                     recommandation=(
@@ -162,7 +278,10 @@ class AnomalyDetector(BaseAnalyzer):
                     ),
                     detecte_par=self.nom,
                     documents_concernes=[c.source_document_id],
-                    reference_legale="Art. L241-3 CSS - Plafond Securite Sociale 2026 : 4 005 EUR/mois",
+                    reference_legale=(
+                        "Art. L241-3 CSS - Plafond Securite Sociale 2026 : "
+                        f"{PASS_MENSUEL} EUR/mois, {PASS_MENSUEL * 12} EUR/an"
+                    ),
                 ))
 
         return findings

@@ -10,6 +10,7 @@ from urssaf_analyzer.parsers.excel_parser import ExcelParser
 from urssaf_analyzer.parsers.pdf_parser import PDFParser
 from urssaf_analyzer.parsers.xml_parser import XMLParser
 from urssaf_analyzer.parsers.dsn_parser import DSNParser
+from urssaf_analyzer.parsers.image_parser import ImageParser
 
 
 class ParserFactory:
@@ -21,6 +22,7 @@ class ParserFactory:
             CSVParser(),
             ExcelParser(),
             PDFParser(),
+            ImageParser(),  # Images (JPEG, PNG, etc.) via OCR
             XMLParser(),    # XML en dernier (generique)
         ]
 

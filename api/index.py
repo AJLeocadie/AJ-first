@@ -1,4 +1,4 @@
-"""Clara v3.4 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.4 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
@@ -37,7 +37,7 @@ from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, TypeJournal
 from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
 
 app = FastAPI(
-    title="Clara",
+    title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
     version="3.4.0",
 )
@@ -148,7 +148,7 @@ async def analyser_documents(
     if len(fichiers) > 20:
         raise HTTPException(400, "Maximum 20 fichiers par analyse.")
 
-    config = AppConfig(base_dir=Path("/tmp/clara_data"))
+    config = AppConfig(base_dir=Path("/tmp/normacheck_data"))
     orchestrator = Orchestrator(config)
 
     with tempfile.TemporaryDirectory() as td:
@@ -157,8 +157,8 @@ async def analyser_documents(
         for f in fichiers:
             data = await f.read()
             total_size += len(data)
-            if total_size > 50 * 1024 * 1024:
-                raise HTTPException(400, "Taille totale depasse 50 Mo.")
+            if total_size > 500 * 1024 * 1024:
+                raise HTTPException(400, "Taille totale depasse 500 Mo.")
             chemin = Path(td) / f.filename
             chemin.write_bytes(data)
             chemins.append(chemin)
@@ -189,9 +189,14 @@ async def analyser_documents(
                 })
             log_action("utilisateur", "analyse", f"{len(fichiers)} fichiers")
 
+        # Toujours generer le rapport HTML pour l'inclure dans la reponse JSON
+        try:
+            html_report = orchestrator.report_generator._construire_html(result)
+        except Exception:
+            html_report = ""
+
         if format_rapport == "html":
-            html = orchestrator.report_generator._construire_html(result)
-            return HTMLResponse(html)
+            return HTMLResponse(html_report)
 
         findings = result.findings
         constats = []
@@ -247,6 +252,49 @@ async def analyser_documents(
                 "effectif_declare": decl.effectif_declare,
             })
 
+        # Auto-generer les ecritures comptables a partir des declarations
+        try:
+            moteur = get_moteur()
+            for decl in result.declarations:
+                if not decl.employes:
+                    continue
+                for emp in decl.employes:
+                    cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                    brut = float(sum(c.base_brute for c in cots)) if cots else 0
+                    if brut <= 0:
+                        continue
+                    net = round(brut * 0.78, 2)
+                    charges_pat = round(brut * 0.45, 2)
+                    date_piece = ""
+                    if decl.periode and decl.periode.debut:
+                        date_piece = decl.periode.debut.strftime("%Y-%m-%d")
+                    elif decl.periode and decl.periode.fin:
+                        date_piece = decl.periode.fin.strftime("%Y-%m-%d")
+                    else:
+                        date_piece = date.today().isoformat()
+                    lib = f"Salaire {emp.prenom} {emp.nom}"
+                    try:
+                        moteur.saisir_ecriture_manuelle(
+                            date_piece=date_piece,
+                            libelle=lib,
+                            compte_debit="641000",
+                            compte_credit="421000",
+                            montant=Decimal(str(brut)),
+                            has_justificatif=True,
+                        )
+                        moteur.saisir_ecriture_manuelle(
+                            date_piece=date_piece,
+                            libelle=f"Charges patronales {emp.prenom} {emp.nom}",
+                            compte_debit="645000",
+                            compte_credit="431000",
+                            montant=Decimal(str(charges_pat)),
+                            has_justificatif=True,
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         return {
             "synthese": {
                 "nb_constats": len(findings),
@@ -260,7 +308,8 @@ async def analyser_documents(
             "constats": constats,
             "recommandations": recommandations,
             "declarations": declarations_out,
-            "limites": {"fichiers_max": 20, "taille_max_mo": 50}}
+            "html_report": html_report,
+            "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
 
 
 # ==============================
@@ -345,14 +394,18 @@ async def maj_statut_facture(
     statut: str = Form("impaye"),
     date_paiement: str = Form(""),
     reference_paiement: str = Form(""),
+    montant_paye: str = Form(""),
 ):
-    _facture_statuses[facture_id] = {
+    entry = {
         "facture_id": facture_id,
         "statut": statut,
         "date_paiement": date_paiement,
         "reference_paiement": reference_paiement,
         "maj_le": datetime.now().isoformat(),
     }
+    if statut == "partiellement_paye" and montant_paye:
+        entry["montant_paye"] = float(montant_paye)
+    _facture_statuses[facture_id] = entry
     log_action("utilisateur", "maj_statut_facture", f"{facture_id} -> {statut}")
     return {"status": "ok"}
 
@@ -678,13 +731,13 @@ async def valider_invitation(token: str = Query(...)):
             break
     if not inv:
         return HTMLResponse("<h2>Lien invalide ou expire.</h2>", 404)
-    return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Clara - Creer votre acces</title>
+    return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>NormaCheck - Creer votre acces</title>
 <style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:-apple-system,sans-serif;background:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh}}
 .card{{background:#fff;border-radius:16px;padding:32px;max-width:400px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.08)}}
 h2{{color:#0f172a;margin-bottom:16px}}label{{display:block;font-weight:600;font-size:.85em;color:#475569;margin:10px 0 4px}}
 input{{width:100%;padding:10px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:.95em}}
 button{{width:100%;padding:12px;background:#0f172a;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer;margin-top:16px}}</style></head>
-<body><div class="card"><h2>Bienvenue sur Clara</h2><p style="color:#64748b;font-size:.9em;margin-bottom:16px">Invitation pour <strong>{inv["email"]}</strong> (role: {inv["role"]})</p>
+<body><div class="card"><h2>Bienvenue sur NormaCheck</h2><p style="color:#64748b;font-size:.9em;margin-bottom:16px">Invitation pour <strong>{inv["email"]}</strong> (role: {inv["role"]})</p>
 <form method="POST" action="/api/collaboration/finaliser"><input type="hidden" name="token" value="{token}">
 <label>Mot de passe</label><input type="password" name="mot_de_passe" required minlength="6">
 <label>Confirmer</label><input type="password" name="confirm" required>
@@ -702,8 +755,8 @@ async def finaliser_invitation(
             inv["statut"] = "active"
             log_action(inv["email"], "activation_compte", f"role={inv['role']}")
             return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Clara - Compte active</title></head><body style="font-family:-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f8fafc">
-<div style="text-align:center"><h2 style="color:#16a34a">Compte active !</h2><p>Vous pouvez maintenant <a href="/app">acceder a Clara</a>.</p></div></body></html>""")
+<title>NormaCheck - Compte active</title></head><body style="font-family:-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f8fafc">
+<div style="text-align:center"><h2 style="color:#16a34a">Compte active !</h2><p>Vous pouvez maintenant <a href="/app">acceder a NormaCheck</a>.</p></div></body></html>""")
     raise HTTPException(404, "Token invalide")
 
 
@@ -733,7 +786,7 @@ async def generer_dsn(
     # Emetteur (S10)
     siren_emetteur: str = Form(...),
     nic_emetteur: str = Form("00000"),
-    nom_logiciel: str = Form("Clara"),
+    nom_logiciel: str = Form("NormaCheck"),
     # Entreprise (S20)
     siren_entreprise: str = Form(...),
     raison_sociale: str = Form(...),
@@ -778,7 +831,7 @@ async def generer_dsn(
     add("S10.G00.00.001", siren_emetteur)
     add("S10.G00.00.002", nic_emetteur)
     add("S10.G00.00.003", nom_logiciel)
-    add("S10.G00.00.004", "Clara v3.4")
+    add("S10.G00.00.004", "NormaCheck v3.4")
     add("S10.G00.00.005", "01")  # Nature de la declaration: DSN mensuelle
     add("S10.G00.00.006", "11")  # Type: normale
     add("S10.G00.00.007", "01")  # Numero de fraction
@@ -915,7 +968,7 @@ LANDING_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Clara - Conformite sociale et fiscale intelligente</title>
+<title>NormaCheck - Conformite sociale et fiscale intelligente</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b;-webkit-font-smoothing:antialiased}
@@ -996,7 +1049,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 </style>
 </head>
 <body>
-<div class="nav"><div class="logo"><em>Clara</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></div>
+<div class="nav"><div class="logo"><em>NormaCheck</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></div>
 <div class="hero">
 <h1>La conformite sociale et fiscale<br>enfin <em>simplifiee</em>.</h1>
 <p>Analysez vos documents sociaux et fiscaux, detectez les anomalies en euros, gerez votre comptabilite, generez vos DSN et pilotez vos obligations. Pour dirigeants, comptables et experts.</p>
@@ -1006,7 +1059,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 </div>
 <div class="limits">
 <div class="limit"><strong>20 fichiers</strong> par analyse</div>
-<div class="limit"><strong>50 Mo</strong> max par analyse</div>
+<div class="limit"><strong>500 Mo</strong> max par analyse</div>
 <div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
 </div>
 </div>
@@ -1079,7 +1132,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 
 <div class="guarantee">
 <h3>Garantie et transparence</h3>
-<p>Clara est un outil d'aide a la decision. Les analyses produites sont indicatives et ne se substituent pas a l'avis d'un expert-comptable ou d'un conseil juridique. Les resultats ne sont pas opposables aux administrations (URSSAF, DGFIP, France Travail, etc.). L'utilisation de Clara ne dispense pas de vos obligations declaratives et de paiement.</p>
+<p>NormaCheck est un outil d'aide a la decision. Les analyses produites sont indicatives et ne se substituent pas a l'avis d'un expert-comptable ou d'un conseil juridique. Les resultats ne sont pas opposables aux administrations (URSSAF, DGFIP, France Travail, etc.). L'utilisation de NormaCheck ne dispense pas de vos obligations declaratives et de paiement.</p>
 </div>
 
 <div class="tgt"><h2>Concu pour les professionnels</h2><div class="tg">
@@ -1090,7 +1143,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 </div></div>
 
 <div class="auth-sec" id="auth"><div class="auth-card">
-<h2>Acces a Clara</h2>
+<h2>Acces a NormaCheck</h2>
 <div class="auth-tabs"><div class="auth-tab active" onclick="showAT('login')">Connexion</div><div class="auth-tab" onclick="showAT('register')">Inscription</div></div>
 <div id="amsg" class="msg"></div>
 <div class="auth-form active" id="form-login">
@@ -1107,7 +1160,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <div style="margin:14px 0;padding:14px;background:#f8fafc;border-radius:10px;font-size:.82em;color:#64748b">
 <label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0;cursor:pointer"><input type="checkbox" id="cgv" style="width:auto;margin:0"> J'accepte les <a href="/legal/cgu" target="_blank" style="color:#3b82f6">CGU</a> et <a href="/legal/cgv" target="_blank" style="color:#3b82f6">CGV</a>.</label></div>
 <button class="submit-btn" onclick="doReg()">Creer mon compte</button>
-<div class="rgpd">Vos donnees sont traitees conformement au RGPD (Reglement UE 2016/679). Vous disposez d'un droit d'acces, de rectification et de suppression de vos donnees. Contact : dpo@clara-app.fr</div>
+<div class="rgpd">Vos donnees sont traitees conformement au RGPD (Reglement UE 2016/679). Vous disposez d'un droit d'acces, de rectification et de suppression de vos donnees. Contact : dpo@normacheck-app.fr</div>
 </div></div></div>
 
 <footer>
@@ -1117,7 +1170,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-Clara v3.4.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+NormaCheck v3.4.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 <span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
 </footer>
 <script>
@@ -1131,7 +1184,7 @@ function doReg(){if(document.getElementById("rpw").value!==document.getElementBy
 
 LEGAL_CGU = """<!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Clara - Conditions Generales d'Utilisation</title>
+<title>NormaCheck - Conditions Generales d'Utilisation</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#f8fafc;color:#1e293b;line-height:1.7}
 .nav{background:#0f172a;color:#fff;padding:14px 40px;display:flex;justify-content:space-between;align-items:center}
 .nav a{color:#60a5fa;text-decoration:none;font-size:.9em}.nav .logo{font-size:1.4em;font-weight:800}
@@ -1143,23 +1196,23 @@ p,li{font-size:.92em;margin-bottom:10px}ul{margin-left:20px}
 footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:40px}
 @media(max-width:640px){.content{padding:0 14px;margin:20px auto}h1{font-size:1.4em}.nav{padding:12px 16px}}</style></head>
 <body>
-<div class="nav"><div class="logo"><em>Clara</em></div><a href="/">Retour a l'accueil</a></div>
+<div class="nav"><div class="logo"><em>NormaCheck</em></div><a href="/">Retour a l'accueil</a></div>
 <div class="content">
 <h1>Conditions Generales d'Utilisation</h1>
 <p><em>Derniere mise a jour : 1er janvier 2026</em></p>
 
 <h2>Article 1 - Objet</h2>
-<p>Les presentes Conditions Generales d'Utilisation (CGU) regissent l'acces et l'utilisation de la plateforme Clara, outil d'aide a la decision en matiere de conformite sociale et fiscale.</p>
+<p>Les presentes Conditions Generales d'Utilisation (CGU) regissent l'acces et l'utilisation de la plateforme NormaCheck, outil d'aide a la decision en matiere de conformite sociale et fiscale.</p>
 
-<div class="warn"><strong>Important :</strong> Clara est un outil d'aide a la decision. Les analyses produites sont purement indicatives et ne se substituent en aucun cas a l'avis d'un expert-comptable, d'un commissaire aux comptes ou d'un conseil juridique. Les resultats fournis ne sont pas opposables aux administrations (URSSAF, DGFIP, France Travail, MSA, etc.).</div>
+<div class="warn"><strong>Important :</strong> NormaCheck est un outil d'aide a la decision. Les analyses produites sont purement indicatives et ne se substituent en aucun cas a l'avis d'un expert-comptable, d'un commissaire aux comptes ou d'un conseil juridique. Les resultats fournis ne sont pas opposables aux administrations (URSSAF, DGFIP, France Travail, MSA, etc.).</div>
 
 <h2>Article 2 - Acces au service</h2>
-<p>L'acces a Clara necessite la creation d'un compte utilisateur. L'utilisateur s'engage a fournir des informations exactes et a maintenir la confidentialite de ses identifiants. Toute utilisation du compte est reputee faite par le titulaire.</p>
+<p>L'acces a NormaCheck necessite la creation d'un compte utilisateur. L'utilisateur s'engage a fournir des informations exactes et a maintenir la confidentialite de ses identifiants. Toute utilisation du compte est reputee faite par le titulaire.</p>
 
 <h2>Article 3 - Utilisation du service</h2>
 <p>L'utilisateur s'engage a :</p>
 <ul>
-<li>Utiliser Clara dans le respect de la legislation en vigueur</li>
+<li>Utiliser NormaCheck dans le respect de la legislation en vigueur</li>
 <li>Ne pas tenter de contourner les mesures de securite</li>
 <li>Ne pas utiliser le service a des fins illicites ou frauduleuses</li>
 <li>Verifier les resultats avec un professionnel qualifie avant toute decision</li>
@@ -1167,17 +1220,17 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 </ul>
 
 <h2>Article 4 - Propriete intellectuelle</h2>
-<p>L'ensemble des elements de Clara (logiciel, algorithmes, interfaces, bases de donnees) est protege par le droit de la propriete intellectuelle. Toute reproduction, representation ou exploitation non autorisee est interdite.</p>
+<p>L'ensemble des elements de NormaCheck (logiciel, algorithmes, interfaces, bases de donnees) est protege par le droit de la propriete intellectuelle. Toute reproduction, representation ou exploitation non autorisee est interdite.</p>
 <p>Les documents uploades par l'utilisateur restent sa propriete exclusive.</p>
 
 <h2>Article 5 - Limitation de responsabilite</h2>
-<p>Clara est fourni "en l'etat". L'editeur ne garantit pas :</p>
+<p>NormaCheck est fourni "en l'etat". L'editeur ne garantit pas :</p>
 <ul>
 <li>L'exactitude ou l'exhaustivite des analyses produites</li>
 <li>L'adequation du service a un usage particulier</li>
 <li>La disponibilite ininterrompue du service</li>
 </ul>
-<p>L'editeur ne saurait etre tenu responsable des decisions prises sur la base des resultats de Clara, ni des consequences financieres, fiscales ou juridiques qui en decouleraient.</p>
+<p>L'editeur ne saurait etre tenu responsable des decisions prises sur la base des resultats de NormaCheck, ni des consequences financieres, fiscales ou juridiques qui en decouleraient.</p>
 
 <h2>Article 6 - Donnees personnelles et RGPD</h2>
 <p>Conformement au Reglement General sur la Protection des Donnees (RGPD - Reglement UE 2016/679) et a la loi Informatique et Libertes, l'utilisateur dispose des droits suivants :</p>
@@ -1189,7 +1242,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <li><strong>Droit d'opposition :</strong> s'opposer au traitement de ses donnees</li>
 </ul>
 <p>Les donnees sont traitees aux fins suivantes : fourniture du service, analyse de documents, amelioration de la plateforme. Base legale : execution du contrat (art. 6.1.b RGPD).</p>
-<p>Contact DPO : dpo@clara-app.fr</p>
+<p>Contact DPO : dpo@normacheck-app.fr</p>
 
 <h2>Article 7 - Duree et resiliation</h2>
 <p>L'inscription est valable pour une duree indeterminee. L'utilisateur peut supprimer son compte a tout moment. L'editeur se reserve le droit de suspendre un compte en cas de violation des CGU.</p>
@@ -1200,13 +1253,13 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 9 - Droit applicable</h2>
 <p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
 </div>
-<footer>Clara v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
 LEGAL_CGV = """<!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Clara - Conditions Generales de Vente</title>
+<title>NormaCheck - Conditions Generales de Vente</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#f8fafc;color:#1e293b;line-height:1.7}
 .nav{background:#0f172a;color:#fff;padding:14px 40px;display:flex;justify-content:space-between;align-items:center}
 .nav a{color:#60a5fa;text-decoration:none;font-size:.9em}.nav .logo{font-size:1.4em;font-weight:800}
@@ -1218,13 +1271,13 @@ p,li{font-size:.92em;margin-bottom:10px}ul{margin-left:20px}
 footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:40px}
 @media(max-width:640px){.content{padding:0 14px;margin:20px auto}h1{font-size:1.4em}.nav{padding:12px 16px}}</style></head>
 <body>
-<div class="nav"><div class="logo"><em>Clara</em></div><a href="/">Retour a l'accueil</a></div>
+<div class="nav"><div class="logo"><em>NormaCheck</em></div><a href="/">Retour a l'accueil</a></div>
 <div class="content">
 <h1>Conditions Generales de Vente</h1>
 <p><em>Derniere mise a jour : 1er janvier 2026</em></p>
 
 <h2>Article 1 - Offres et tarifs</h2>
-<p>Clara propose une tarification adaptative basee sur le nombre de profils utilisateurs :</p>
+<p>NormaCheck propose une tarification adaptative basee sur le nombre de profils utilisateurs :</p>
 <ul>
 <li><strong>Solo (60 EUR HT/an) :</strong> 1 profil utilisateur - Analyses illimitees, comptabilite, generation DSN, gestion factures, simulations, veille juridique 2020-2026, export CSV</li>
 <li><strong>Equipe (100 EUR HT/an) :</strong> Jusqu'a 3 profils - Tout Solo + collaboration multi-profils, profil decisionnaire, tracabilite, bibliotheque partagee, audit trail, support prioritaire</li>
@@ -1243,13 +1296,13 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <p>L'acces au service est immediat apres validation du paiement. La licence est delivree sous forme numerique (acces en ligne). Aucune livraison physique n'est effectuee.</p>
 
 <h2>Article 5 - Garantie et limitation de responsabilite</h2>
-<p>Clara est un outil d'aide a la decision. L'editeur garantit le bon fonctionnement technique de la plateforme mais ne garantit pas l'exactitude des analyses produites.</p>
+<p>NormaCheck est un outil d'aide a la decision. L'editeur garantit le bon fonctionnement technique de la plateforme mais ne garantit pas l'exactitude des analyses produites.</p>
 <p>La responsabilite de l'editeur est limitee au montant de la licence acquise. L'editeur ne saurait etre tenu responsable des dommages indirects.</p>
 
-<div class="warn"><strong>Non-opposabilite :</strong> Les resultats produits par Clara ne constituent pas des avis juridiques ou comptables et ne sont pas opposables aux administrations publiques (URSSAF, DGFIP, France Travail, MSA, caisses de retraite, etc.).</div>
+<div class="warn"><strong>Non-opposabilite :</strong> Les resultats produits par NormaCheck ne constituent pas des avis juridiques ou comptables et ne sont pas opposables aux administrations publiques (URSSAF, DGFIP, France Travail, MSA, caisses de retraite, etc.).</div>
 
 <h2>Article 6 - Service apres-vente et reclamations</h2>
-<p>Pour toute reclamation : support@clara-app.fr. Delai de reponse : 48 heures ouvrees.</p>
+<p>Pour toute reclamation : support@normacheck-app.fr. Delai de reponse : 48 heures ouvrees.</p>
 
 <h2>Article 7 - Mediateur de la consommation</h2>
 <p>En cas de litige non resolu, le consommateur peut saisir gratuitement le mediateur de la consommation (article L612-1 du Code de la consommation).</p>
@@ -1257,13 +1310,13 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 8 - Droit applicable</h2>
 <p>Les presentes CGV sont soumises au droit francais. Tout litige releve de la competence des tribunaux francais.</p>
 </div>
-<footer>Clara v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
 LEGAL_MENTIONS = """<!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Clara - Mentions legales</title>
+<title>NormaCheck - Mentions legales</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#f8fafc;color:#1e293b;line-height:1.7}
 .nav{background:#0f172a;color:#fff;padding:14px 40px;display:flex;justify-content:space-between;align-items:center}
 .nav a{color:#60a5fa;text-decoration:none;font-size:.9em}.nav .logo{font-size:1.4em;font-weight:800}
@@ -1275,17 +1328,17 @@ p,li{font-size:.92em;margin-bottom:10px}ul{margin-left:20px}
 footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:40px}
 @media(max-width:640px){.content{padding:0 14px;margin:20px auto}h1{font-size:1.4em}.nav{padding:12px 16px}}</style></head>
 <body>
-<div class="nav"><div class="logo"><em>Clara</em></div><a href="/">Retour a l'accueil</a></div>
+<div class="nav"><div class="logo"><em>NormaCheck</em></div><a href="/">Retour a l'accueil</a></div>
 <div class="content">
 <h1>Mentions legales</h1>
 
 <h2>Identification</h2>
-<p><strong>Denomination :</strong> Clara - Plateforme de conformite sociale et fiscale</p>
+<p><strong>Denomination :</strong> NormaCheck - Plateforme de conformite sociale et fiscale</p>
 <p><strong>Forme juridique :</strong> [A completer]</p>
 <p><strong>Siege social :</strong> [A completer]</p>
 <p><strong>SIRET :</strong> [A completer]</p>
 <p><strong>Directeur de la publication :</strong> [A completer]</p>
-<p><strong>Contact :</strong> contact@clara-app.fr</p>
+<p><strong>Contact :</strong> contact@normacheck-app.fr</p>
 
 <h2>Hebergement</h2>
 <p><strong>Hebergeur :</strong> Vercel Inc.</p>
@@ -1295,40 +1348,40 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2 id="rgpd">Protection des donnees personnelles (RGPD)</h2>
 <p>Conformement au Reglement General sur la Protection des Donnees (RGPD - Reglement UE 2016/679) et a la loi n 78-17 du 6 janvier 1978 relative a l'informatique, aux fichiers et aux libertes :</p>
 <ul>
-<li><strong>Responsable du traitement :</strong> L'editeur de Clara</li>
+<li><strong>Responsable du traitement :</strong> L'editeur de NormaCheck</li>
 <li><strong>Donnees collectees :</strong> Nom, prenom, email, documents uploades (pour analyse uniquement)</li>
 <li><strong>Finalites :</strong> Fourniture du service d'analyse, gestion du compte, amelioration du service</li>
 <li><strong>Base legale :</strong> Execution du contrat (art. 6.1.b RGPD)</li>
 <li><strong>Duree de conservation :</strong> Donnees de compte : duree de l'inscription + 3 ans. Documents analyses : duree de la session d'analyse (suppression automatique)</li>
 <li><strong>Transferts :</strong> Les donnees peuvent etre traitees par l'hebergeur (Vercel, USA) dans le cadre de clauses contractuelles types approuvees par la Commission europeenne</li>
 <li><strong>Droits :</strong> Acces, rectification, suppression, portabilite, opposition, limitation</li>
-<li><strong>DPO :</strong> dpo@clara-app.fr</li>
+<li><strong>DPO :</strong> dpo@normacheck-app.fr</li>
 <li><strong>Reclamation CNIL :</strong> www.cnil.fr</li>
 </ul>
 
 <h2>Cookies</h2>
-<p>Clara utilise uniquement des cookies techniques strictement necessaires au fonctionnement du service (authentification, session). Aucun cookie publicitaire ou de tracking n'est utilise. Conformement a la directive ePrivacy, ces cookies techniques ne necessitent pas de consentement.</p>
+<p>NormaCheck utilise uniquement des cookies techniques strictement necessaires au fonctionnement du service (authentification, session). Aucun cookie publicitaire ou de tracking n'est utilise. Conformement a la directive ePrivacy, ces cookies techniques ne necessitent pas de consentement.</p>
 
 <h2>Non-opposabilite</h2>
 <div class="warn">
-<p><strong>Avertissement important :</strong> Clara est un outil d'aide a la decision destine aux professionnels. Les analyses, calculs, simulations et recommandations produits par la plateforme sont fournis a titre purement indicatif.</p>
-<p>Les resultats de Clara :</p>
+<p><strong>Avertissement important :</strong> NormaCheck est un outil d'aide a la decision destine aux professionnels. Les analyses, calculs, simulations et recommandations produits par la plateforme sont fournis a titre purement indicatif.</p>
+<p>Les resultats de NormaCheck :</p>
 <ul>
 <li>Ne se substituent pas a l'avis d'un expert-comptable ou d'un conseil juridique</li>
 <li>Ne sont pas opposables aux administrations publiques (URSSAF, DGFIP, France Travail, MSA, caisses de retraite complementaire, etc.)</li>
 <li>Ne constituent pas des declarations sociales ou fiscales</li>
 <li>Ne dispensent pas l'utilisateur de ses obligations declaratives et de paiement</li>
 </ul>
-<p>L'utilisateur reste seul responsable des decisions prises sur la base des informations fournies par Clara.</p>
+<p>L'utilisateur reste seul responsable des decisions prises sur la base des informations fournies par NormaCheck.</p>
 </div>
 
 <h2>Propriete intellectuelle</h2>
-<p>L'ensemble des contenus de la plateforme Clara (textes, logiciels, algorithmes, bases de donnees, interfaces) est protege par le Code de la propriete intellectuelle. Toute reproduction non autorisee est constitutive de contrefacon.</p>
+<p>L'ensemble des contenus de la plateforme NormaCheck (textes, logiciels, algorithmes, bases de donnees, interfaces) est protege par le Code de la propriete intellectuelle. Toute reproduction non autorisee est constitutive de contrefacon.</p>
 
 <h2>Droit applicable</h2>
 <p>Le present site et ses mentions legales sont regis par le droit francais.</p>
 </div>
-<footer>Clara v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -1337,7 +1390,7 @@ APP_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Clara - Application</title>
+<title>NormaCheck - Application</title>
 <style>
 :root{--p:#0f172a;--p2:#1e40af;--p3:#3b82f6;--pl:#eff6ff;--g:#22c55e;--gl:#f0fdf4;--r:#ef4444;--rl:#fef2f2;--o:#f59e0b;--ol:#fffbeb;--pu:#a855f7;--pul:#faf5ff;--tl:#0d9488;--bg:#f8fafc;--tx:#1e293b;--tx2:#64748b;--brd:#e2e8f0;--sh:0 1px 3px rgba(0,0,0,.06);--sidebar-w:240px}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1492,7 +1545,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
 <div class="sidebar" id="sidebar">
-<div class="logo"><em>Clara</em> <span>v3.4</span></div>
+<div class="logo"><em>NormaCheck</em> <span>v3.4</span></div>
 <div class="nav-group">Analyse</div>
 <div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
 <div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
@@ -1510,7 +1563,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="logout" onclick="window.location.href='/'"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">Clara v3.4.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.4.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
 """
@@ -1519,7 +1572,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 APP_HTML += """
 <!-- ===== DASHBOARD ===== -->
 <div class="sec active" id="s-dashboard">
-<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 20 fichiers max, 50 Mo max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
+<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 20 fichiers max, 500 Mo max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
 <div class="g4" id="dash-stats">
 <div class="sc blue"><div class="val" id="dash-anomalies">0</div><div class="lab">Anomalies</div></div>
 <div class="sc amber"><div class="val" id="dash-impact">0 EUR</div><div class="lab">Impact cotisations</div></div>
@@ -1547,7 +1600,7 @@ APP_HTML += """
 <div class="sec" id="s-analyse">
 <div class="card">
 <h2>Importer et analyser</h2>
-<div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>20 fichiers</strong> et <strong>50 Mo</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>20 fichiers</strong> et <strong>500 Mo</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
 <div class="uz" id="dz-analyse">
 <input type="file" id="fi-analyse" multiple accept=".pdf,.csv,.xlsx,.xls,.xml,.dsn,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.gif,.webp,.txt">
 <div class="uzi">&#128196;</div>
@@ -1555,10 +1608,6 @@ APP_HTML += """
 <p>PDF, Excel, CSV, DSN, XML, Images, TXT</p>
 </div>
 <div id="fl-analyse" style="margin:10px 0"></div>
-<div class="fmts" style="margin-top:14px">
-<div class="fopt active" data-fmt="json" onclick="selFmt(this)"><strong>JSON</strong><br><small>Structure</small></div>
-<div class="fopt" data-fmt="html" onclick="selFmt(this)"><strong>HTML</strong><br><small>Visuel</small></div>
-</div>
 <div style="display:flex;align-items:center;gap:10px;margin:12px 0;padding:12px;background:var(--pl);border-radius:10px;border:1px solid #bfdbfe">
 <input type="checkbox" id="chk-integrer" checked style="width:auto;margin:0">
 <label for="chk-integrer" style="margin:0;font-weight:500;color:var(--p);font-size:.86em;cursor:pointer">Integrer les documents dans la bibliotheque</label>
@@ -1631,7 +1680,8 @@ APP_HTML += """
 <div class="g2">
 <div>
 <label>ID facture / ecriture</label><input id="pay-id" placeholder="ID de la facture">
-<label>Statut</label><select id="pay-stat"><option value="impaye">Impaye</option><option value="paye">Paye</option><option value="partiellement_paye">Partiellement paye</option><option value="en_retard">En retard</option></select>
+<label>Statut</label><select id="pay-stat" onchange="toggleMontantPaye()"><option value="impaye">Impaye</option><option value="paye">Paye</option><option value="partiellement_paye">Partiellement paye</option><option value="en_retard">En retard</option></select>
+<div id="pay-montant-row" style="display:none"><label>Montant paye (EUR)</label><input type="number" step="0.01" id="pay-montant" placeholder="0.00"></div>
 <label>Date paiement</label><input type="date" id="pay-date">
 <label>Reference virement / justificatif</label><input id="pay-ref" placeholder="REF-VIR-2026-001">
 <button class="btn btn-green btn-f" onclick="majStatutFacture()">Mettre a jour le statut</button>
@@ -1706,7 +1756,7 @@ APP_HTML += """
 <button class="btn btn-s btn-sm" onclick="validerEcr()">&#9989; Valider</button>
 <button class="btn btn-s btn-sm" onclick="exportSection('compta')">&#128190; Exporter</button>
 </div>
-<div class="period-sel" id="period-sel">
+<div class="period-sel" id="period-sel" style="display:none">
 <div class="g3"><div><label>Debut</label><input type="date" id="gl-dd"></div><div><label>Fin</label><input type="date" id="gl-df"></div><div><button class="btn btn-blue btn-f" onclick="loadCompta()" style="margin-top:22px">Appliquer</button></div></div>
 </div>
 <div class="tc active" id="ct-journal"><div id="ct-journal-c"></div></div>
@@ -1882,19 +1932,21 @@ var destCls={"URSSAF":"badge-blue","Fiscal":"badge-purple","France Travail":"bad
 h+="<div class='anomalie sev-"+sev+"' data-toggle='1'><div class='head'><div><span class='title'>"+(c.titre||"Ecart")+"</span>";
 h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+(neg?"badge-red":"badge-green")+"'>"+(neg?"Risque":"Favorable")+"</span></div>";
 h+="<div class='montant "+(neg?"neg":"pos")+"'>"+(neg?"+":"-")+Math.abs(impact).toFixed(2)+" EUR</div></div>";
-h+="<div class='detail'><p><strong>Nature :</strong> "+(c.description||"").substring(0,300)+"</p>";
+var desc=(c.description||"").replace(/\\n/g,"<br>");
+h+="<div class='detail'><p><strong>Nature :</strong> "+desc+"</p>";
 h+="<p><strong>Categorie :</strong> "+(c.categorie||"-")+"</p>";
 h+="<p><strong>Periode :</strong> "+(c.annee||c.periode||"-")+"</p>";
 h+="<p><strong>Documents :</strong> "+(c.source||c.document||"-")+"</p>";
 h+="<p><strong>Rubriques :</strong> "+(c.rubrique||c.libelle||"-")+"</p>";
 h+="<p><strong>Incidence :</strong> "+Math.abs(impact).toFixed(2)+" EUR</p>";
 if(c.recommandation)h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128161;</span><span>"+c.recommandation+"</span></div>";
+if(c.reference_legale)h+="<div style='margin-top:6px;font-size:.8em;color:var(--tx2)'><em>Ref: "+c.reference_legale+"</em></div>";
 h+="</div></div>";});el.innerHTML=h;}
 
 function categToDest(cat){var c=cat.toLowerCase();if(c.indexOf("fiscal")>=0||c.indexOf("impot")>=0)return"Fiscal";if(c.indexOf("france travail")>=0||c.indexOf("chomage")>=0)return"France Travail";if(c.indexOf("guso")>=0||c.indexOf("spectacle")>=0)return"GUSO";return"URSSAF";}
 
 /* === ANALYSE === */
-var fichiers=[],fmtR="json";
+var fichiers=[];
 var dz=document.getElementById("dz-analyse"),fi=document.getElementById("fi-analyse");
 ["dragenter","dragover"].forEach(function(ev){dz.addEventListener(ev,function(e){e.preventDefault();});});
 dz.addEventListener("drop",function(e){e.preventDefault();addF(e.dataTransfer.files);});
@@ -1902,7 +1954,6 @@ fi.addEventListener("change",function(e){addF(e.target.files);fi.value="";});
 function addF(files){for(var i=0;i<files.length;i++){var f=files[i];var dup=false;for(var j=0;j<fichiers.length;j++){if(fichiers[j].name===f.name){dup=true;break;}}if(!dup&&fichiers.length<20)fichiers.push(f);}renderF();}
 function renderF(){var el=document.getElementById("fl-analyse");var h="";for(var i=0;i<fichiers.length;i++){h+="<div class='fi'><span class='nm'>"+fichiers[i].name+"</span><span style='color:var(--tx2);font-size:.8em'>"+(fichiers[i].size/1024).toFixed(1)+" Ko</span><button class='rm' onclick='rmF("+i+")'>&times;</button></div>";}el.innerHTML=h;document.getElementById("btn-az").disabled=fichiers.length===0;}
 function rmF(i){fichiers.splice(i,1);renderF();}
-function selFmt(el){document.querySelectorAll(".fopt").forEach(function(o){o.classList.remove("active")});el.classList.add("active");fmtR=el.getAttribute("data-fmt");}
 
 function lancerAnalyse(){
 if(!fichiers.length)return;
@@ -1912,10 +1963,9 @@ var steps=[[10,"Import..."],[25,"SHA-256..."],[40,"Parsing + OCR..."],[55,"Coher
 var si=0;var iv=setInterval(function(){if(si<steps.length){fill.style.width=steps[si][0]+"%";txt.textContent=steps[si][1];si++;}},900);
 var fd=new FormData();for(var i=0;i<fichiers.length;i++){fd.append("fichiers",fichiers[i]);}
 var integ=document.getElementById("chk-integrer").checked;
-fetch("/api/analyze?format_rapport="+fmtR+"&integrer="+integ,{method:"POST",body:fd}).then(function(resp){
+fetch("/api/analyze?format_rapport=json&integrer="+integ,{method:"POST",body:fd}).then(function(resp){
 clearInterval(iv);fill.style.width="100%";txt.textContent="Termine !";
 if(!resp.ok)return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});
-if(fmtR==="html")return resp.text().then(function(html){document.getElementById("az-dashboard").innerHTML="";document.getElementById("az-findings").innerHTML="";document.getElementById("az-reco").innerHTML="";document.getElementById("az-html-card").style.display="block";document.getElementById("az-html-frame").srcdoc=html;});
 return resp.json().then(function(data){analysisData=data;showJsonResults(data);});
 }).then(function(){setTimeout(function(){prg.style.display="none";},800);document.getElementById("res-analyse").style.display="block";}).catch(function(e){clearInterval(iv);prg.style.display="none";toast(e.message);btn.disabled=false;});
 }
@@ -1926,7 +1976,8 @@ document.getElementById("az-dashboard").innerHTML="<div class='sc blue'><div cla
 renderAnomalies("az-findings",data.constats||[]);
 var recos=data.recommandations||[];var rh="";for(var i=0;i<recos.length;i++){rh+="<div class='al info'><span class='ai'>&#128161;</span><span><strong>#"+(i+1)+"</strong> "+(recos[i].description||recos[i].titre||"")+"</span></div>";}
 document.getElementById("az-reco").innerHTML=rh||"<p style='color:var(--tx2)'>Aucune.</p>";
-document.getElementById("az-html-card").style.display="none";document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
+if(data.html_report){document.getElementById("az-html-card").style.display="block";document.getElementById("az-html-frame").srcdoc=data.html_report;}else{document.getElementById("az-html-card").style.display="none";}
+document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
 function resetAz(){fichiers=[];renderF();document.getElementById("res-analyse").style.display="none";}
 
 /* === BIBLIOTHEQUE === */
@@ -1985,16 +2036,20 @@ h+="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th clas
 for(var i=0;i<d.lignes.length;i++){var l=d.lignes[i];h+="<tr"+(hasJustif?"":" class='sans-just'")+"><td>"+l.compte+"</td><td>"+l.libelle+"</td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}h+="</table>";
 document.getElementById("fact-saisie-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 
+function toggleMontantPaye(){var sel=document.getElementById("pay-stat").value;document.getElementById("pay-montant-row").style.display=(sel==="partiellement_paye")?"block":"none";}
 function majStatutFacture(){
-var fd=new FormData();fd.append("facture_id",document.getElementById("pay-id").value);fd.append("statut",document.getElementById("pay-stat").value);fd.append("date_paiement",document.getElementById("pay-date").value);fd.append("reference_paiement",document.getElementById("pay-ref").value);
+var statut=document.getElementById("pay-stat").value;
+var fd=new FormData();fd.append("facture_id",document.getElementById("pay-id").value);fd.append("statut",statut);fd.append("date_paiement",document.getElementById("pay-date").value);fd.append("reference_paiement",document.getElementById("pay-ref").value);
+if(statut==="partiellement_paye"){fd.append("montant_paye",document.getElementById("pay-montant").value||"0");}
 fetch("/api/factures/statut",{method:"POST",body:fd}).then(function(r){if(!r.ok)throw new Error("Erreur");return r.json();}).then(function(){toast("Statut mis a jour.","ok");loadPayStatuses();}).catch(function(e){toast(e.message);});}
 
 function loadPayStatuses(){
 fetch("/api/factures/statuts").then(function(r){return r.json();}).then(function(list){
 var el=document.getElementById("pay-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun statut enregistre.</p>";return;}
-var h="<table><tr><th>Facture</th><th>Statut</th><th>Date paiement</th><th>Reference</th></tr>";
-for(var i=0;i<list.length;i++){var s=list[i];var cls=s.statut==="paye"?"badge-paye":(s.statut==="en_retard"?"badge-red":"badge-impaye");
-h+="<tr><td>"+s.facture_id+"</td><td><span class='badge "+cls+"'>"+s.statut+"</span></td><td>"+(s.date_paiement||"-")+"</td><td>"+(s.reference_paiement||"-")+"</td></tr>";}
+var h="<table><tr><th>Facture</th><th>Statut</th><th>Montant paye</th><th>Date paiement</th><th>Reference</th></tr>";
+for(var i=0;i<list.length;i++){var s=list[i];var cls=s.statut==="paye"?"badge-paye":(s.statut==="en_retard"?"badge-red":(s.statut==="partiellement_paye"?"badge-amber":"badge-impaye"));
+var mp=s.montant_paye?s.montant_paye.toFixed(2)+" EUR":"-";
+h+="<tr><td>"+s.facture_id+"</td><td><span class='badge "+cls+"'>"+s.statut.replace(/_/g," ")+"</span></td><td class='num'>"+mp+"</td><td>"+(s.date_paiement||"-")+"</td><td>"+(s.reference_paiement||"-")+"</td></tr>";}
 h+="</table>";el.innerHTML=h;}).catch(function(){});}
 
 /* === DSN GENERATION === */
@@ -2250,7 +2305,7 @@ if(!el){toast("Rien a exporter.","warn");return;}
 var tables=el.querySelectorAll("table");
 if(tables.length===0){toast("Aucune donnee tabulaire.","warn");return;}
 var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll("tr");for(var i=0;i<rows.length;i++){var cells=rows[i].querySelectorAll("th,td");var line=[];for(var j=0;j<cells.length;j++){var txt=cells[j].textContent.replace(/"/g,'""');line.push('"'+txt+'"');}csv+=line.join(";")+"\\n";}csv+="\\n";}
-var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="clara_"+name+".csv";a.click();toast("Export telecharge.","ok");}
+var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_"+name+".csv";a.click();toast("Export telecharge.","ok");}
 
 /* === TOAST === */
 function toast(msg,type){

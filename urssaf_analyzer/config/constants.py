@@ -464,5 +464,7 @@ SUPPORTED_EXTENSIONS = {
     ".tif": "image",
     ".gif": "image",
     ".webp": "image",
+    ".heic": "image",
+    ".heif": "image",
     ".txt": "texte",
 }
