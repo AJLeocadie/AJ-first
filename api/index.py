@@ -254,6 +254,25 @@ async def analyser_documents(
             periode_str = ""
             if decl.periode and decl.periode.debut:
                 periode_str = decl.periode.debut.strftime("%Y%m")
+            # Determine document nature from content (not file format)
+            fmt = (decl.type_declaration or "").upper()
+            nb_cots = len(decl.cotisations)
+            nb_sal = len(decl.employes)
+            nature = "Document"
+            if fmt in ("DSN", "DSN/XML"):
+                nature = "Declaration sociale nominative (DSN)"
+            elif nb_cots > 0 and nb_sal == 1:
+                nature = "Bulletin de paie"
+            elif nb_cots > 0 and nb_sal > 1:
+                nature = "Livre de paie / Recapitulatif cotisations"
+            elif nb_sal > 0 and nb_cots == 0:
+                nature = "Liste du personnel / Registre"
+            elif float(decl.masse_salariale_brute) > 0:
+                nature = "Recapitulatif de paie"
+            elif fmt == "XML/BORDEREAU":
+                nature = "Bordereau recapitulatif de cotisations (BRC)"
+            elif fmt in ("PDF", "CSV", "EXCEL", "XML"):
+                nature = "Document comptable / social"
             declarations_out.append({
                 "type": decl.type_declaration,
                 "reference": decl.reference,
@@ -262,6 +281,9 @@ async def analyser_documents(
                 "salaries": salaries,
                 "masse_salariale_brute": float(decl.masse_salariale_brute),
                 "effectif_declare": decl.effectif_declare,
+                "nature": nature,
+                "nb_cotisations": nb_cots,
+                "nb_salaries": nb_sal,
             })
 
         # Auto-generer les ecritures comptables a partir des declarations
@@ -299,6 +321,12 @@ async def analyser_documents(
         except Exception:
             pass
 
+        # Build file info from actual uploaded files
+        fichiers_info = []
+        for i, f in enumerate(fichiers):
+            ext = Path(f.filename).suffix.lower() if f.filename else ""
+            fichiers_info.append({"nom": f.filename, "extension": ext, "index": i})
+
         return {
             "synthese": {
                 "nb_constats": len(findings),
@@ -312,6 +340,8 @@ async def analyser_documents(
             "constats": constats,
             "recommandations": recommandations,
             "declarations": declarations_out,
+            "fichiers_info": fichiers_info,
+            "mode_analyse": mode_analyse,
             "html_report": html_report,
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
 
@@ -1020,6 +1050,82 @@ async def creer_contrat(
     }
 
     _rh_contrats.append(contrat)
+
+    # === Effets en cascade de la creation du contrat ===
+    cascading = {"dpae": None, "planning": [], "visite_medicale": None, "ecriture_comptable": None}
+
+    # 1. Alerte DPAE automatique (art. L.1221-10 CT)
+    cascading["dpae"] = {
+        "type": "dpae_obligatoire",
+        "urgence": "haute",
+        "message": f"DPAE obligatoire pour {prenom_salarie} {nom_salarie} avant le {date_debut}. A effectuer aupres de l'URSSAF.",
+        "reference": "Art. L.1221-10 CT - Au plus tard dans les 8 jours precedant l'embauche",
+        "action_requise": "Effectuer la DPAE sur net-entreprises.fr ou aupres de l'URSSAF",
+    }
+
+    # 2. Visite medicale d'embauche (VIP) dans les 3 mois
+    try:
+        dd = date.fromisoformat(date_debut)
+        from datetime import timedelta
+        date_limite_visite = (dd + timedelta(days=90)).isoformat()
+        visite = {
+            "id": str(uuid.uuid4())[:8],
+            "salarie_id": salarie_id,
+            "type_visite": "embauche",
+            "date_visite": "",
+            "resultat": "",
+            "remarques": "Visite auto-generee a la creation du contrat",
+            "date_prochaine": date_limite_visite,
+            "date_creation": datetime.now().isoformat(),
+        }
+        _rh_visites_med.append(visite)
+        cascading["visite_medicale"] = {"date_limite": date_limite_visite, "reference": "Art. R.4624-10 CT"}
+    except (ValueError, TypeError):
+        pass
+
+    # 3. Planning initial (Lun-Ven premiere semaine)
+    try:
+        dd = date.fromisoformat(date_debut)
+        from datetime import timedelta
+        for i in range(5):
+            jour = dd + timedelta(days=i)
+            if jour.weekday() < 5:
+                entry = {
+                    "id": str(uuid.uuid4())[:8],
+                    "salarie_id": salarie_id,
+                    "date": jour.isoformat(),
+                    "heure_debut": "09:00",
+                    "heure_fin": "17:00",
+                    "type_poste": "normal",
+                    "date_creation": datetime.now().isoformat(),
+                }
+                _rh_planning.append(entry)
+                cascading["planning"].append(entry["date"])
+    except (ValueError, TypeError):
+        pass
+
+    # 4. Ecriture comptable provision salaire
+    try:
+        moteur = get_moteur()
+        from urssaf_analyzer.comptabilite.ecritures import Ecriture, LigneEcriture, TypeJournal
+        dp = date.fromisoformat(date_debut)
+        provision = Ecriture(
+            journal=TypeJournal.PAIE,
+            date_ecriture=dp,
+            date_piece=dp,
+            libelle=f"Provision salaire {prenom_salarie} {nom_salarie} - {type_contrat}",
+            lignes=[
+                LigneEcriture(compte="641000", libelle=f"Salaire brut {prenom_salarie} {nom_salarie}", debit=Decimal(str(brut)), credit=Decimal("0")),
+                LigneEcriture(compte="421000", libelle=f"Net a payer {prenom_salarie} {nom_salarie}", debit=Decimal("0"), credit=Decimal(str(net_estime))),
+                LigneEcriture(compte="431000", libelle=f"Charges salariales {prenom_salarie} {nom_salarie}", debit=Decimal("0"), credit=Decimal(str(round(brut - net_estime, 2)))),
+            ],
+        )
+        moteur.ecritures.append(provision)
+        cascading["ecriture_comptable"] = {"id": provision.id, "montant_brut": brut}
+    except Exception:
+        pass
+
+    contrat["cascading_effects"] = cascading
     log_action("utilisateur", "creation_contrat", f"{type_contrat} {prenom_salarie} {nom_salarie} - {poste}")
     return contrat
 
@@ -1037,6 +1143,401 @@ async def detail_contrat(contrat_id: str):
         if c["id"] == contrat_id:
             return c
     raise HTTPException(404, "Contrat non trouve")
+
+
+@app.get("/api/rh/contrats/{contrat_id}/document")
+async def document_contrat(contrat_id: str):
+    """Genere le document contrat de travail en HTML (visualisable et imprimable)."""
+    contrat = None
+    for c in _rh_contrats:
+        if c["id"] == contrat_id:
+            contrat = c
+            break
+    if not contrat:
+        raise HTTPException(404, "Contrat non trouve")
+
+    ent = _entete_config
+    header_html = ""
+    if ent.get("nom_entreprise"):
+        header_html = f"""<div style="text-align:center;margin-bottom:30px;border-bottom:2px solid #1e40af;padding-bottom:20px">
+<h1 style="color:#1e40af;margin:0">{ent.get("nom_entreprise","")}</h1>
+<p style="color:#64748b;margin:4px 0">{ent.get("forme_juridique","")} - Capital: {ent.get("capital","")}</p>
+<p style="color:#64748b;margin:4px 0">{ent.get("adresse","")}</p>
+<p style="color:#64748b;margin:4px 0">SIRET: {ent.get("siret","")} - NAF: {ent.get("code_naf","")}</p>
+<p style="color:#64748b;margin:4px 0">Tel: {ent.get("telephone","")} - Email: {ent.get("email","")}</p>
+</div>"""
+
+    mentions_html = ""
+    for m in contrat.get("mentions_legales", []):
+        mentions_html += f"<li>{m}</li>"
+
+    type_titre = contrat["type_contrat"]
+    if type_titre == "CDI":
+        type_titre = "Contrat de travail a duree indeterminee"
+    elif type_titre == "CDD":
+        type_titre = "Contrat de travail a duree determinee"
+
+    html = f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<title>Contrat de travail - {contrat["prenom_salarie"]} {contrat["nom_salarie"]}</title>
+<style>
+body{{font-family:'Segoe UI',system-ui,sans-serif;max-width:800px;margin:0 auto;padding:40px;color:#1e293b;line-height:1.7}}
+h1{{color:#1e40af;text-align:center;font-size:1.4em}} h2{{color:#1e40af;font-size:1.1em;margin-top:24px;border-bottom:1px solid #e2e8f0;padding-bottom:6px}}
+.info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}}
+.info-item{{padding:10px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0}}
+.info-item label{{font-weight:700;color:#475569;font-size:.85em}} .info-item span{{display:block;font-size:.95em}}
+ul{{padding-left:20px}} li{{margin:6px 0}}
+.signature{{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:60px;padding-top:20px;border-top:1px solid #e2e8f0}}
+.sig-block{{text-align:center}} .sig-block p{{margin:4px 0}} .sig-line{{border-bottom:1px solid #94a3b8;height:60px;margin-top:20px}}
+.print-btn{{position:fixed;top:20px;right:20px;padding:10px 20px;background:#1e40af;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:.9em;font-family:inherit}}
+.print-btn:hover{{background:#1e3a8a}}
+@media print{{.print-btn{{display:none}}}}
+</style></head><body>
+<button class="print-btn" onclick="window.print()">Imprimer / PDF</button>
+{header_html}
+<h1>{type_titre}</h1>
+<p style="text-align:center;color:#64748b">Fait le {contrat.get("date_creation","")[:10]}</p>
+
+<h2>Article 1 - Parties</h2>
+<div class="info-grid">
+<div class="info-item"><label>Employeur</label><span>{ent.get("nom_entreprise","[A renseigner dans Configuration]")}</span></div>
+<div class="info-item"><label>Salarie(e)</label><span>{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</span></div>
+</div>
+
+<h2>Article 2 - Engagement</h2>
+<div class="info-grid">
+<div class="info-item"><label>Poste</label><span>{contrat["poste"]}</span></div>
+<div class="info-item"><label>Type de contrat</label><span>{contrat["type_contrat"]}</span></div>
+<div class="info-item"><label>Date de debut</label><span>{contrat["date_debut"]}</span></div>
+<div class="info-item"><label>Date de fin</label><span>{contrat.get("date_fin") or "Indeterminee"}</span></div>
+</div>
+
+<h2>Article 3 - Remuneration</h2>
+<div class="info-grid">
+<div class="info-item"><label>Salaire brut mensuel</label><span>{contrat["salaire_brut"]:.2f} EUR</span></div>
+<div class="info-item"><label>Net estime</label><span>{contrat["net_estime"]:.2f} EUR</span></div>
+</div>
+
+<h2>Article 4 - Duree du travail</h2>
+<div class="info-grid">
+<div class="info-item"><label>Temps de travail</label><span>{"Temps complet" if contrat["temps_travail"]=="complet" else "Temps partiel"}</span></div>
+<div class="info-item"><label>Duree hebdomadaire</label><span>{contrat["duree_hebdo"]}h</span></div>
+</div>
+
+<h2>Article 5 - Periode d essai</h2>
+<p>La periode d essai est fixee a <strong>{contrat["periode_essai_jours"]} jours</strong> conformement aux dispositions des articles L.1221-19 a L.1221-26 du Code du travail.</p>
+
+<h2>Article 6 - Convention collective</h2>
+<p>Le present contrat est regi par la convention collective: <strong>{contrat.get("convention_collective") or "[A preciser]"}</strong></p>
+
+<h2>Mentions legales obligatoires</h2>
+<ul>{mentions_html}</ul>
+
+<div class="signature">
+<div class="sig-block"><p><strong>L employeur</strong></p><p style="font-size:.85em;color:#64748b">Nom, qualite, signature</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
+<div class="sig-block"><p><strong>Le(la) salarie(e)</strong></p><p style="font-size:.85em;color:#64748b">{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
+</div>
+<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.5 - Ce document doit etre signe en deux exemplaires originaux</p>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+# ======================================================================
+# RH - BULLETINS DE PAIE
+# ======================================================================
+
+_rh_bulletins: list[dict] = []
+
+
+@app.post("/api/rh/bulletins/generer")
+async def generer_bulletin(
+    contrat_id: str = Form(""),
+    nom_salarie: str = Form(""),
+    prenom_salarie: str = Form(""),
+    mois: str = Form(""),
+    salaire_brut: str = Form("0"),
+    est_cadre: str = Form("false"),
+    heures_supplementaires: str = Form("0"),
+    primes: str = Form("0"),
+    avantages_nature: str = Form("0"),
+    absences_jours: str = Form("0"),
+):
+    """Genere un bulletin de salaire conforme R.3243-1 du Code du travail."""
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+
+    # Si contrat_id fourni, recuperer les infos
+    contrat = None
+    if contrat_id:
+        for c in _rh_contrats:
+            if c["id"] == contrat_id:
+                contrat = c
+                nom_salarie = nom_salarie or c["nom_salarie"]
+                prenom_salarie = prenom_salarie or c["prenom_salarie"]
+                salaire_brut = salaire_brut if float(salaire_brut or 0) > 0 else str(c["salaire_brut"])
+                est_cadre = "true" if c.get("convention_collective", "").lower().find("cadre") >= 0 else est_cadre
+                break
+
+    brut_base = Decimal(str(float(salaire_brut or "0")))
+    hs = Decimal(str(float(heures_supplementaires or "0")))
+    prime = Decimal(str(float(primes or "0")))
+    an = Decimal(str(float(avantages_nature or "0")))
+    abs_j = int(float(absences_jours or "0"))
+
+    # Retenue absences (base 21.67 jours ouvrables/mois)
+    retenue_abs = round(float(brut_base) / 21.67 * abs_j, 2) if abs_j > 0 else 0
+
+    # Majoration HS (25% pour les 8 premieres heures, 50% au-dela - art. L.3121-36 CT)
+    taux_horaire = round(float(brut_base) / 151.67, 2)
+    if float(hs) > 0:
+        hs_25 = min(float(hs), 8) * taux_horaire * 1.25
+        hs_50 = max(0, float(hs) - 8) * taux_horaire * 1.50
+        montant_hs = round(hs_25 + hs_50, 2)
+    else:
+        montant_hs = 0
+
+    brut_total = float(brut_base) + montant_hs + float(prime) + float(an) - retenue_abs
+
+    calc = ContributionRules()
+    bulletin_data = calc.calculer_bulletin_complet(Decimal(str(brut_total)), est_cadre=est_cadre.lower() == "true")
+
+    bulletin = {
+        "id": str(uuid.uuid4())[:8],
+        "contrat_id": contrat_id,
+        "nom_salarie": nom_salarie,
+        "prenom_salarie": prenom_salarie,
+        "mois": mois or date.today().strftime("%Y%m"),
+        "salaire_base": float(brut_base),
+        "heures_supplementaires": float(hs),
+        "montant_hs": montant_hs,
+        "primes": float(prime),
+        "avantages_nature": float(an),
+        "retenue_absences": retenue_abs,
+        "brut_total": brut_total,
+        "lignes": bulletin_data.get("lignes", []),
+        "net_avant_impot": float(bulletin_data.get("net_avant_impot", 0)),
+        "total_patronal": float(bulletin_data.get("total_patronal", 0)),
+        "total_salarial": float(bulletin_data.get("total_salarial", 0)),
+        "net_a_payer": float(bulletin_data.get("net_avant_impot", brut_total * Decimal("0.78"))),
+        "cout_total_employeur": float(bulletin_data.get("cout_total_employeur", brut_total * Decimal("1.45"))),
+        "mentions_obligatoires": [
+            "Mentions conformes a l'article R.3243-1 du Code du travail",
+            "Convention collective applicable",
+            "Nombre d'heures de travail",
+            "Nature et montant des accessoires de salaire",
+            "Montant de la remuneration brute",
+            "Montant et assiette des cotisations et contributions sociales",
+            "Net a payer avant impot sur le revenu",
+            "Montant net social (depuis 01/07/2023)",
+            "Cumul imposable annuel (Net fiscal)",
+        ],
+        "date_generation": datetime.now().isoformat(),
+    }
+
+    _rh_bulletins.append(bulletin)
+    log_action("utilisateur", "generation_bulletin", f"{prenom_salarie} {nom_salarie} - {mois}")
+    return bulletin
+
+
+@app.get("/api/rh/bulletins")
+async def liste_bulletins():
+    """Liste tous les bulletins de paie generes."""
+    return _rh_bulletins
+
+
+@app.get("/api/rh/bulletins/{bulletin_id}/document")
+async def document_bulletin(bulletin_id: str):
+    """Genere le bulletin de salaire en HTML visualisable."""
+    bulletin = None
+    for b in _rh_bulletins:
+        if b["id"] == bulletin_id:
+            bulletin = b
+            break
+    if not bulletin:
+        raise HTTPException(404, "Bulletin non trouve")
+
+    ent = _entete_config
+    header = ""
+    if ent.get("nom_entreprise"):
+        header = f"<div style='text-align:center;margin-bottom:20px'><h2 style='color:#1e40af;margin:0'>{ent['nom_entreprise']}</h2><p style='color:#64748b'>{ent.get('adresse','')} - SIRET: {ent.get('siret','')}</p></div>"
+
+    lignes_html = ""
+    for l in bulletin.get("lignes", []):
+        lib = l.get("libelle", "") if isinstance(l, dict) else str(l)
+        mp = f"{l.get('montant_patronal',0):.2f}" if isinstance(l, dict) else ""
+        ms = f"{l.get('montant_salarial',0):.2f}" if isinstance(l, dict) else ""
+        lignes_html += f"<tr><td>{lib}</td><td class='num'>{mp}</td><td class='num'>{ms}</td></tr>"
+
+    html = f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<title>Bulletin de paie - {bulletin["prenom_salarie"]} {bulletin["nom_salarie"]} - {bulletin["mois"]}</title>
+<style>body{{font-family:'Segoe UI',sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#1e293b}}
+h1{{color:#1e40af;text-align:center;font-size:1.3em}}
+table{{width:100%;border-collapse:collapse;margin:12px 0}}th{{background:#1e40af;color:#fff;padding:8px 12px;text-align:left;font-size:.85em}}
+td{{padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:.88em}}.num{{text-align:right;font-family:monospace}}
+.total{{font-weight:700;background:#eff6ff}}
+.print-btn{{position:fixed;top:20px;right:20px;padding:10px 20px;background:#1e40af;color:#fff;border:none;border-radius:8px;cursor:pointer}}
+@media print{{.print-btn{{display:none}}}}</style></head><body>
+<button class="print-btn" onclick="window.print()">Imprimer / PDF</button>
+{header}
+<h1>BULLETIN DE PAIE</h1>
+<p style="text-align:center;color:#64748b">Periode: {bulletin["mois"]} | Salarie: {bulletin["prenom_salarie"]} {bulletin["nom_salarie"]}</p>
+<table>
+<tr><th>Rubrique</th><th class="num">Part patronale</th><th class="num">Part salariale</th></tr>
+<tr><td><strong>Salaire de base</strong></td><td class="num">{bulletin["salaire_base"]:.2f}</td><td></td></tr>
+{"<tr><td>Heures supplementaires</td><td class='num'>" + f"{bulletin['montant_hs']:.2f}" + "</td><td></td></tr>" if bulletin["montant_hs"] > 0 else ""}
+{"<tr><td>Primes</td><td class='num'>" + f"{bulletin['primes']:.2f}" + "</td><td></td></tr>" if bulletin["primes"] > 0 else ""}
+{"<tr><td>Avantages en nature</td><td class='num'>" + f"{bulletin['avantages_nature']:.2f}" + "</td><td></td></tr>" if bulletin["avantages_nature"] > 0 else ""}
+{"<tr><td style='color:#ef4444'>Retenue absences (-" + str(bulletin['retenue_absences']) + "j)</td><td class='num' style='color:#ef4444'>-" + f"{bulletin['retenue_absences']:.2f}" + "</td><td></td></tr>" if bulletin["retenue_absences"] > 0 else ""}
+<tr class="total"><td>BRUT TOTAL</td><td class="num">{bulletin["brut_total"]:.2f}</td><td></td></tr>
+{lignes_html}
+<tr class="total"><td>Total cotisations</td><td class="num">{bulletin["total_patronal"]:.2f}</td><td class="num">{bulletin["total_salarial"]:.2f}</td></tr>
+<tr class="total" style="background:#f0fdf4"><td>NET A PAYER AVANT IMPOT</td><td></td><td class="num" style="font-size:1.1em">{bulletin["net_a_payer"]:.2f} EUR</td></tr>
+<tr class="total" style="background:#eff6ff"><td>COUT TOTAL EMPLOYEUR</td><td class="num">{bulletin["cout_total_employeur"]:.2f} EUR</td><td></td></tr>
+</table>
+<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.5.</p>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+# ======================================================================
+# COMPTABILITE - SUGGESTIONS ET SOUS-COMPTES
+# ======================================================================
+
+_sous_comptes: list[dict] = []
+
+
+@app.get("/api/comptabilite/suggestions")
+async def suggestions_comptes(compte: str = Query("")):
+    """Suggestions de comptes pour l'assistance a la saisie d'ecritures."""
+    pc = get_plan_comptable()
+    suggestions = []
+    contreparties = []
+
+    if compte:
+        # Recherche par numero ou libelle
+        try:
+            resultats = pc.rechercher(compte)
+            for r in resultats[:15]:
+                suggestions.append({"numero": r.numero, "libelle": r.libelle})
+        except Exception:
+            pass
+
+        # Aussi chercher dans les sous-comptes manuels
+        for sc in _sous_comptes:
+            if compte in sc["numero"] or compte.lower() in sc["libelle"].lower():
+                suggestions.append({"numero": sc["numero"], "libelle": sc["libelle"]})
+
+        # Suggestions de contreparties coherentes
+        contreparties_map = {
+            "601": [("401", "Fournisseurs")],
+            "602": [("401", "Fournisseurs")],
+            "606": [("401", "Fournisseurs")],
+            "607": [("401", "Fournisseurs")],
+            "611": [("401", "Fournisseurs")],
+            "613": [("401", "Fournisseurs")],
+            "616": [("401", "Fournisseurs")],
+            "621": [("401", "Fournisseurs")],
+            "625": [("401", "Fournisseurs"), ("512", "Banque")],
+            "626": [("401", "Fournisseurs"), ("512", "Banque")],
+            "627": [("401", "Fournisseurs"), ("512", "Banque")],
+            "635": [("447", "Autres impots et taxes")],
+            "641": [("421", "Personnel - Remuneration due")],
+            "645": [("431", "Securite sociale"), ("437", "Autres org. sociaux")],
+            "681": [("28", "Amortissements"), ("39", "Provisions")],
+            "401": [("512", "Banque")],
+            "411": [("701", "Ventes produits finis"), ("706", "Prestations services"), ("707", "Ventes marchandises")],
+            "421": [("512", "Banque")],
+            "431": [("512", "Banque")],
+            "512": [("401", "Fournisseurs"), ("411", "Clients"), ("580", "Virements internes")],
+            "701": [("411", "Clients")],
+            "706": [("411", "Clients")],
+            "707": [("411", "Clients")],
+        }
+        prefix = compte[:3] if len(compte) >= 3 else compte
+        for p, cps in contreparties_map.items():
+            if prefix.startswith(p) or p.startswith(prefix):
+                for num, lib in cps:
+                    contreparties.append({"numero": num + "000", "libelle": lib})
+
+    return {"suggestions": suggestions[:15], "contreparties": contreparties[:10]}
+
+
+@app.post("/api/comptabilite/sous-compte")
+async def creer_sous_compte(
+    compte_parent: str = Form(...),
+    libelle: str = Form(...),
+):
+    """Cree un sous-compte du plan comptable (ex: 401001 pour fournisseur specifique)."""
+    pc = get_plan_comptable()
+
+    # Verifier que le compte parent existe (au moins la racine)
+    racine = compte_parent[:3]
+    parent_valide = False
+    try:
+        resultats = pc.rechercher(racine)
+        if resultats:
+            parent_valide = True
+    except Exception:
+        pass
+    if not parent_valide:
+        for cpt_num in pc.comptes:
+            if cpt_num.startswith(racine):
+                parent_valide = True
+                break
+
+    if not parent_valide:
+        raise HTTPException(400, f"Compte racine {racine} introuvable dans le plan comptable national")
+
+    # Generer le prochain numero de sous-compte
+    existants = [sc["numero"] for sc in _sous_comptes if sc["numero"].startswith(compte_parent)]
+    if existants:
+        dernier = max(int(n) for n in existants)
+        nouveau_num = str(dernier + 1)
+    else:
+        nouveau_num = compte_parent + "001" if len(compte_parent) <= 4 else compte_parent + "1"
+
+    sous_compte = {
+        "numero": nouveau_num,
+        "libelle": libelle,
+        "compte_parent": compte_parent,
+        "date_creation": datetime.now().isoformat(),
+    }
+    _sous_comptes.append(sous_compte)
+    log_action("utilisateur", "creation_sous_compte", f"{nouveau_num} - {libelle}")
+    return sous_compte
+
+
+# ======================================================================
+# RH - ALERTES PERSONNALISABLES
+# ======================================================================
+
+_alertes_config: list[dict] = []
+
+
+@app.post("/api/rh/alertes/personnaliser")
+async def personnaliser_alerte(
+    type_alerte: str = Form(...),
+    actif: str = Form("true"),
+    delai_jours: str = Form("30"),
+    message_personnalise: str = Form(""),
+):
+    """Personnalise les parametres d'une alerte RH."""
+    config_alerte = {
+        "id": str(uuid.uuid4())[:8],
+        "type_alerte": type_alerte,
+        "actif": actif.lower() == "true",
+        "delai_jours": int(delai_jours or "30"),
+        "message_personnalise": message_personnalise,
+        "date_modification": datetime.now().isoformat(),
+    }
+    # Remplacer si meme type existe
+    _alertes_config[:] = [a for a in _alertes_config if a["type_alerte"] != type_alerte]
+    _alertes_config.append(config_alerte)
+    return config_alerte
+
+
+@app.get("/api/rh/alertes/config")
+async def liste_config_alertes():
+    """Liste la configuration des alertes."""
+    return _alertes_config
 
 
 # ======================================================================
@@ -1819,33 +2320,146 @@ async def get_rh_alertes():
         except (ValueError, TypeError):
             pass
 
-    # --- 4. Prevoyance obligatoire si effectif >= 1 ---
+    # --- 4. Obligations legales selon effectif ---
     nb_actifs = sum(1 for c in _rh_contrats if c.get("statut") == "actif")
+
+    # 4a. Prevoyance obligatoire cadres (ANI 17/11/2017)
+    nb_cadres = sum(1 for c in _rh_contrats if c.get("statut") == "actif" and "cadre" in (c.get("convention_collective", "") or "").lower())
     if nb_actifs >= 1:
         alertes.append({
             "id": str(uuid.uuid4())[:8],
             "type": "prevoyance_obligatoire",
-            "urgence": "info",
-            "message": (
-                f"Rappel: La prevoyance est obligatoire pour les cadres "
-                f"(ANI du 17/11/2017). Effectif actif: {nb_actifs} salarie(s)."
-            ),
-            "reference": "ANI du 17 novembre 2017 / Convention collective",
-            "action_requise": "Verifier la mise en place d'un contrat de prevoyance",
+            "urgence": "moyenne",
+            "titre": "Prevoyance obligatoire cadres",
+            "description": f"La prevoyance deces est obligatoire pour tous les cadres (ANI du 17/11/2017). Effectif actif: {nb_actifs}. Le non-respect expose l'employeur a la prise en charge des garanties sur ses fonds propres.",
+            "reference": "ANI du 17/11/2017 - Art. 7 CCN Cadres du 14/03/1947",
+            "action_requise": "Verifier la mise en place d'un contrat de prevoyance aupres d'un organisme assureur",
+            "echeance": "",
+            "incidence_legale": "En l'absence de contrat, l'employeur doit assumer sur ses fonds propres le versement du capital deces (3x plafond annuel SS) et le maintien de salaire.",
         })
 
-    # --- 5. Interessement obligatoire si effectif >= 50 ---
+    # 4b. Mutuelle obligatoire (ANI 14/06/2013 - Loi 2016)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "mutuelle_obligatoire",
+            "urgence": "moyenne",
+            "titre": "Complementaire sante obligatoire",
+            "description": f"Depuis le 01/01/2016, tous les employeurs doivent proposer une couverture complementaire sante collective. Part employeur min 50%. Effectif: {nb_actifs}.",
+            "reference": "Art. L.911-7 CSS - ANI du 11/01/2013 generalise par loi du 14/06/2013",
+            "action_requise": "Verifier la mise en place d'une complementaire sante avec participation employeur >= 50%",
+            "echeance": "",
+            "incidence_legale": "Amende et redressement URSSAF sur les contributions patronales (reintegration dans l'assiette de cotisations).",
+        })
+
+    # 4c. DUERP obligatoire (art. R.4121-1 CT)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "duerp_obligatoire",
+            "urgence": "moyenne",
+            "titre": "Document unique d'evaluation des risques (DUERP)",
+            "description": "Le DUERP est obligatoire des le 1er salarie. Mise a jour annuelle ou lors de tout changement significatif.",
+            "reference": "Art. R.4121-1 a R.4121-4 CT - Art. L.4121-3 CT",
+            "action_requise": "Verifier l'existence et la mise a jour du DUERP",
+            "echeance": "",
+            "incidence_legale": "Contravention de 5eme classe (1500 EUR). Responsabilite penale en cas d'accident du travail.",
+        })
+
+    # 4d. Registre unique du personnel (art. L.1221-13 CT)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "registre_personnel",
+            "urgence": "info",
+            "titre": "Registre unique du personnel",
+            "description": "Le registre unique du personnel est obligatoire des le 1er salarie. Doit mentionner nom, prenom, nationalite, emploi, qualification, dates d'entree et sortie.",
+            "reference": "Art. L.1221-13 CT",
+            "action_requise": "Verifier la tenue a jour du registre unique du personnel",
+            "echeance": "",
+            "incidence_legale": "Contravention de 4eme classe (750 EUR par salarie concerne).",
+        })
+
+    # 4e. CSE obligatoire si >= 11 salaries (art. L.2311-2 CT)
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "cse_obligatoire",
+            "urgence": "moyenne",
+            "titre": "Comite social et economique (CSE)",
+            "description": f"Le CSE est obligatoire dans les entreprises d'au moins 11 salaries pendant 12 mois consecutifs. Effectif: {nb_actifs}.",
+            "reference": "Art. L.2311-2 CT",
+            "action_requise": "Organiser les elections du CSE si non fait",
+            "echeance": "",
+            "incidence_legale": "Delit d'entrave (art. L.2317-1 CT) : 1 an d'emprisonnement et 7500 EUR d'amende.",
+        })
+
+    # 4f. Participation obligatoire si >= 50 salaries
     if nb_actifs >= 50:
         alertes.append({
             "id": str(uuid.uuid4())[:8],
-            "type": "interessement_participation",
+            "type": "participation_obligatoire",
             "urgence": "moyenne",
-            "message": (
-                f"Participation obligatoire pour les entreprises de 50 salaries et plus. "
-                f"Effectif actuel: {nb_actifs}."
-            ),
-            "reference": "Art. L.3322-2 CT - Mise en place obligatoire de la participation",
+            "titre": "Accord de participation obligatoire",
+            "description": f"Participation aux resultats obligatoire pour les entreprises >= 50 salaries. Effectif: {nb_actifs}.",
+            "reference": "Art. L.3322-2 CT",
             "action_requise": "Verifier la mise en place d'un accord de participation",
+            "echeance": "",
+            "incidence_legale": "Perte des exonerations sociales et fiscales sur l'ensemble de l'epargne salariale.",
+        })
+
+    # 4g. Reglement interieur obligatoire si >= 50 salaries
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "reglement_interieur",
+            "urgence": "moyenne",
+            "titre": "Reglement interieur obligatoire",
+            "description": f"Le reglement interieur est obligatoire dans les entreprises >= 50 salaries. Effectif: {nb_actifs}.",
+            "reference": "Art. L.1311-2 CT",
+            "action_requise": "Verifier l'existence et la conformite du reglement interieur",
+            "echeance": "",
+            "incidence_legale": "Sanctions disciplinaires potentiellement inopposables aux salaries.",
+        })
+
+    # 4h. Index egalite pro si >= 50 salaries
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "index_egalite_pro",
+            "urgence": "moyenne",
+            "titre": "Index egalite professionnelle",
+            "description": f"Publication obligatoire de l'index egalite femmes-hommes avant le 1er mars. Effectif: {nb_actifs}.",
+            "reference": "Art. L.1142-8 CT - Decret n2019-15 du 08/01/2019",
+            "action_requise": "Calculer et publier l'index egalite professionnelle",
+            "echeance": "01 mars de chaque annee",
+            "incidence_legale": "Penalite financiere jusqu'a 1% de la masse salariale.",
+        })
+
+    # 4i. Bilan social si >= 300 salaries
+    if nb_actifs >= 300:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "bilan_social",
+            "urgence": "info",
+            "titre": "Bilan social obligatoire",
+            "description": f"Bilan social obligatoire pour les entreprises >= 300 salaries. Effectif: {nb_actifs}.",
+            "reference": "Art. L.2312-28 CT",
+            "action_requise": "Etablir et presenter le bilan social au CSE",
+            "echeance": "",
+        })
+
+    # 4j. Formation professionnelle
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "formation_professionnelle",
+            "urgence": "info",
+            "titre": "Plan de developpement des competences",
+            "description": "L'employeur a l'obligation d'assurer l'adaptation des salaries a leur poste de travail et de veiller au maintien de leur capacite a occuper un emploi.",
+            "reference": "Art. L.6321-1 CT",
+            "action_requise": "Verifier le plan de developpement des competences et le financement formation",
+            "echeance": "",
         })
 
     # --- 6. Rappels declarations ---
@@ -1909,6 +2523,19 @@ async def get_rh_alertes():
                 })
         except (ValueError, TypeError):
             pass
+
+    # Normaliser toutes les alertes pour avoir titre + description
+    for a in alertes:
+        if "titre" not in a and "message" in a:
+            a["titre"] = a["type"].replace("_", " ").capitalize()
+            a["description"] = a["message"]
+        if "description" not in a and "message" in a:
+            a["description"] = a["message"]
+
+    # Appliquer les personnalisations
+    for cfg in _alertes_config:
+        if not cfg.get("actif", True):
+            alertes = [a for a in alertes if a.get("type") != cfg["type_alerte"]]
 
     # Trier par urgence (haute > moyenne > info)
     ordre_urgence = {"haute": 0, "moyenne": 1, "info": 2}
@@ -2881,6 +3508,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .badge-red{background:var(--rl);color:var(--r)}.badge-amber{background:var(--ol);color:#d97706}
 .badge-purple{background:var(--pul);color:var(--pu)}.badge-teal{background:#f0fdfa;color:var(--tl)}
 .badge-paye{background:var(--gl);color:#16a34a}.badge-impaye{background:var(--rl);color:var(--r)}
+.sug-box{position:relative;z-index:50}.sug-box .sug-list{position:absolute;left:0;right:0;background:#fff;border:1px solid var(--brd);border-radius:6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}.sug-box .sug-list.show{display:block}.sug-item{padding:6px 10px;cursor:pointer;font-size:.82em;border-bottom:1px solid #f1f5f9}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
 /* Tabs */
 .tabs{display:flex;gap:2px;background:#f1f5f9;border-radius:10px;padding:4px;margin-bottom:16px;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .tab{padding:7px 16px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.82em;transition:.2s;white-space:nowrap;-webkit-tap-highlight-color:transparent}
@@ -3171,14 +3799,19 @@ APP_HTML += """
 <h2 style="margin-bottom:12px">Ecriture manuelle</h2>
 <div class="g2">
 <div><label>Date</label><input type="date" id="em-date"><label>Libelle</label><input id="em-lib" placeholder="Description"></div>
-<div><label>Compte debit</label><input id="em-deb" placeholder="601000"><label>Compte credit</label><input id="em-cre" placeholder="401000"></div>
+<div><label>Compte debit</label><input id="em-deb" placeholder="601000" oninput="suggestCompte('em-deb','em-deb-sug','em-cre')"><div id="em-deb-sug" class="sug-box"></div><label>Compte credit</label><input id="em-cre" placeholder="401000" oninput="suggestCompte('em-cre','em-cre-sug',null)"><div id="em-cre-sug" class="sug-box"></div></div>
 </div>
 <div class="g3">
 <div><label>Montant</label><input type="number" step="0.01" id="em-mt" placeholder="0.00"></div>
-<div><label>Justificatif</label><select id="em-just"><option value="false">Non</option><option value="true">Oui</option></select></div>
+<div><label>Justificatif (optionnel)</label><input type="file" id="em-just-file" accept=".pdf,.jpg,.png"></div>
 <div><button class="btn btn-p btn-f" onclick="saisirEcriture()" style="margin-top:22px">Enregistrer</button></div>
 </div>
 <div id="em-res" style="margin-top:10px"></div>
+<h3 style="margin-top:20px">Creer un sous-compte</h3>
+<div class="g3"><div><label>Compte parent</label><input id="sc-parent" placeholder="401000"></div>
+<div><label>Libelle</label><input id="sc-lib" placeholder="Fournisseur X"></div>
+<div><button class="btn btn-s btn-f" onclick="creerSousCompte()" style="margin-top:22px">Creer</button></div></div>
+<div id="sc-res" style="margin-top:8px"></div>
 </div>
 <div class="tc" id="ct-plan"><div id="ct-plan-c"></div></div>
 </div>
@@ -3282,6 +3915,7 @@ APP_HTML += """
 <div class="tab" onclick="showRHTab('planning',this)">Planning</div>
 <div class="tab" onclick="showRHTab('echanges',this)">Echanges</div>
 <div class="tab" onclick="showRHTab('alertes',this)">Alertes</div>
+<div class="tab" onclick="showRHTab('bulletins',this)">Bulletins</div>
 </div>
 <div class="card">
 <div class="tc active" id="rh-contrats">
@@ -3377,6 +4011,11 @@ APP_HTML += """
 </div>
 <div class="tc" id="rh-planning">
 <h2>Planning</h2>
+<div class="g3" style="margin-bottom:12px"><div><label>Semaine du</label><input type="date" id="rh-pl-sem" onchange="renderCalendar()"></div>
+<div><label>Filtre salarie</label><input id="rh-pl-filter" placeholder="Tous" oninput="renderCalendar()"></div>
+<div><button class="btn btn-s btn-f" onclick="renderCalendar()" style="margin-top:22px">Actualiser</button></div></div>
+<div id="rh-pl-calendar" style="overflow-x:auto;margin-bottom:16px;border:1px solid var(--brd);border-radius:8px;min-height:100px"></div>
+<h3>Ajouter un creneau</h3>
 <div class="g3"><div><label>Salarie</label><input id="rh-pl-sal" placeholder="Nom"></div>
 <div><label>Date</label><input type="date" id="rh-pl-date"></div>
 <div><label>Type</label><select id="rh-pl-type"><option value="normal">Normal</option><option value="astreinte">Astreinte</option><option value="nuit">Nuit</option><option value="dimanche">Dimanche</option><option value="ferie">Jour ferie</option></select></div></div>
@@ -3399,6 +4038,22 @@ APP_HTML += """
 <h2>Alertes et echeances RH</h2>
 <div class="al info"><span class="ai">&#128161;</span><span>Les alertes sont calculees automatiquement selon les donnees RH et les obligations legales.</span></div>
 <div id="rh-alertes-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-bulletins">
+<h2>Generation de bulletins de paie</h2>
+<div class="g2"><div>
+<label>Contrat (ID)</label><input id="rh-bp-ctr" placeholder="ID du contrat">
+<label>Mois (YYYY-MM)</label><input id="rh-bp-mois" placeholder="2025-01">
+<label>Heures supplementaires</label><input type="number" step="0.5" id="rh-bp-hs" value="0">
+</div><div>
+<label>Primes (EUR)</label><input type="number" step="0.01" id="rh-bp-primes" value="0">
+<label>Avantages en nature (EUR)</label><input type="number" step="0.01" id="rh-bp-avantages" value="0">
+<label>Jours absence</label><input type="number" step="0.5" id="rh-bp-abs" value="0">
+</div></div>
+<button class="btn btn-blue btn-f" onclick="genererBulletin()">Generer le bulletin</button>
+<div id="rh-bp-res" style="margin-top:12px"></div>
+<h3 style="margin-top:20px">Bulletins generes</h3>
+<div id="rh-bp-list" style="margin-top:8px"><p style="color:var(--tx2)">Aucun bulletin.</p></div>
 </div>
 </div>
 </div>
@@ -3435,6 +4090,17 @@ APP_HTML += """
 <button class="btn btn-blue btn-f" onclick="ajouterCompteURSSAF()">Ajouter</button>
 <div id="urssaf-list" style="margin-top:12px"></div>
 </div>
+<div class="card">
+<h2>Personnalisation des alertes</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Activez/desactivez les types d alertes et personnalisez les delais de notification.</p>
+<div id="cfg-alertes-list" style="margin-top:8px"></div>
+<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type"><option value="dpae">DPAE</option><option value="visite_medicale">Visite medicale</option><option value="fin_contrat">Fin de contrat</option><option value="fin_periode_essai">Fin periode essai</option><option value="entretien_professionnel">Entretien professionnel</option><option value="prevoyance">Prevoyance obligatoire</option><option value="mutuelle">Mutuelle obligatoire</option><option value="duerp">DUERP</option><option value="cse">Elections CSE</option><option value="formation">Formation professionnelle</option></select></div>
+<div><label>Delai notification (jours)</label><input type="number" id="cfg-al-delai" value="30"></div>
+<div><label>Actif</label><select id="cfg-al-actif"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
+<label>Message personnalise (optionnel)</label><input id="cfg-al-msg" placeholder="Message personnalise pour cette alerte">
+<button class="btn btn-blue btn-f" onclick="sauverAlertConfig()" style="margin-top:8px">Enregistrer la configuration</button>
+<div id="cfg-al-res" style="margin-top:8px"></div>
+</div>
 </div>
 
 </div><!-- end .page -->
@@ -3464,7 +4130,7 @@ document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
 if(n==="biblio")loadBiblio();if(n==="equipe")loadEquipe();
 if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
-if(n==="rh")loadRHAlertes();if(n==="config")loadEntete();
+if(n==="rh")loadRHAlertes();if(n==="config"){loadEntete();loadAlertConfigs();}
 }
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");});
@@ -3813,10 +4479,27 @@ document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(){});
 
 function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(function(r){return r.json();}).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(){});}
 function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(function(r){return r.json();}).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
+var _sugTimer=null;
+function suggestCompte(inputId,sugId,counterpartId){
+clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
+var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
+fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)).then(function(r){return r.json();}).then(function(d){
+var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
+var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){h+="<div class='sug-item' onclick='pickSug(\""+inputId+"\",\""+sugId+"\",\""+items[i].numero+"\",\""+counterpartId+"\",\""+((d.contreparties||{})[items[i].numero]||"")+"\")'><span class='sug-num'>"+items[i].numero+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>";}
+h+="</div>";box.innerHTML=h;}).catch(function(){});},250);}
+function pickSug(inputId,sugId,val,cpId,cpVal){document.getElementById(inputId).value=val;closeSugs(sugId);if(cpId&&cpVal){var cpInput=document.getElementById(cpId);if(cpInput&&!cpInput.value)cpInput.value=cpVal;}}
+function closeSugs(sugId){var b=document.getElementById(sugId);if(b)b.innerHTML="";}
+document.addEventListener("click",function(e){if(!e.target.closest(".sug-box")&&!e.target.closest("input")){document.querySelectorAll(".sug-list").forEach(function(s){s.classList.remove("show");});}});
+function creerSousCompte(){var fd=new FormData();fd.append("compte_parent",document.getElementById("sc-parent").value);fd.append("libelle",document.getElementById("sc-lib").value);
+fetch("/api/comptabilite/sous-compte",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){document.getElementById("sc-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Sous-compte <strong>"+d.numero+"</strong> cree: "+d.libelle+"</span></div>";}).catch(function(e){document.getElementById("sc-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 function saisirEcriture(){
-var fd=new FormData();fd.append("date_piece",document.getElementById("em-date").value);fd.append("libelle",document.getElementById("em-lib").value);fd.append("compte_debit",document.getElementById("em-deb").value);fd.append("compte_credit",document.getElementById("em-cre").value);fd.append("montant",document.getElementById("em-mt").value||"0");fd.append("has_justificatif",document.getElementById("em-just").value);
+var deb=document.getElementById("em-deb").value;var cre=document.getElementById("em-cre").value;
+if(!deb||deb.length<3){toast("Compte debit invalide.");return;}if(!cre||cre.length<3){toast("Compte credit invalide.");return;}
+var fd=new FormData();fd.append("date_piece",document.getElementById("em-date").value);fd.append("libelle",document.getElementById("em-lib").value);fd.append("compte_debit",deb);fd.append("compte_credit",cre);fd.append("montant",document.getElementById("em-mt").value||"0");
+var fj=document.getElementById("em-just-file");fd.append("has_justificatif",fj&&fj.files&&fj.files.length>0?"true":"false");
 fetch("/api/comptabilite/ecriture/manuelle",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){
-document.getElementById("em-res").innerHTML="<div class='al "+(d.sans_justificatif?"err":"ok")+"'><span class='ai'>"+(d.sans_justificatif?"&#9888;":"&#9989;")+"</span><span>"+(d.alerte||"Enregistree.")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
+var cls=d.sans_justificatif?"warn":"ok";var icon=d.sans_justificatif?"&#9888;":"&#9989;";
+document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class='ai'>"+icon+"</span><span>"+(d.alerte||"Ecriture enregistree.")+(d.sans_justificatif?" <em style='color:var(--r)'>(justificatif manquant)</em>":"")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 
 /* === SIMULATION === */
 function showSimTab(n,el){document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}
@@ -3886,56 +4569,153 @@ document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span
 
 /* === FILE INTERPRETATION + AUDIT === */
 function showFileInterpretation(data){
-var fl=document.getElementById("az-fichiers-list");if(!data||!data.declarations||!data.declarations.length){fl.innerHTML="<p style='color:var(--tx2)'>Aucun fichier interprete.</p>";return;}
-var h="<table><tr><th>Fichier</th><th>Type detecte</th><th>Interpretation</th><th>Employeur</th><th>Periode</th><th>Salaries</th></tr>";
+var fl=document.getElementById("az-fichiers-list");
+if(!data||!data.declarations||!data.declarations.length){fl.innerHTML="<p style='color:var(--tx2)'>Aucun fichier interprete.</p>";return;}
+var h="<table><tr><th>Fichier</th><th>Nature detectee</th><th>Employeur</th><th>Periode</th><th class='num'>Salaries</th><th class='num'>Cotisations</th></tr>";
 for(var i=0;i<data.declarations.length;i++){var d=data.declarations[i];
-var interp=d.type||"Document";if(d.employeur&&d.employeur.raison_sociale)interp+="-"+d.employeur.raison_sociale;if(d.periode)interp+="-"+d.periode;
-var empName=d.employeur?d.employeur.raison_sociale||d.employeur.siret||"-":"-";
-h+="<tr><td>"+(d.reference||"fichier "+(i+1))+"</td><td><span class='badge badge-blue'>"+(d.type||"inconnu")+"</span></td><td><strong>"+interp+"</strong></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.salaries?d.salaries.length:0)+"</td></tr>";}
+var nature=d.nature||"Document";
+var empName=d.employeur?(d.employeur.raison_sociale||d.employeur.siret||"-"):"-";
+var badgeCls="badge-blue";
+if(nature.indexOf("Bulletin")>=0)badgeCls="badge-green";
+else if(nature.indexOf("DSN")>=0)badgeCls="badge-purple";
+else if(nature.indexOf("Livre")>=0||nature.indexOf("Recapitulatif")>=0)badgeCls="badge-amber";
+else if(nature.indexOf("Bordereau")>=0)badgeCls="badge-teal";
+h+="<tr><td>"+(d.reference||"fichier "+(i+1))+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td></tr>";}
 h+="</table>";fl.innerHTML=h;}
 
 function showAuditChecks(data){
-var mode=document.getElementById("mode-analyse").value;
+var mode=data.mode_analyse||document.getElementById("mode-analyse").value;
 var card=document.getElementById("az-audit-card");var el=document.getElementById("az-audit-checks");
 if(mode==="simple"){card.style.display="none";return;}
 card.style.display="block";
-var checks=[];
+var hasDSN=data.declarations&&data.declarations.some(function(d){return(d.type||"").toUpperCase().indexOf("DSN")>=0;});
+var hasBulletins=data.declarations&&data.declarations.some(function(d){return(d.nature||"").indexOf("Bulletin")>=0||(d.nb_cotisations||0)>0;});
+var multiDocs=data.declarations&&data.declarations.length>1;
+var socialChecks=[
+{nom:"DPAE (Declaration prealable a l embauche)",present:true,docs:"Registre des DPAE, accuses de reception URSSAF",ref:"Art. L.1221-10 CT"},
+{nom:"Contrats de travail complets",present:true,docs:"Contrats de travail signes pour chaque salarie",ref:"Art. L.1221-1 CT"},
+{nom:"Rapprochement DSN / Bulletins de paie",present:hasDSN&&hasBulletins,docs:"DSN mensuelle + bulletins de paie de la meme periode",ref:"Art. R.133-14 CSS"},
+{nom:"Verification taux URSSAF 2026",present:hasBulletins,docs:"Bulletins de paie avec detail des cotisations",ref:"Art. L.242-1 CSS"},
+{nom:"Coherence masse salariale / effectif",present:hasBulletins,docs:"Bulletins de paie, DADS ou DSN annuelle",ref:"Art. L.242-1 CSS"},
+{nom:"Plafonnement PASS (vieillesse plafonnee)",present:hasBulletins,docs:"Bulletins avec lignes vieillesse plafonnee",ref:"Art. L.241-3 CSS - PASS 2026"},
+{nom:"Detection apprentis et exonerations",present:hasBulletins,docs:"Contrats d apprentissage, bulletins",ref:"Art. L.6243-2 CT"},
+{nom:"Controle NIR / identite salaries",present:multiDocs,docs:"Bulletins + DSN avec NIR concordants",ref:"Art. R.114-7 CSS"},
+{nom:"Verification SMIC et minima conventionnels",present:hasBulletins,docs:"Bulletins de paie, grille de la convention collective",ref:"Art. L.3231-2 CT - Art. L.2253-1 CT"},
+{nom:"Blocs obligatoires DSN",present:hasDSN,docs:"Fichier DSN au format NEODeS",ref:"Cahier technique DSN"},
+{nom:"Prevoyance obligatoire cadres",present:false,docs:"Contrat de prevoyance collective, DUE ou accord collectif",ref:"ANI 17/11/2017 - Art. 7 CCN Cadres"},
+{nom:"Mutuelle obligatoire ANI",present:false,docs:"Contrat de complementaire sante, DUE ou accord",ref:"Art. L.911-7 CSS - ANI 11/01/2013"},
+{nom:"DUERP (Document unique)",present:false,docs:"Document unique d evaluation des risques professionnels",ref:"Art. R.4121-1 CT"},
+{nom:"Registre unique du personnel",present:false,docs:"Registre avec entrees/sorties de tous salaries",ref:"Art. L.1221-13 CT"},
+{nom:"Medecine du travail - Suivi individuel",present:false,docs:"Fiches d aptitude, convocations visites medicales",ref:"Art. R.4624-10 CT"},
+{nom:"Duree du travail et repos",present:false,docs:"Registre des horaires, accords temps de travail",ref:"Art. L.3121-1 CT"},
+{nom:"Egalite professionnelle",present:false,docs:"Index egalite, accord egalite pro",ref:"Art. L.1142-8 CT"},
+{nom:"Representants du personnel / CSE",present:false,docs:"PV elections CSE, registre des PV",ref:"Art. L.2311-2 CT"},
+{nom:"Formation professionnelle",present:false,docs:"Plan de developpement des competences, bilans formation",ref:"Art. L.6321-1 CT"},
+{nom:"Conges payes - Suivi",present:false,docs:"Registre des conges, soldes de tout compte",ref:"Art. L.3141-1 CT"},
+{nom:"Heures supplementaires - Contingent",present:false,docs:"Registre heures sup, accords temps de travail",ref:"Art. L.3121-33 CT"}
+];
+var fiscalChecks=[
+{nom:"Declarations TVA (CA3/CA12)",present:false,docs:"Declarations de TVA, livre des achats/ventes",ref:"Art. 287 CGI"},
+{nom:"Coherence CA declare / comptabilise",present:false,docs:"Grand livre, balance, declarations fiscales",ref:"Art. 38 CGI"},
+{nom:"IS/IR - Resultat fiscal",present:false,docs:"Liasse fiscale (2065/2031), comptes annuels",ref:"Art. 209 CGI"},
+{nom:"CET (CFE + CVAE)",present:false,docs:"Declarations 1447-C, 1330-CVAE",ref:"Art. 1447-0 CGI"},
+{nom:"Charges deductibles",present:false,docs:"Justificatifs de charges, factures fournisseurs",ref:"Art. 39 CGI"},
+{nom:"Amortissements",present:false,docs:"Tableau des immobilisations et amortissements",ref:"Art. 39B CGI"},
+{nom:"Provisions",present:false,docs:"Releve des provisions, justificatifs",ref:"Art. 39-1-5 CGI"},
+{nom:"TVA intracommunautaire",present:false,docs:"DEB/DES, factures intracommunautaires",ref:"Art. 262 ter CGI"},
+{nom:"Taxe sur les salaires (si applicable)",present:false,docs:"Declaration annuelle taxe sur salaires",ref:"Art. 231 CGI"}
+];
+var courDesComptesChecks=[
+{nom:"Regularite des comptes",present:false,docs:"Comptes annuels certifies par CAC",ref:"Normes NEP"},
+{nom:"Sincerite des ecritures",present:false,docs:"Grand livre, pieces justificatives",ref:"Art. L.123-14 Code de commerce"},
+{nom:"Image fidele du patrimoine",present:false,docs:"Bilan, annexe, rapport de gestion",ref:"Art. L.123-14 Code de commerce"},
+{nom:"Continuite d exploitation",present:false,docs:"Previsionnels, plan de tresorerie",ref:"NEP 570"}
+];
+var h="";
 if(mode==="social"||mode==="complet"){
-checks.push({nom:"Rapprochement DSN / Bulletins de paie",present:data.declarations&&data.declarations.length>1});
-checks.push({nom:"Verification taux URSSAF 2026",present:true});
-checks.push({nom:"Coherence masse salariale / effectif",present:true});
-checks.push({nom:"Plafonnement PASS (vieillesse plafonnee)",present:true});
-checks.push({nom:"Detection apprentis et exonerations",present:true});
-checks.push({nom:"Controle NIR / identite salaries",present:data.declarations&&data.declarations.length>1});
-checks.push({nom:"Verification blocs obligatoires DSN",present:data.declarations&&data.declarations.some(function(d){return d.type==="DSN"||d.type==="dsn";})});
-checks.push({nom:"Prevoyance obligatoire",present:false});
-checks.push({nom:"Mutuelle obligatoire ANI",present:false});}
+h+="<h3 style='color:var(--p);margin:12px 0 8px'>Audit social - Points de controle URSSAF</h3>";
+for(var i=0;i<socialChecks.length;i++){var c=socialChecks[i];
+h+="<div class='al "+(c.present?"ok":"warn")+"' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?"Verifie":"Documents insuffisants")+"<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'>"+(c.present?"Point de controle verifie avec les documents fournis.":"<strong>Documents necessaires :</strong> "+c.docs)+"<br><em>Ref: "+c.ref+"</em></div></span></div>";}}
 if(mode==="fiscal"||mode==="complet"){
-checks.push({nom:"Coherence TVA collectee / deductible",present:true});
-checks.push({nom:"Rapprochement CA / declarations",present:false});
-checks.push({nom:"Verification charges deductibles",present:false});}
-var h="";for(var i=0;i<checks.length;i++){var c=checks[i];
-h+="<div class='al "+(c.present?"ok":"warn")+"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?"Verifie":"Documents insuffisants - point non controle")+"</span></div>";}
+h+="<h3 style='color:var(--p);margin:16px 0 8px'>Audit fiscal - Points de controle DGFIP</h3>";
+for(var i=0;i<fiscalChecks.length;i++){var c=fiscalChecks[i];
+h+="<div class='al "+(c.present?"ok":"warn")+"' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?"Verifie":"Documents insuffisants")+"<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'><strong>Documents necessaires :</strong> "+c.docs+"<br><em>Ref: "+c.ref+"</em></div></span></div>";}}
+if(mode==="complet"){
+h+="<h3 style='color:var(--p);margin:16px 0 8px'>Controle Cour des comptes</h3>";
+for(var i=0;i<courDesComptesChecks.length;i++){var c=courDesComptesChecks[i];
+h+="<div class='al warn' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>&#9888;</span><span><strong>"+c.nom+"</strong> - Documents insuffisants<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'><strong>Documents necessaires :</strong> "+c.docs+"<br><em>Ref: "+c.ref+"</em></div></span></div>";}}
 el.innerHTML=h;}
+
+/* === CONFORMITY SCORE === */
+function calculateConformityScore(data){
+var score=100;var details=[];var constats=data.constats||[];
+var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;
+for(var i=0;i<constats.length;i++){var c=constats[i];var sev=(c.severite||"").toLowerCase();
+if(sev==="critique"){score-=15;nbCrit++;details.push({deduction:-15,raison:c.titre||"Anomalie critique"});}
+else if(sev==="haute"||sev==="high"){score-=10;nbHaut++;details.push({deduction:-10,raison:c.titre||"Anomalie haute"});}
+else if(sev==="moyenne"||sev==="medium"){score-=5;nbMoy++;details.push({deduction:-5,raison:c.titre||"Anomalie moyenne"});}
+else{score-=2;nbBas++;details.push({deduction:-2,raison:c.titre||"Anomalie basse"});}}
+if(nbCrit===0&&constats.length>0){score+=5;details.push({deduction:5,raison:"Bonus: aucune anomalie critique"});}
+var nbDecl=(data.declarations||[]).length;
+if(nbDecl>=3){score+=3;details.push({deduction:3,raison:"Bonus: documentation suffisante ("+nbDecl+" sources)"});}
+else if(nbDecl<=1){var maxScore=80;if(score>maxScore){score=maxScore;}details.push({deduction:0,raison:"Plafond a "+maxScore+"% : documentation insuffisante pour score complet"});}
+score=Math.max(0,Math.min(100,score));
+var grade="F";if(score>=90)grade="A";else if(score>=75)grade="B";else if(score>=60)grade="C";else if(score>=45)grade="D";else if(score>=30)grade="E";
+var explication="Score NormaCheck : "+score+"/100 ("+grade+"). ";
+explication+="Base 100, deductions : critiques("+nbCrit+"x-15) hautes("+nbHaut+"x-10) moyennes("+nbMoy+"x-5) basses("+nbBas+"x-2). ";
+explication+="Bonus possible si aucune anomalie critique (+5) et documentation suffisante (+3). ";
+explication+="Plafonne a 80% si moins de 2 documents analyses.";
+return{score:score,grade:grade,explanation:explication,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas};}
 
 /* === PDF EXPORT === */
 function exportPDF(){
-var frame=document.getElementById("az-html-frame");
-if(!frame||!frame.srcdoc){toast("Aucun rapport a exporter.","warn");return;}
+if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}
+var mode=analysisData.mode_analyse||document.getElementById("mode-analyse").value;
+var titres={"simple":"Rapport d analyse NormaCheck","social":"Audit social NormaCheck","fiscal":"Audit fiscal NormaCheck","complet":"Audit NormaCheck complet"};
+var titre=titres[mode]||"Rapport NormaCheck";
+var scoreData=calculateConformityScore(analysisData);
+var constats=analysisData.constats||[];
 var w=window.open("","_blank");
-w.document.write(frame.srcdoc);
-w.document.close();
-setTimeout(function(){w.print();},500);}
+var ent={}; try{var xe=new XMLHttpRequest();xe.open("GET","/api/config/entete",false);xe.send();if(xe.status===200)ent=JSON.parse(xe.responseText);}catch(e){}
+var entHtml="";
+if(ent.nom_entreprise){entHtml="<div style='text-align:center;border-bottom:2px solid #1e40af;padding-bottom:16px;margin-bottom:20px'><h1 style='color:#1e40af;margin:0'>"+ent.nom_entreprise+"</h1><p style='color:#64748b'>"+((ent.forme_juridique||"")+" - "+(ent.adresse||""))+"</p><p style='color:#64748b'>SIRET: "+(ent.siret||"")+" | Tel: "+(ent.telephone||"")+"</p></div>";}
+var socialH="",fiscalH="";
+for(var i=0;i<constats.length;i++){var c=constats[i];var cat=(c.categorie||"").toLowerCase();
+var item="<div style='border:1px solid #e2e8f0;border-left:4px solid "+(Math.abs(c.montant_impact||0)>5000?"#ef4444":"#f59e0b")+";border-radius:8px;padding:12px;margin:8px 0'><strong>"+c.titre+"</strong><p style='color:#64748b;margin:4px 0'>"+(c.description||"")+"</p><p><strong>Impact:</strong> "+Math.abs(c.montant_impact||0).toFixed(2)+" EUR</p>"+(c.reference_legale?"<p style='font-size:.85em;color:#64748b'>Ref: "+c.reference_legale+"</p>":"")+(c.recommandation?"<p style='color:#1e40af;font-style:italic'>"+c.recommandation+"</p>":"")+"</div>";
+if(cat.indexOf("fiscal")>=0||cat.indexOf("tva")>=0||cat.indexOf("impot")>=0)fiscalH+=item;else socialH+=item;}
+var html="<!DOCTYPE html><html><head><meta charset='UTF-8'><title>"+titre+"</title><style>body{font-family:Segoe UI,sans-serif;max-width:900px;margin:0 auto;padding:30px;color:#1e293b}h1{color:#1e40af}h2{color:#1e40af;border-bottom:1px solid #e2e8f0;padding-bottom:6px;margin-top:30px}.score{text-align:center;padding:20px;background:#f8fafc;border-radius:12px;border:2px solid #e2e8f0;margin:20px 0}.grade{font-size:3em;font-weight:800;color:#1e40af}.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.8em;font-weight:700}@media print{body{padding:10px}}</style></head><body>";
+html+=entHtml;
+html+="<h1 style='text-align:center'>"+titre+"</h1>";
+html+="<p style='text-align:center;color:#64748b'>Date: "+new Date().toLocaleDateString("fr-FR")+" | "+((analysisData.synthese||{}).nb_fichiers||0)+" fichier(s) analyse(s)</p>";
+html+="<div class='score'><div class='grade'>"+scoreData.grade+"</div><div style='font-size:2em;font-weight:700'>"+scoreData.score+" / 100</div><p style='color:#64748b;margin-top:8px'>"+scoreData.explanation+"</p></div>";
+if(socialH){html+="<h2>Partie sociale - Constats</h2><p style='color:#64748b'>Points de controle relevant de la legislation sociale (Code de la securite sociale, Code du travail)</p>"+socialH;}
+if(fiscalH){html+="<h2>Partie fiscale - Constats</h2><p style='color:#64748b'>Points de controle relevant de la legislation fiscale (Code general des impots)</p>"+fiscalH;}
+if(!socialH&&!fiscalH){html+="<h2>Constats</h2>";for(var i=0;i<constats.length;i++){var c=constats[i];html+="<div style='border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0'><strong>"+c.titre+"</strong><p>"+c.description+"</p><p>Impact: "+Math.abs(c.montant_impact||0).toFixed(2)+" EUR</p></div>";}}
+html+="<h2>Recommandations</h2>";var recos=analysisData.recommandations||[];for(var i=0;i<recos.length;i++){html+="<p>"+(i+1)+". "+(recos[i].description||recos[i].titre||"")+"</p>";}
+html+="<div style='margin-top:40px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;font-size:.85em'><h3>Methodologie du score NormaCheck</h3><p>"+scoreData.explanation+"</p><table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:#1e40af;color:#fff'><th style='padding:6px 10px;text-align:left'>Deduction</th><th style='padding:6px 10px;text-align:left'>Raison</th></tr>";
+for(var i=0;i<scoreData.details.length;i++){var d=scoreData.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td></tr>";}
+html+="</table></div>";
+html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.5 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
+w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 
 /* === RH MODULE === */
 function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning")loadRHPlanning();if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();}
+if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(function(r){return r.json();}).then(cb).catch(function(){});}
 
 function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
-rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");document.getElementById("rh-ctr-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";loadRHContrats();});}
+rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
+var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
+h+="<button class='btn btn-s btn-sm' style='margin:8px 4px 0 0' onclick='voirContrat(\""+d.id+"\")'>Visualiser le contrat</button>";
+var eff=d.cascading_effects;if(eff){h+="<div style='margin-top:12px;padding:10px;background:var(--pl);border-radius:8px'><strong>Effets en cascade :</strong><ul style='margin:6px 0 0 16px;font-size:.86em'>";
+if(eff.dpae)h+="<li>&#9989; DPAE generee (ref: "+eff.dpae.reference+")</li>";
+if(eff.visite_medicale)h+="<li>&#128197; Visite medicale programmee avant le "+eff.visite_medicale.echeance+"</li>";
+if(eff.planning&&eff.planning.length)h+="<li>&#128197; "+eff.planning.length+" creneaux planning crees (1ere semaine)</li>";
+if(eff.ecriture_comptable)h+="<li>&#128181; Ecriture comptable provisionnee ("+eff.ecriture_comptable.libelle+")</li>";
+h+="</ul></div>";}
+document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});}
 
 function loadRHContrats(){rhGet("/api/rh/contrats",function(list){
 var el=document.getElementById("rh-ctr-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun contrat.</p>";return;}
@@ -3974,12 +4754,56 @@ function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el
 function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
 rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");loadRHPlanning();});}
 function loadRHPlanning(){rhGet("/api/rh/planning",function(list){var el=document.getElementById("rh-pl-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun planning.</p>";return;}var h="<table><tr><th>Salarie</th><th>Date</th><th>Debut</th><th>Fin</th><th>Type</th></tr>";for(var i=0;i<list.length;i++){var p=list[i];h+="<tr><td>"+p.salarie_id+"</td><td>"+p.date+"</td><td>"+p.heure_debut+"</td><td>"+p.heure_fin+"</td><td><span class='badge badge-blue'>"+p.type_poste+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
+function renderCalendar(){rhGet("/api/rh/planning",function(list){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+var semInput=document.getElementById("rh-pl-sem");var filterInput=document.getElementById("rh-pl-filter");
+var startDate;if(semInput&&semInput.value){startDate=new Date(semInput.value);}else{startDate=new Date();startDate.setDate(startDate.getDate()-startDate.getDay()+1);}
+var filter=(filterInput&&filterInput.value)?filterInput.value.toLowerCase():"";
+var jours=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
+var colors={"normal":"#3b82f6","astreinte":"#f59e0b","nuit":"#6366f1","dimanche":"#ef4444","ferie":"#22c55e"};
+var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left'>Salarie</th>";
+for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);h+="<th style='padding:8px;text-align:center'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
+h+="</tr>";
+var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;if(!salaries[sid])salaries[sid]={};var pd=new Date(p.date);for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
+for(var sid in salaries){h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd)'>"+sid+"</td>";for(var j=0;j<7;j++){h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){var s=slots[k];var bg=colors[s.type_poste]||"#3b82f6";h+="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 4px;margin:1px 0;font-size:.78em'>"+s.heure_debut+"-"+s.heure_fin+"</div>";}
+if(!slots.length)h+="<span style='color:#cbd5e1'>-</span>";h+="</td>";}h+="</tr>";}
+if(!Object.keys(salaries).length){h+="<tr><td colspan='8' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun creneau pour cette semaine.</td></tr>";}
+h+="</table>";cal.innerHTML=h;});}
+function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
 
 function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ec-sal").value);fd.append("objet",document.getElementById("rh-ec-obj").value);fd.append("contenu",document.getElementById("rh-ec-txt").value);fd.append("type_echange",document.getElementById("rh-ec-type").value);fd.append("date_echange",document.getElementById("rh-ec-date").value);
 rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
 function loadRHEchanges(){rhGet("/api/rh/echanges",function(list){var el=document.getElementById("rh-ec-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun echange.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Objet</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_echange+"</span></td><td>"+e.date_echange+"</td><td>"+e.objet+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function loadRHAlertes(){rhGet("/api/rh/alertes",function(list){var el=document.getElementById("rh-alertes-list");if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}var h="";for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");h+="<div class='al "+cls+"'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+a.titre+"</strong> - "+a.description+(a.echeance?" (echeance: "+a.echeance+")":"")+"</span></div>";}el.innerHTML=h;});}
+function loadRHAlertes(){rhGet("/api/rh/alertes",function(list){var el=document.getElementById("rh-alertes-list");if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
+var h="";for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
+h+="<div class='al "+cls+"' style='cursor:pointer' onclick='this.querySelector(\".al-detail\")&&this.querySelector(\".al-detail\").classList.toggle(\"show\")'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+(a.titre||a.type||"Alerte")+"</strong> - "+(a.description||"");
+if(a.echeance)h+=" <em>(echeance: "+a.echeance+")</em>";
+h+="</span>";
+if(a.incidence_legale||a.documents_requis){h+="<div class='al-detail' style='display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,.03);border-radius:6px;font-size:.86em'>";
+if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600'>Consequence legale : "+a.incidence_legale+"</p>";
+if(a.documents_requis){h+="<p style='margin-top:4px'><strong>Documents requis :</strong></p><ul style='margin:2px 0 0 16px'>";
+var docs=a.documents_requis;if(typeof docs==="string")docs=docs.split(",");for(var j=0;j<docs.length;j++){h+="<li>"+docs[j]+"</li>";}h+="</ul>";}
+h+="</div>";}h+="</div>";}
+h+="<style>.al-detail.show{display:block!important}</style>";
+el.innerHTML=h;});}
+function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("heures_sup",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences",document.getElementById("rh-bp-abs").value||"0");
+rhPost("/api/rh/bulletins/generer",fd,function(d){
+var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Bulletin genere pour <strong>"+d.mois+"</strong></span></div>";
+h+="<div class='card' style='background:var(--pl);margin-top:8px'>";
+h+="<div class='g3'><div class='sc blue'><div class='val'>"+(d.brut_total||0).toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+(d.net_a_payer||0).toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+(d.cout_employeur||0).toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div>";
+if(d.lignes){h+="<table style='margin-top:10px'><tr><th>Rubrique</th><th class='num'>Base</th><th class='num'>Taux sal.</th><th class='num'>Part sal.</th><th class='num'>Taux pat.</th><th class='num'>Part pat.</th></tr>";for(var i=0;i<d.lignes.length;i++){var l=d.lignes[i];h+="<tr><td>"+l.libelle+"</td><td class='num'>"+(l.base||0).toFixed(2)+"</td><td class='num'>"+(l.taux_salarial||0).toFixed(2)+"%</td><td class='num'>"+(l.montant_salarial||0).toFixed(2)+"</td><td class='num'>"+(l.taux_patronal||0).toFixed(2)+"%</td><td class='num'>"+(l.montant_patronal||0).toFixed(2)+"</td></tr>";}h+="</table>";}
+h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick='window.open(\"/api/rh/bulletins/"+d.id+"/document\",\"_blank\")'>Visualiser / Imprimer</button></div>";
+document.getElementById("rh-bp-res").innerHTML=h;loadRHBulletins();});}
+function loadRHBulletins(){rhGet("/api/rh/bulletins",function(list){var el=document.getElementById("rh-bp-list");if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun bulletin.</p>";return;}
+var h="<table><tr><th>Mois</th><th>Salarie</th><th class='num'>Brut</th><th class='num'>Net</th><th>Actions</th></tr>";
+for(var i=0;i<list.length;i++){var b=list[i];h+="<tr><td>"+b.mois+"</td><td>"+(b.nom_salarie||"-")+"</td><td class='num'>"+(b.brut_total||0).toFixed(2)+"</td><td class='num'>"+(b.net_a_payer||0).toFixed(2)+"</td><td><button class='btn btn-s btn-sm' onclick='window.open(\"/api/rh/bulletins/"+b.id+"/document\",\"_blank\")'>Voir</button></td></tr>";}
+h+="</table>";el.innerHTML=h;});}
+function sauverAlertConfig(){var fd=new FormData();fd.append("type_alerte",document.getElementById("cfg-al-type").value);fd.append("actif",document.getElementById("cfg-al-actif").value);fd.append("delai_jours",document.getElementById("cfg-al-delai").value);var msg=document.getElementById("cfg-al-msg").value;if(msg)fd.append("message_personnalise",msg);
+rhPost("/api/rh/alertes/personnaliser",fd,function(d){document.getElementById("cfg-al-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Configuration alerte sauvegardee : "+d.type_alerte+" ("+(d.actif?"actif":"inactif")+")</span></div>";loadAlertConfigs();toast("Configuration alerte sauvegardee.","ok");});}
+function loadAlertConfigs(){rhGet("/api/rh/alertes/config",function(list){var el=document.getElementById("cfg-alertes-list");if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Configuration par defaut (toutes alertes actives).</p>";return;}
+var h="<table><tr><th>Type</th><th>Actif</th><th>Delai (j)</th><th>Message</th></tr>";for(var i=0;i<list.length;i++){var c=list[i];h+="<tr><td><span class='badge "+(c.actif?"badge-green":"badge-red")+"'>"+c.type_alerte+"</span></td><td>"+(c.actif?"Oui":"Non")+"</td><td class='num'>"+(c.delai_jours||30)+"</td><td>"+(c.message_personnalise||"-")+"</td></tr>";}
+h+="</table>";el.innerHTML=h;});}
 
 /* === CONFIGURATION === */
 var _urssafComptes=[];

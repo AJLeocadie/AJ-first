@@ -23,6 +23,8 @@ class FileType(str, Enum):
     EXCEL = "excel"
     XML = "xml"
     DSN = "dsn"
+    IMAGE = "image"
+    TEXTE = "texte"
 
 
 @dataclass
