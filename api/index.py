@@ -1,4 +1,4 @@
-"""NormaCheck v3.4 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.5 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
@@ -39,7 +39,7 @@ from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.4.0",
+    version="3.5.0",
 )
 
 app.add_middleware(
@@ -59,6 +59,17 @@ _invitations: list[dict] = []
 _facture_statuses: dict[str, dict] = {}
 _audit_log: list[dict] = []
 _dsn_drafts: list[dict] = []
+_rh_contrats: list[dict] = []
+_rh_avenants: list[dict] = []
+_rh_conges: list[dict] = []
+_rh_arrets: list[dict] = []
+_rh_sanctions: list[dict] = []
+_rh_attestations: list[dict] = []
+_rh_entretiens: list[dict] = []
+_rh_visites_med: list[dict] = []
+_rh_echanges: list[dict] = []
+_rh_planning: list[dict] = []
+_entete_config: dict = {}
 
 
 def get_db() -> Database:
@@ -144,6 +155,7 @@ async def analyser_documents(
     fichiers: list[UploadFile] = File(...),
     format_rapport: str = Query("json"),
     integrer: bool = Query(True),
+    mode_analyse: str = Query("complet"),
 ):
     if len(fichiers) > 20:
         raise HTTPException(400, "Maximum 20 fichiers par analyse.")
@@ -260,35 +272,27 @@ async def analyser_documents(
                     continue
                 for emp in decl.employes:
                     cots = [c for c in decl.cotisations if c.employe_id == emp.id]
-                    brut = float(sum(c.base_brute for c in cots)) if cots else 0
+                    brut = sum(c.base_brute for c in cots) if cots else Decimal("0")
                     if brut <= 0:
                         continue
-                    net = round(brut * 0.78, 2)
-                    charges_pat = round(brut * 0.45, 2)
-                    date_piece = ""
+                    cot_sal = round(float(brut) * 0.22, 2)
+                    cot_pat_urssaf = round(float(brut) * 0.35, 2)
+                    cot_pat_retraite = round(float(brut) * 0.10, 2)
+                    net_a_payer = round(float(brut) * 0.78, 2)
+                    date_piece = date.today()
                     if decl.periode and decl.periode.debut:
-                        date_piece = decl.periode.debut.strftime("%Y-%m-%d")
+                        date_piece = decl.periode.debut
                     elif decl.periode and decl.periode.fin:
-                        date_piece = decl.periode.fin.strftime("%Y-%m-%d")
-                    else:
-                        date_piece = date.today().isoformat()
-                    lib = f"Salaire {emp.prenom} {emp.nom}"
+                        date_piece = decl.periode.fin
                     try:
-                        moteur.saisir_ecriture_manuelle(
+                        moteur.generer_ecriture_paie(
                             date_piece=date_piece,
-                            libelle=lib,
-                            compte_debit="641000",
-                            compte_credit="421000",
-                            montant=Decimal(str(brut)),
-                            has_justificatif=True,
-                        )
-                        moteur.saisir_ecriture_manuelle(
-                            date_piece=date_piece,
-                            libelle=f"Charges patronales {emp.prenom} {emp.nom}",
-                            compte_debit="645000",
-                            compte_credit="431000",
-                            montant=Decimal(str(charges_pat)),
-                            has_justificatif=True,
+                            nom_salarie=f"{emp.prenom} {emp.nom}",
+                            salaire_brut=brut,
+                            cotisations_salariales=Decimal(str(cot_sal)),
+                            cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
+                            cotisations_patronales_retraite=Decimal(str(cot_pat_retraite)),
+                            net_a_payer=Decimal(str(net_a_payer)),
                         )
                     except Exception:
                         pass
@@ -370,8 +374,14 @@ async def comptabiliser_facture(
     ttc = Decimal(montant_ttc or "0")
 
     try:
-        ecriture = moteur.comptabiliser_facture(
-            type_document=type_doc, date_piece=date_piece,
+        dp = date.today()
+        if date_piece:
+            try:
+                dp = date.fromisoformat(date_piece)
+            except ValueError:
+                pass
+        ecriture = moteur.generer_ecriture_facture(
+            type_doc=type_doc, date_piece=dp,
             numero_piece=numero_piece, montant_ht=ht,
             montant_tva=tva, montant_ttc=ttc, nom_tiers=nom_tiers,
         )
@@ -422,21 +432,19 @@ async def liste_statuts_factures():
 @app.get("/api/comptabilite/journal")
 async def journal_ecritures():
     moteur = get_moteur()
-    ecritures = moteur.get_journal()
-    return [
-        {"id": e.id, "date": str(e.date_piece), "journal": e.journal.value,
-         "piece": e.numero_piece, "libelle": e.libelle, "validee": e.validee,
-         "lignes": [{"compte": l.compte, "libelle": l.libelle,
-                      "debit": float(l.debit), "credit": float(l.credit)}
-                     for l in e.lignes]}
-        for e in ecritures
-    ]
+    return moteur.get_journal()
 
 
 @app.get("/api/comptabilite/balance")
 async def balance_comptable():
     moteur = get_moteur()
-    return moteur.calculer_balance()
+    bal = moteur.get_balance()
+    # Serialize Decimal to float
+    for item in bal:
+        for k in ("total_debit", "total_credit", "solde_debiteur", "solde_crediteur"):
+            if k in item and not isinstance(item[k], float):
+                item[k] = float(item[k])
+    return bal
 
 
 @app.get("/api/comptabilite/grand-livre-detail")
@@ -445,41 +453,64 @@ async def grand_livre_detail(
     date_fin: Optional[str] = None,
 ):
     moteur = get_moteur()
-    return moteur.grand_livre_detail(date_debut=date_debut, date_fin=date_fin)
+    gl = moteur.get_grand_livre()
+    result = []
+    for compte, mouvements in gl.items():
+        cpt = moteur.plan.get_compte(compte)
+        mvts = []
+        for m in mouvements:
+            if date_debut and m.get("date", "") < date_debut:
+                continue
+            if date_fin and m.get("date", "") > date_fin:
+                continue
+            mvts.append({
+                "date": m.get("date", ""),
+                "libelle": m.get("libelle", ""),
+                "debit": float(m.get("debit", 0)),
+                "credit": float(m.get("credit", 0)),
+                "sans_justificatif": "[SANS JUSTIFICATIF]" in m.get("libelle", ""),
+            })
+        if mvts:
+            result.append({
+                "compte": compte,
+                "libelle": cpt.libelle if cpt else compte,
+                "mouvements": mvts,
+            })
+    return result
 
 
 @app.get("/api/comptabilite/compte-resultat")
 async def compte_resultat():
-    gen = GenerateurRapports()
     moteur = get_moteur()
-    return gen.compte_resultat(moteur)
+    gen = GenerateurRapports(moteur)
+    return gen.compte_resultat()
 
 
 @app.get("/api/comptabilite/bilan")
 async def bilan():
-    gen = GenerateurRapports()
     moteur = get_moteur()
-    return gen.bilan(moteur)
+    gen = GenerateurRapports(moteur)
+    return gen.bilan_simplifie()
 
 
 @app.get("/api/comptabilite/declaration-tva")
 async def declaration_tva(mois: int = Query(1), annee: int = Query(2026)):
-    gen = GenerateurRapports()
     moteur = get_moteur()
-    return gen.declaration_tva(moteur, mois=mois, annee=annee)
+    gen = GenerateurRapports(moteur)
+    return gen.declaration_tva(mois=mois, annee=annee)
 
 
 @app.get("/api/comptabilite/charges-sociales-detail")
 async def charges_sociales_detail():
-    gen = GenerateurRapports()
     moteur = get_moteur()
-    return gen.charges_sociales_detail(moteur)
+    gen = GenerateurRapports(moteur)
+    return gen.recapitulatif_charges_sociales()
 
 
 @app.get("/api/comptabilite/plan-comptable")
 async def plan_comptable_api(terme: Optional[str] = None):
     pc = PlanComptable()
-    comptes = pc.rechercher(terme) if terme else pc.tous_les_comptes()
+    comptes = pc.rechercher(terme) if terme else list(pc.comptes.values())
     return [{"numero": c.numero, "libelle": c.libelle, "classe": c.classe} for c in comptes]
 
 
@@ -489,24 +520,44 @@ async def ecriture_manuelle(
     compte_debit: str = Form(...), compte_credit: str = Form(...),
     montant: str = Form("0"), has_justificatif: str = Form("false"),
 ):
+    from urssaf_analyzer.comptabilite.ecritures import Ecriture, LigneEcriture, TypeJournal
     moteur = get_moteur()
     mt = Decimal(montant or "0")
     has_j = has_justificatif.lower() == "true"
-    result = moteur.saisie_manuelle(
-        date_piece=date_piece, libelle=libelle,
-        compte_debit=compte_debit, compte_credit=compte_credit,
-        montant=mt, has_justificatif=has_j,
+    dp = date.today()
+    if date_piece:
+        try:
+            dp = date.fromisoformat(date_piece)
+        except ValueError:
+            pass
+    sans_justif = "" if has_j else " [SANS JUSTIFICATIF]"
+    ecriture = Ecriture(
+        journal=TypeJournal.OPERATIONS_DIVERSES,
+        date_ecriture=dp,
+        date_piece=dp,
+        libelle=libelle + sans_justif,
+        lignes=[
+            LigneEcriture(compte=compte_debit, libelle=libelle + sans_justif, debit=mt, credit=Decimal("0")),
+            LigneEcriture(compte=compte_credit, libelle=libelle + sans_justif, debit=Decimal("0"), credit=mt),
+        ],
     )
+    moteur.ecritures.append(ecriture)
     log_action("utilisateur", "ecriture_manuelle", f"{compte_debit}/{compte_credit} {mt}")
-    return result
+    return {
+        "ecriture_id": ecriture.id,
+        "sans_justificatif": not has_j,
+        "alerte": "Ecriture sans justificatif - marquee en rouge." if not has_j else "Ecriture enregistree.",
+    }
 
 
 @app.post("/api/comptabilite/valider")
 async def valider_ecritures():
     moteur = get_moteur()
-    result = moteur.valider_ecritures()
-    log_action("utilisateur", "validation_ecritures", f"{result.get('nb_validees', 0)} ecritures")
-    return result
+    nb_avant = sum(1 for e in moteur.ecritures if not e.validee)
+    erreurs = moteur.valider_ecritures()
+    nb_validees = nb_avant - len(erreurs)
+    log_action("utilisateur", "validation_ecritures", f"{nb_validees} ecritures validees")
+    return {"nb_validees": nb_validees, "erreurs": erreurs}
 
 
 # ==============================
@@ -519,12 +570,24 @@ async def sim_bulletin(
     effectif: int = Query(10),
     est_cadre: bool = Query(False),
 ):
-    from urssaf_analyzer.contribution_rules import CalculateurCotisations
-    calc = CalculateurCotisations()
-    return calc.simuler_bulletin(
-        brut_mensuel=Decimal(str(brut_mensuel)),
-        effectif=effectif, est_cadre=est_cadre,
-    )
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    calc = ContributionRules()
+    res = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
+    lignes = []
+    for l in res.get("lignes", []):
+        lignes.append({
+            "libelle": l["libelle"],
+            "montant_patronal": float(l["montant_patronal"]),
+            "montant_salarial": float(l["montant_salarial"]),
+        })
+    return {
+        "brut_mensuel": float(res["brut_mensuel"]),
+        "net_a_payer": float(res["net_avant_impot"]),
+        "cout_total_employeur": float(res["cout_total_employeur"]),
+        "total_patronal": float(res["total_patronal"]),
+        "total_salarial": float(res["total_salarial"]),
+        "lignes": lignes,
+    }
 
 
 @app.get("/api/simulation/micro-entrepreneur")
@@ -533,12 +596,24 @@ async def sim_micro(
     activite: str = Query("prestations_bnc"),
     acre: bool = Query(False),
 ):
-    from urssaf_analyzer.contribution_rules import CalculateurCotisations
-    calc = CalculateurCotisations()
-    return calc.simuler_micro_entrepreneur(
-        chiffre_affaires=Decimal(str(chiffre_affaires)),
-        activite=activite, acre=acre,
-    )
+    ca = Decimal(str(chiffre_affaires))
+    taux = {"vente_marchandises": Decimal("0.128"), "prestations_bic": Decimal("0.220"),
+            "prestations_bnc": Decimal("0.224"), "liberal_cipav": Decimal("0.232")}
+    t = taux.get(activite, Decimal("0.224"))
+    if acre:
+        t = t / 2
+    cotisations = round(float(ca * t), 2)
+    ir_forfait = {"vente_marchandises": Decimal("0.71"), "prestations_bic": Decimal("0.50"),
+                  "prestations_bnc": Decimal("0.34"), "liberal_cipav": Decimal("0.34")}
+    abat = ir_forfait.get(activite, Decimal("0.34"))
+    revenu_imposable = round(float(ca * (1 - abat)), 2)
+    ir_estim = round(revenu_imposable * 0.11, 2)
+    return {
+        "chiffre_affaires": float(ca), "taux_cotisations": float(t),
+        "cotisations_sociales": cotisations, "acre_applique": acre,
+        "revenu_imposable": revenu_imposable, "impot_estime": ir_estim,
+        "revenu_net": round(float(ca) - cotisations - ir_estim, 2),
+    }
 
 
 @app.get("/api/simulation/tns")
@@ -547,12 +622,25 @@ async def sim_tns(
     type_statut: str = Query("gerant_majoritaire"),
     acre: bool = Query(False),
 ):
-    from urssaf_analyzer.contribution_rules import CalculateurCotisations
-    calc = CalculateurCotisations()
-    return calc.simuler_tns(
-        revenu_net=Decimal(str(revenu_net)),
-        type_statut=type_statut, acre=acre,
-    )
+    rev = Decimal(str(revenu_net))
+    base = rev
+    maladie = round(float(base * Decimal("0.065")), 2)
+    vieillesse_base = round(float(min(base, Decimal("46368")) * Decimal("0.1775")), 2)
+    vieillesse_compl = round(float(min(base, Decimal("185472")) * Decimal("0.07")), 2)
+    invalidite = round(float(base * Decimal("0.013")), 2)
+    af = round(float(base * Decimal("0.0310")), 2)
+    csg_crds = round(float(base * Decimal("0.097")), 2)
+    formation = round(float(base * Decimal("0.0025")), 2)
+    total = maladie + vieillesse_base + vieillesse_compl + invalidite + af + csg_crds + formation
+    if acre:
+        total = round(total * 0.5, 2)
+    return {
+        "revenu_net": float(rev), "type_statut": type_statut,
+        "maladie_maternite": maladie, "vieillesse_base": vieillesse_base,
+        "vieillesse_complementaire": vieillesse_compl, "invalidite_deces": invalidite,
+        "allocations_familiales": af, "csg_crds": csg_crds, "formation": formation,
+        "total_cotisations": total, "acre_applique": acre,
+    }
 
 
 @app.get("/api/simulation/guso")
@@ -560,12 +648,21 @@ async def sim_guso(
     salaire_brut: float = Query(500),
     nb_heures: float = Query(8),
 ):
-    from urssaf_analyzer.contribution_rules import CalculateurCotisations
-    calc = CalculateurCotisations()
-    return calc.simuler_guso(
-        salaire_brut=Decimal(str(salaire_brut)),
-        nb_heures=Decimal(str(nb_heures)),
-    )
+    brut = Decimal(str(salaire_brut))
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    calc = ContributionRules()
+    res = calc.calculer_bulletin_complet(brut, est_cadre=False)
+    conge_spectacle = round(float(brut * Decimal("0.155")), 2)
+    medecine_travail = round(float(Decimal(str(nb_heures)) * Decimal("0.46")), 2)
+    total_guso = round(float(res["total_patronal"]) + conge_spectacle + medecine_travail, 2)
+    return {
+        "salaire_brut": float(brut), "nb_heures": nb_heures,
+        "cotisations_patronales": float(res["total_patronal"]),
+        "conge_spectacle": conge_spectacle, "medecine_travail": medecine_travail,
+        "total_guso": total_guso,
+        "net_artiste": float(res["net_avant_impot"]),
+        "cout_total": round(float(brut) + total_guso, 2),
+    }
 
 
 @app.get("/api/simulation/impot-independant")
@@ -574,13 +671,27 @@ async def sim_ir(
     nb_parts: float = Query(1),
     autres_revenus: float = Query(0),
 ):
-    from urssaf_analyzer.contribution_rules import CalculateurCotisations
-    calc = CalculateurCotisations()
-    return calc.simuler_impot_independant(
-        benefice=Decimal(str(benefice)),
-        nb_parts=Decimal(str(nb_parts)),
-        autres_revenus=Decimal(str(autres_revenus)),
-    )
+    rev = benefice + autres_revenus
+    qi = rev / nb_parts
+    tranches = [(11294, 0), (28797, 0.11), (82341, 0.30), (177106, 0.41), (float("inf"), 0.45)]
+    impot_qi = 0
+    prev = 0
+    for seuil, taux in tranches:
+        if qi <= prev:
+            break
+        tranche = min(qi, seuil) - prev
+        impot_qi += tranche * taux
+        prev = seuil
+    impot_total = round(impot_qi * nb_parts, 2)
+    taux_moyen = round(impot_total / rev * 100, 2) if rev > 0 else 0
+    return {
+        "benefice": benefice, "autres_revenus": autres_revenus,
+        "revenu_global": rev, "nb_parts": nb_parts,
+        "quotient_familial": round(qi, 2),
+        "impot_brut": impot_total,
+        "taux_moyen_imposition": taux_moyen,
+        "revenu_apres_impot": round(rev - impot_total, 2),
+    }
 
 
 # ==============================
@@ -634,7 +745,7 @@ async def ajouter_entreprise(
 @app.get("/api/entreprises")
 async def liste_entreprises(q: str = Query("")):
     pm = PortfolioManager(get_db())
-    return pm.rechercher(q)
+    return pm.rechercher_entreprises(q)
 
 
 @app.get("/api/entreprises/{entreprise_id}")
@@ -653,7 +764,7 @@ async def declarations_entreprise(
     profil_id: Optional[str] = None,
 ):
     pm = PortfolioManager(get_db())
-    return pm.get_declarations(
+    return pm.get_historique_analyses(
         entreprise_id=entreprise_id, profil_id=profil_id, limit=limit,
     )
 
@@ -778,6 +889,1283 @@ async def get_audit_log(limit: int = Query(100, ge=1, le=500)):
 
 
 # ==============================
+# RESSOURCES HUMAINES
+# ==============================
+
+@app.post("/api/rh/contrats")
+async def creer_contrat(
+    type_contrat: str = Form(...),
+    nom_salarie: str = Form(...),
+    prenom_salarie: str = Form(...),
+    poste: str = Form(...),
+    date_debut: str = Form(...),
+    date_fin: str = Form(""),
+    salaire_brut: str = Form(...),
+    temps_travail: str = Form("full"),
+    duree_hebdo: str = Form("35"),
+    convention_collective: str = Form(""),
+    periode_essai_jours: str = Form("0"),
+    motif_cdd: str = Form(""),
+):
+    """Cree un contrat de travail avec toutes les mentions legales obligatoires (Code du travail L.1221-1 et suivants)."""
+    contrat_id = str(uuid.uuid4())[:8]
+    salarie_id = str(uuid.uuid4())[:8]
+
+    # Validation du type de contrat
+    types_valides = ("CDI", "CDD", "CTT", "Apprentissage", "Professionnalisation", "Saisonnier", "Intermittent")
+    if type_contrat not in types_valides:
+        raise HTTPException(400, f"Type de contrat invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    # Pour un CDD, le motif est obligatoire (art. L.1242-2 Code du travail)
+    if type_contrat == "CDD" and not motif_cdd:
+        raise HTTPException(400, "Le motif du CDD est obligatoire (art. L.1242-2 Code du travail)")
+
+    # Calcul de la periode d'essai legale par defaut si non renseignee
+    pe_jours = int(periode_essai_jours or "0")
+    if pe_jours == 0:
+        periodes_legales = {
+            "CDI": 60,       # 2 mois ouvriers/employes (art. L.1221-19)
+            "CDD": 14,       # 1 jour par semaine, max 2 semaines si CDD <= 6 mois
+            "CTT": 5,
+            "Apprentissage": 45,
+            "Professionnalisation": 30,
+            "Saisonnier": 14,
+            "Intermittent": 60,
+        }
+        pe_jours = periodes_legales.get(type_contrat, 60)
+
+    # Calcul du net estime (approximation 22% de charges salariales)
+    brut = float(salaire_brut)
+    net_estime = round(brut * 0.78, 2)
+    cout_employeur = round(brut * 1.45, 2)
+
+    # Mentions legales obligatoires selon L.1221-1 et R.1221-1 du Code du travail
+    mentions_legales = [
+        "Identite et adresse des parties (art. L.1221-1 CT)",
+        "Lieu de travail (art. L.1221-1 CT)",
+        "Intitule du poste et description des fonctions",
+        f"Date de debut: {date_debut}",
+        f"Duree de la periode d'essai: {pe_jours} jours (art. L.1221-19 CT)",
+        f"Remuneration brute mensuelle: {salaire_brut} EUR",
+        f"Duree du travail: {duree_hebdo}h hebdomadaires",
+        "Convention collective applicable" + (f": {convention_collective}" if convention_collective else ""),
+        "Organisme de securite sociale percevant les cotisations",
+        "Caisse de retraite complementaire",
+        "Organisme de prevoyance (si applicable)",
+    ]
+
+    if type_contrat == "CDD":
+        mentions_legales.extend([
+            f"Motif du recours au CDD: {motif_cdd} (art. L.1242-2 CT)",
+            f"Date de fin prevue: {date_fin}" if date_fin else "Terme imprecis (art. L.1242-7 CT)",
+            "Nom et qualification du salarie remplace (si remplacement)",
+            "Indemnite de fin de contrat: 10% (art. L.1243-8 CT)",
+        ])
+
+    if type_contrat == "Apprentissage":
+        mentions_legales.extend([
+            "Nom du maitre d'apprentissage et titre/diplome",
+            "Organisme de formation (CFA)",
+            "Diplome prepare",
+            "Duree du contrat d'apprentissage",
+        ])
+
+    if type_contrat == "Professionnalisation":
+        mentions_legales.extend([
+            "Qualification visee",
+            "Nature et duree des actions de formation",
+            "Conditions du tutorat",
+        ])
+
+    if temps_travail == "partial":
+        mentions_legales.extend([
+            f"Temps partiel: {duree_hebdo}h/semaine (art. L.3123-6 CT)",
+            "Repartition de la duree du travail entre les jours de la semaine",
+            "Cas de modification de la repartition",
+            "Limites des heures complementaires",
+        ])
+
+    contrat = {
+        "id": contrat_id,
+        "salarie_id": salarie_id,
+        "type_contrat": type_contrat,
+        "nom_salarie": nom_salarie,
+        "prenom_salarie": prenom_salarie,
+        "poste": poste,
+        "date_debut": date_debut,
+        "date_fin": date_fin,
+        "salaire_brut": brut,
+        "net_estime": net_estime,
+        "cout_employeur_estime": cout_employeur,
+        "temps_travail": temps_travail,
+        "duree_hebdo": float(duree_hebdo),
+        "convention_collective": convention_collective,
+        "periode_essai_jours": pe_jours,
+        "motif_cdd": motif_cdd,
+        "mentions_legales": mentions_legales,
+        "statut": "actif",
+        "date_creation": datetime.now().isoformat(),
+        "clauses_obligatoires": {
+            "clause_non_concurrence": False,
+            "clause_mobilite": False,
+            "clause_exclusivite": False,
+            "clause_dedit_formation": False,
+        },
+        "references_legales": {
+            "base": "Code du travail, Partie legislative, Livre II, Titre II",
+            "periode_essai": "Art. L.1221-19 a L.1221-26 CT",
+            "cdd": "Art. L.1241-1 a L.1248-11 CT" if type_contrat == "CDD" else None,
+            "temps_partiel": "Art. L.3123-1 a L.3123-32 CT" if temps_travail == "partial" else None,
+        },
+    }
+
+    _rh_contrats.append(contrat)
+    log_action("utilisateur", "creation_contrat", f"{type_contrat} {prenom_salarie} {nom_salarie} - {poste}")
+    return contrat
+
+
+@app.get("/api/rh/contrats")
+async def liste_contrats():
+    """Liste tous les contrats de travail."""
+    return _rh_contrats
+
+
+@app.get("/api/rh/contrats/{contrat_id}")
+async def detail_contrat(contrat_id: str):
+    """Recupere un contrat par son identifiant."""
+    for c in _rh_contrats:
+        if c["id"] == contrat_id:
+            return c
+    raise HTTPException(404, "Contrat non trouve")
+
+
+# ======================================================================
+# RH - AVENANTS
+# ======================================================================
+
+@app.post("/api/rh/avenants")
+async def creer_avenant(
+    contrat_id: str = Form(...),
+    type_avenant: str = Form(...),
+    description: str = Form(...),
+    date_effet: str = Form(...),
+    nouvelles_conditions: str = Form(""),
+):
+    """Cree un avenant au contrat de travail (art. L.1222-6 CT pour modification du contrat)."""
+    types_valides = ("remuneration", "poste", "temps_travail", "lieu", "autre")
+    if type_avenant not in types_valides:
+        raise HTTPException(400, f"Type d'avenant invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    # Verifier que le contrat existe
+    contrat_trouve = None
+    for c in _rh_contrats:
+        if c["id"] == contrat_id:
+            contrat_trouve = c
+            break
+    if not contrat_trouve:
+        raise HTTPException(404, "Contrat de reference non trouve")
+
+    avenant_id = str(uuid.uuid4())[:8]
+
+    avenant = {
+        "id": avenant_id,
+        "contrat_id": contrat_id,
+        "salarie_id": contrat_trouve["salarie_id"],
+        "nom_salarie": contrat_trouve["nom_salarie"],
+        "prenom_salarie": contrat_trouve["prenom_salarie"],
+        "type_avenant": type_avenant,
+        "description": description,
+        "date_effet": date_effet,
+        "nouvelles_conditions": nouvelles_conditions,
+        "date_creation": datetime.now().isoformat(),
+        "statut": "en_attente_signature",
+        "mentions": [
+            "Modification du contrat de travail soumise a l'accord du salarie (art. L.1222-6 CT)",
+            f"Prise d'effet au {date_effet}",
+            "Les autres clauses du contrat initial restent inchangees",
+        ],
+    }
+
+    _rh_avenants.append(avenant)
+    log_action(
+        "utilisateur", "creation_avenant",
+        f"Avenant {type_avenant} pour contrat {contrat_id} ({contrat_trouve['prenom_salarie']} {contrat_trouve['nom_salarie']})",
+    )
+    return avenant
+
+
+@app.get("/api/rh/avenants")
+async def liste_avenants():
+    """Liste tous les avenants."""
+    return _rh_avenants
+
+
+# ======================================================================
+# RH - CONGES
+# ======================================================================
+
+@app.post("/api/rh/conges")
+async def enregistrer_conge(
+    salarie_id: str = Form(...),
+    type_conge: str = Form(...),
+    date_debut: str = Form(...),
+    date_fin: str = Form(...),
+    nb_jours: str = Form(...),
+    statut: str = Form("demande"),
+):
+    """Enregistre une demande ou un conge (art. L.3141-1 et suivants CT)."""
+    types_valides = ("cp", "rtt", "maladie", "maternite", "paternite", "sans_solde", "familial", "formation")
+    if type_conge not in types_valides:
+        raise HTTPException(400, f"Type de conge invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    statuts_valides = ("demande", "valide", "refuse")
+    if statut not in statuts_valides:
+        raise HTTPException(400, f"Statut invalide. Valeurs acceptees: {', '.join(statuts_valides)}")
+
+    conge_id = str(uuid.uuid4())[:8]
+
+    # Informations reglementaires selon le type
+    info_legale = {
+        "cp": "Conges payes: 2.5 jours ouvrables/mois travaille (art. L.3141-3 CT)",
+        "rtt": "Jours de reduction du temps de travail (accord collectif ou accord d'entreprise)",
+        "maladie": "Arret maladie: indemnites journalieres CPAM apres 3 jours de carence (art. L.323-1 CSS)",
+        "maternite": "Conge maternite: 16 semaines minimum (art. L.1225-17 CT)",
+        "paternite": "Conge paternite: 25 jours calendaires (art. L.1225-35 CT, reforme 2021)",
+        "sans_solde": "Conge sans solde: accord employeur necessaire, pas de remuneration",
+        "familial": "Conges pour evenements familiaux (art. L.3142-1 CT): mariage, naissance, deces",
+        "formation": "Conge de formation: CPF de transition professionnelle (art. L.6323-17-1 CT)",
+    }
+
+    conge = {
+        "id": conge_id,
+        "salarie_id": salarie_id,
+        "type_conge": type_conge,
+        "date_debut": date_debut,
+        "date_fin": date_fin,
+        "nb_jours": float(nb_jours),
+        "statut": statut,
+        "date_creation": datetime.now().isoformat(),
+        "info_legale": info_legale.get(type_conge, ""),
+    }
+
+    _rh_conges.append(conge)
+    log_action("utilisateur", "enregistrement_conge", f"{type_conge} salarie {salarie_id} du {date_debut} au {date_fin}")
+    return conge
+
+
+@app.get("/api/rh/conges")
+async def liste_conges(salarie_id: Optional[str] = Query(None)):
+    """Liste les conges, avec filtre optionnel par salarie."""
+    if salarie_id:
+        return [c for c in _rh_conges if c["salarie_id"] == salarie_id]
+    return _rh_conges
+
+
+# ======================================================================
+# RH - ARRETS DE TRAVAIL
+# ======================================================================
+
+@app.post("/api/rh/arrets")
+async def enregistrer_arret(
+    salarie_id: str = Form(...),
+    type_arret: str = Form(...),
+    date_debut: str = Form(...),
+    date_fin: str = Form(""),
+    prolongation: str = Form("false"),
+    subrogation: str = Form("false"),
+):
+    """Enregistre un arret de travail (maladie, AT/MP, mi-temps therapeutique)."""
+    types_valides = ("maladie", "accident_travail", "maladie_pro", "mi_temps_therapeutique")
+    if type_arret not in types_valides:
+        raise HTTPException(400, f"Type d'arret invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    arret_id = str(uuid.uuid4())[:8]
+    est_prolongation = prolongation.lower() == "true"
+    est_subrogation = subrogation.lower() == "true"
+
+    # Obligations employeur selon le type d'arret
+    obligations = []
+    if type_arret == "maladie":
+        obligations = [
+            "Attestation de salaire CPAM sous 5 jours (art. R.323-10 CSS)",
+            "Signalement DSN evenementielle sous 5 jours",
+            "Maintien de salaire employeur apres 7 jours d'anciennete (art. L.1226-1 CT)",
+            "Carence CPAM: 3 jours (art. R.323-1 CSS)",
+        ]
+    elif type_arret == "accident_travail":
+        obligations = [
+            "Declaration AT sous 48h a la CPAM (art. L.441-2 CSS)",
+            "Remise feuille d'accident au salarie (art. L.441-5 CSS)",
+            "Attestation de salaire CPAM immediate",
+            "Signalement DSN evenementielle sous 5 jours",
+            "Pas de carence CPAM pour AT (art. L.433-1 CSS)",
+            "Protection contre le licenciement (art. L.1226-9 CT)",
+        ]
+    elif type_arret == "maladie_pro":
+        obligations = [
+            "Declaration maladie professionnelle a la CPAM (art. L.461-5 CSS)",
+            "Attestation de salaire CPAM",
+            "Signalement DSN evenementielle sous 5 jours",
+            "Protection contre le licenciement (art. L.1226-9 CT)",
+        ]
+    elif type_arret == "mi_temps_therapeutique":
+        obligations = [
+            "Prescription medicale de reprise a temps partiel",
+            "Accord de la CPAM pour maintien des IJSS",
+            "Avenant temporaire au contrat de travail",
+            "Adaptation du poste si necessaire",
+        ]
+
+    arret = {
+        "id": arret_id,
+        "salarie_id": salarie_id,
+        "type_arret": type_arret,
+        "date_debut": date_debut,
+        "date_fin": date_fin,
+        "prolongation": est_prolongation,
+        "subrogation": est_subrogation,
+        "obligations_employeur": obligations,
+        "date_creation": datetime.now().isoformat(),
+        "statut": "en_cours" if not date_fin else "termine",
+    }
+
+    _rh_arrets.append(arret)
+    log_action("utilisateur", "enregistrement_arret", f"{type_arret} salarie {salarie_id} depuis {date_debut}")
+    return arret
+
+
+@app.get("/api/rh/arrets")
+async def liste_arrets():
+    """Liste tous les arrets de travail."""
+    return _rh_arrets
+
+
+# ======================================================================
+# RH - SANCTIONS DISCIPLINAIRES
+# ======================================================================
+
+@app.post("/api/rh/sanctions")
+async def enregistrer_sanction(
+    salarie_id: str = Form(...),
+    type_sanction: str = Form(...),
+    date_sanction: str = Form(...),
+    motif: str = Form(...),
+    description: str = Form(""),
+    date_entretien_prealable: str = Form(""),
+):
+    """Enregistre une sanction disciplinaire (art. L.1331-1 et suivants CT)."""
+    types_valides = ("avertissement", "blame", "mise_a_pied", "retrogradation", "licenciement")
+    if type_sanction not in types_valides:
+        raise HTTPException(400, f"Type de sanction invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    sanction_id = str(uuid.uuid4())[:8]
+
+    # Procedure disciplinaire obligatoire (art. L.1332-1 a L.1332-3 CT)
+    procedure = []
+    if type_sanction in ("avertissement", "blame"):
+        procedure = [
+            "Notification ecrite au salarie (art. L.1332-1 CT)",
+            "Delai de prescription: 2 mois a compter de la connaissance des faits (art. L.1332-4 CT)",
+            "Entretien prealable facultatif pour avertissement simple",
+        ]
+    else:
+        procedure = [
+            "Convocation a entretien prealable par LRAR ou remise en main propre (art. L.1332-2 CT)",
+            "Delai minimum 5 jours ouvrables entre convocation et entretien",
+            "Assistance du salarie par un membre du personnel (art. L.1332-2 CT)",
+            "Notification de la sanction par LRAR (art. L.1332-2 CT)",
+            "Delai: au moins 2 jours ouvrables et au plus 1 mois apres l'entretien",
+            "Delai de prescription: 2 mois a compter de la connaissance des faits (art. L.1332-4 CT)",
+        ]
+
+    if type_sanction == "licenciement":
+        procedure.extend([
+            "Motif reel et serieux obligatoire (art. L.1232-1 CT)",
+            "Lettre de licenciement motivee (art. L.1232-6 CT)",
+            "Preavis selon anciennete et convention collective",
+            "Indemnite legale de licenciement si anciennete >= 8 mois (art. L.1234-9 CT)",
+            "Documents de fin de contrat: certificat de travail, attestation Pole emploi, solde de tout compte",
+        ])
+
+    if type_sanction == "mise_a_pied":
+        procedure.append("Duree maximale fixee par le reglement interieur ou la convention collective")
+
+    sanction = {
+        "id": sanction_id,
+        "salarie_id": salarie_id,
+        "type_sanction": type_sanction,
+        "date_sanction": date_sanction,
+        "motif": motif,
+        "description": description,
+        "date_entretien_prealable": date_entretien_prealable,
+        "procedure_obligatoire": procedure,
+        "date_creation": datetime.now().isoformat(),
+        "statut": "notifiee",
+    }
+
+    _rh_sanctions.append(sanction)
+    log_action("utilisateur", "enregistrement_sanction", f"{type_sanction} salarie {salarie_id} - {motif}")
+    return sanction
+
+
+@app.get("/api/rh/sanctions")
+async def liste_sanctions():
+    """Liste toutes les sanctions disciplinaires."""
+    return _rh_sanctions
+
+
+# ======================================================================
+# RH - ATTESTATIONS
+# ======================================================================
+
+@app.post("/api/rh/attestations/generer")
+async def generer_attestation(
+    salarie_id: str = Form(...),
+    type_attestation: str = Form(...),
+    date_generation: str = Form(""),
+):
+    """Genere une attestation RH (travail, employeur, salaire, pole_emploi, mutuelle, stage)."""
+    types_valides = ("travail", "employeur", "salaire", "pole_emploi", "mutuelle", "stage")
+    if type_attestation not in types_valides:
+        raise HTTPException(400, f"Type d'attestation invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    if not date_generation:
+        date_generation = date.today().isoformat()
+
+    attestation_id = str(uuid.uuid4())[:8]
+
+    # Recherche des informations du salarie a travers les contrats
+    contrat_salarie = None
+    for c in _rh_contrats:
+        if c["salarie_id"] == salarie_id:
+            contrat_salarie = c
+            break
+
+    nom_salarie = ""
+    prenom_salarie = ""
+    poste = ""
+    date_debut = ""
+    salaire_brut = 0
+    if contrat_salarie:
+        nom_salarie = contrat_salarie["nom_salarie"]
+        prenom_salarie = contrat_salarie["prenom_salarie"]
+        poste = contrat_salarie["poste"]
+        date_debut = contrat_salarie["date_debut"]
+        salaire_brut = contrat_salarie["salaire_brut"]
+
+    # Configuration entete entreprise
+    nom_entreprise = _entete_config.get("nom_entreprise", "[Nom entreprise]")
+    adresse_entreprise = _entete_config.get("adresse", "[Adresse entreprise]")
+    siret_entreprise = _entete_config.get("siret", "[SIRET]")
+
+    # Generation du texte selon le type
+    texte = ""
+
+    if type_attestation == "travail":
+        texte = (
+            f"ATTESTATION DE TRAVAIL\n\n"
+            f"Je soussigne(e), representant(e) de la societe {nom_entreprise},\n"
+            f"SIRET: {siret_entreprise}, sise {adresse_entreprise},\n\n"
+            f"atteste que M./Mme {prenom_salarie} {nom_salarie}\n"
+            f"occupe le poste de {poste} dans notre entreprise\n"
+            f"depuis le {date_debut}.\n\n"
+            f"Cette attestation est delivree pour servir et valoir ce que de droit.\n\n"
+            f"Fait a __________, le {date_generation}\n\n"
+            f"Signature et cachet de l'employeur"
+        )
+
+    elif type_attestation == "employeur":
+        texte = (
+            f"ATTESTATION EMPLOYEUR (art. L.1234-19 Code du travail)\n\n"
+            f"Societe: {nom_entreprise}\n"
+            f"SIRET: {siret_entreprise}\n"
+            f"Adresse: {adresse_entreprise}\n\n"
+            f"Certifie que M./Mme {prenom_salarie} {nom_salarie}\n"
+            f"a ete employe(e) en qualite de {poste}\n"
+            f"du {date_debut} au {date_generation}\n\n"
+            f"Motif de la rupture: [A completer]\n"
+            f"Preavis: [effectue / non effectue / dispense]\n\n"
+            f"Le(la) salarie(e) est libre de tout engagement a compter de ce jour.\n\n"
+            f"Fait a __________, le {date_generation}\n\n"
+            f"Signature et cachet de l'employeur"
+        )
+
+    elif type_attestation == "salaire":
+        net_estime = round(salaire_brut * 0.78, 2)
+        texte = (
+            f"ATTESTATION DE SALAIRE\n\n"
+            f"Je soussigne(e), representant(e) de la societe {nom_entreprise},\n"
+            f"SIRET: {siret_entreprise},\n\n"
+            f"atteste que M./Mme {prenom_salarie} {nom_salarie},\n"
+            f"occupant le poste de {poste},\n"
+            f"percoit une remuneration mensuelle brute de {salaire_brut} EUR,\n"
+            f"soit un net imposable estime de {net_estime} EUR.\n\n"
+            f"Cette attestation est delivree a la demande de l'interesse(e)\n"
+            f"pour servir et valoir ce que de droit.\n\n"
+            f"Fait a __________, le {date_generation}\n\n"
+            f"Signature et cachet de l'employeur"
+        )
+
+    elif type_attestation == "pole_emploi":
+        texte = (
+            f"ATTESTATION POLE EMPLOI (art. R.1234-9 Code du travail)\n\n"
+            f"EMPLOYEUR\n"
+            f"Denomination: {nom_entreprise}\n"
+            f"SIRET: {siret_entreprise}\n"
+            f"Adresse: {adresse_entreprise}\n\n"
+            f"SALARIE\n"
+            f"Nom: {nom_salarie}\n"
+            f"Prenom: {prenom_salarie}\n"
+            f"Emploi: {poste}\n"
+            f"Date d'entree: {date_debut}\n"
+            f"Date de sortie: {date_generation}\n"
+            f"Motif de rupture: [A completer - code motif]\n\n"
+            f"SALAIRES DES 12 DERNIERS MOIS\n"
+            f"[A completer avec les salaires bruts mensuels]\n"
+            f"Salaire brut mensuel de reference: {salaire_brut} EUR\n\n"
+            f"PREAVIS\n"
+            f"Effectue: [oui/non]\n"
+            f"Non effectue et paye: [oui/non]\n\n"
+            f"CONGES PAYES\n"
+            f"Solde de conges payes a la date de fin: [A completer]\n"
+            f"Indemnite compensatrice versee: [A completer]\n\n"
+            f"Date: {date_generation}\n"
+            f"Signature et cachet de l'employeur"
+        )
+
+    elif type_attestation == "mutuelle":
+        texte = (
+            f"ATTESTATION DE PORTABILITE MUTUELLE (art. L.911-8 CSS)\n\n"
+            f"Societe: {nom_entreprise}\n"
+            f"SIRET: {siret_entreprise}\n\n"
+            f"Atteste que M./Mme {prenom_salarie} {nom_salarie},\n"
+            f"ancien(ne) salarie(e) de notre entreprise,\n"
+            f"beneficie du maintien de la couverture complementaire sante\n"
+            f"et prevoyance au titre de la portabilite des droits,\n"
+            f"pour une duree maximale de 12 mois a compter de la cessation\n"
+            f"du contrat de travail.\n\n"
+            f"Organisme assureur: [A completer]\n"
+            f"Numero de contrat: [A completer]\n\n"
+            f"Fait a __________, le {date_generation}\n\n"
+            f"Signature et cachet de l'employeur"
+        )
+
+    elif type_attestation == "stage":
+        texte = (
+            f"ATTESTATION DE STAGE (art. L.124-1 Code de l'education)\n\n"
+            f"Societe: {nom_entreprise}\n"
+            f"SIRET: {siret_entreprise}\n"
+            f"Adresse: {adresse_entreprise}\n\n"
+            f"Atteste que M./Mme {prenom_salarie} {nom_salarie}\n"
+            f"a effectue un stage au sein de notre entreprise\n"
+            f"du {date_debut} au {date_generation}\n\n"
+            f"Fonctions occupees: {poste}\n"
+            f"Duree effective: [A completer] heures\n"
+            f"Gratification versee: [A completer] EUR\n\n"
+            f"Competences acquises ou developpees:\n"
+            f"[A completer]\n\n"
+            f"Fait a __________, le {date_generation}\n\n"
+            f"Signature et cachet de l'employeur"
+        )
+
+    attestation = {
+        "id": attestation_id,
+        "salarie_id": salarie_id,
+        "type_attestation": type_attestation,
+        "date_generation": date_generation,
+        "nom_salarie": nom_salarie,
+        "prenom_salarie": prenom_salarie,
+        "texte": texte,
+        "date_creation": datetime.now().isoformat(),
+    }
+
+    _rh_attestations.append(attestation)
+    log_action("utilisateur", "generation_attestation", f"{type_attestation} salarie {salarie_id}")
+    return attestation
+
+
+@app.get("/api/rh/attestations")
+async def liste_attestations():
+    """Liste toutes les attestations generees."""
+    return _rh_attestations
+
+
+# ======================================================================
+# RH - ENTRETIENS PROFESSIONNELS
+# ======================================================================
+
+@app.post("/api/rh/entretiens")
+async def enregistrer_entretien(
+    salarie_id: str = Form(...),
+    type_entretien: str = Form(...),
+    date_entretien: str = Form(...),
+    compte_rendu: str = Form(""),
+    date_prochain: str = Form(""),
+):
+    """Enregistre un entretien professionnel (art. L.6315-1 CT)."""
+    types_valides = ("professionnel_2ans", "bilan_6ans", "annuel", "fin_periode_essai")
+    if type_entretien not in types_valides:
+        raise HTTPException(400, f"Type d'entretien invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    entretien_id = str(uuid.uuid4())[:8]
+
+    # Obligations legales par type d'entretien
+    obligations = {}
+    if type_entretien == "professionnel_2ans":
+        obligations = {
+            "reference": "Art. L.6315-1 Code du travail",
+            "frequence": "Tous les 2 ans",
+            "contenu_obligatoire": [
+                "Perspectives d'evolution professionnelle (qualifications, emploi)",
+                "Information sur la VAE (Validation des Acquis de l'Experience)",
+                "Information sur le CPF (Compte Personnel de Formation)",
+                "Information sur le CEP (Conseil en Evolution Professionnelle)",
+            ],
+            "sanction": "Abondement correctif de 3000 EUR sur le CPF si non-respect dans les entreprises >= 50 salaries",
+        }
+    elif type_entretien == "bilan_6ans":
+        obligations = {
+            "reference": "Art. L.6315-1 II Code du travail",
+            "frequence": "Tous les 6 ans",
+            "contenu_obligatoire": [
+                "Etat recapitulatif des entretiens professionnels des 6 annees",
+                "Verification: au moins une action de formation suivie",
+                "Verification: acquisition d'elements de certification",
+                "Verification: progression salariale ou professionnelle",
+            ],
+            "sanction": "Abondement correctif de 3000 EUR sur le CPF si 2 des 3 criteres non remplis (entreprises >= 50 sal.)",
+        }
+    elif type_entretien == "annuel":
+        obligations = {
+            "reference": "Non obligatoire legalement sauf convention collective",
+            "frequence": "Annuel (bonne pratique RH)",
+            "contenu_suggere": [
+                "Evaluation des objectifs de l'annee ecoulee",
+                "Fixation des objectifs pour l'annee suivante",
+                "Discussion sur les besoins en formation",
+                "Echange sur les conditions de travail",
+            ],
+        }
+    elif type_entretien == "fin_periode_essai":
+        obligations = {
+            "reference": "Art. L.1221-19 et suivants CT",
+            "contenu_suggere": [
+                "Bilan de la periode d'essai",
+                "Confirmation ou non du poste",
+                "Points d'amelioration identifies",
+                "Objectifs pour la suite",
+            ],
+        }
+
+    entretien = {
+        "id": entretien_id,
+        "salarie_id": salarie_id,
+        "type_entretien": type_entretien,
+        "date_entretien": date_entretien,
+        "compte_rendu": compte_rendu,
+        "date_prochain": date_prochain,
+        "obligations": obligations,
+        "date_creation": datetime.now().isoformat(),
+    }
+
+    _rh_entretiens.append(entretien)
+    log_action("utilisateur", "enregistrement_entretien", f"{type_entretien} salarie {salarie_id} le {date_entretien}")
+    return entretien
+
+
+@app.get("/api/rh/entretiens")
+async def liste_entretiens():
+    """Liste tous les entretiens professionnels."""
+    return _rh_entretiens
+
+
+# ======================================================================
+# RH - VISITES MEDICALES
+# ======================================================================
+
+@app.post("/api/rh/visites-medicales")
+async def enregistrer_visite_medicale(
+    salarie_id: str = Form(...),
+    type_visite: str = Form(...),
+    date_visite: str = Form(...),
+    resultat: str = Form("apte"),
+    remarques: str = Form(""),
+    date_prochaine: str = Form(""),
+):
+    """Enregistre une visite medicale (art. L.4624-1 et suivants CT)."""
+    types_valides = ("embauche", "periodique", "reprise", "pre_reprise", "demande")
+    if type_visite not in types_valides:
+        raise HTTPException(400, f"Type de visite invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    resultats_valides = ("apte", "inapte", "amenagement")
+    if resultat not in resultats_valides:
+        raise HTTPException(400, f"Resultat invalide. Valeurs acceptees: {', '.join(resultats_valides)}")
+
+    visite_id = str(uuid.uuid4())[:8]
+
+    # Reglementation selon le type de visite
+    reglementation = {}
+    if type_visite == "embauche":
+        reglementation = {
+            "reference": "Art. R.4624-10 et suivants CT",
+            "description": "Visite d'information et de prevention (VIP) dans les 3 mois suivant la prise de poste",
+            "frequence_suivi": "5 ans maximum (3 ans pour les travailleurs de nuit, handicapes, etc.)",
+            "postes_a_risque": "Suivi individuel renforce (SIR) pour les postes a risques particuliers",
+        }
+    elif type_visite == "periodique":
+        reglementation = {
+            "reference": "Art. R.4624-16 CT",
+            "description": "Suivi periodique de l'etat de sante",
+            "frequence": "Maximum 5 ans (VIP) ou 4 ans (SIR avec visite intermediaire a 2 ans)",
+        }
+    elif type_visite == "reprise":
+        reglementation = {
+            "reference": "Art. R.4624-31 CT",
+            "description": "Obligatoire apres: arret maladie >= 60 jours, AT >= 30 jours, maladie pro, maternite",
+            "delai": "Dans les 8 jours suivant la reprise effective",
+        }
+    elif type_visite == "pre_reprise":
+        reglementation = {
+            "reference": "Art. R.4624-29 CT",
+            "description": "Visite de pre-reprise en cas d'arret > 30 jours",
+            "objectif": "Favoriser le maintien dans l'emploi, amenagements eventuels",
+        }
+    elif type_visite == "demande":
+        reglementation = {
+            "reference": "Art. R.4624-34 CT",
+            "description": "Visite a la demande du salarie, de l'employeur ou du medecin du travail",
+            "delai": "Pas de delai impose, selon urgence",
+        }
+
+    # Actions a mener si inapte
+    actions_si_inapte = []
+    if resultat == "inapte":
+        actions_si_inapte = [
+            "Obligation de reclassement dans un delai d'un mois (art. L.1226-2 CT)",
+            "Consultation du CSE sur les propositions de reclassement",
+            "Recherche de reclassement dans l'entreprise et le groupe",
+            "Si impossibilite de reclassement: licenciement pour inaptitude possible",
+            "Indemnite speciale de licenciement si AT/MP (art. L.1226-14 CT)",
+        ]
+
+    visite = {
+        "id": visite_id,
+        "salarie_id": salarie_id,
+        "type_visite": type_visite,
+        "date_visite": date_visite,
+        "resultat": resultat,
+        "remarques": remarques,
+        "date_prochaine": date_prochaine,
+        "reglementation": reglementation,
+        "actions_si_inapte": actions_si_inapte,
+        "date_creation": datetime.now().isoformat(),
+    }
+
+    _rh_visites_med.append(visite)
+    log_action("utilisateur", "enregistrement_visite_medicale", f"{type_visite} salarie {salarie_id} - {resultat}")
+    return visite
+
+
+@app.get("/api/rh/visites-medicales")
+async def liste_visites_medicales():
+    """Liste toutes les visites medicales."""
+    return _rh_visites_med
+
+
+# ======================================================================
+# RH - ALERTES (calcul dynamique)
+# ======================================================================
+
+@app.get("/api/rh/alertes")
+async def get_rh_alertes():
+    """Calcule et retourne les alertes RH basees sur les echeances.
+
+    Verifie: fin CDD, entretiens professionnels, visites medicales,
+    prevoyance, interessement, declarations, periodes d'essai.
+    """
+    alertes = []
+    aujourdhui = date.today()
+
+    # --- 1. CDD arrivant a echeance dans les 30 jours ---
+    for contrat in _rh_contrats:
+        if contrat["type_contrat"] == "CDD" and contrat.get("date_fin"):
+            try:
+                fin = date.fromisoformat(contrat["date_fin"])
+                jours_restants = (fin - aujourdhui).days
+                if 0 <= jours_restants <= 30:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "fin_cdd",
+                        "urgence": "haute" if jours_restants <= 7 else "moyenne",
+                        "message": (
+                            f"CDD de {contrat['prenom_salarie']} {contrat['nom_salarie']} "
+                            f"({contrat['poste']}) expire dans {jours_restants} jour(s) "
+                            f"(le {contrat['date_fin']})"
+                        ),
+                        "reference": "Art. L.1243-5 CT - Le CDD cesse de plein droit a l'echeance du terme",
+                        "action_requise": "Renouveler, transformer en CDI, ou preparer les documents de fin de contrat",
+                        "contrat_id": contrat["id"],
+                        "date_echeance": contrat["date_fin"],
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # --- 2. Entretiens professionnels en retard (tous les 2 ans) ---
+    # Collecter le dernier entretien par salarie
+    derniers_entretiens: dict[str, str] = {}
+    for ent in _rh_entretiens:
+        if ent["type_entretien"] in ("professionnel_2ans", "bilan_6ans"):
+            sid = ent["salarie_id"]
+            if sid not in derniers_entretiens or ent["date_entretien"] > derniers_entretiens[sid]:
+                derniers_entretiens[sid] = ent["date_entretien"]
+
+    for contrat in _rh_contrats:
+        if contrat["statut"] != "actif":
+            continue
+        sid = contrat["salarie_id"]
+        dernier = derniers_entretiens.get(sid)
+        if dernier:
+            try:
+                date_dernier = date.fromisoformat(dernier)
+                jours_depuis = (aujourdhui - date_dernier).days
+                if jours_depuis > 730:  # > 2 ans
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "entretien_professionnel_retard",
+                        "urgence": "haute",
+                        "message": (
+                            f"Entretien professionnel en retard pour {contrat['prenom_salarie']} "
+                            f"{contrat['nom_salarie']} - dernier entretien il y a {jours_depuis} jours"
+                        ),
+                        "reference": "Art. L.6315-1 CT - Entretien professionnel tous les 2 ans",
+                        "action_requise": "Planifier un entretien professionnel dans les meilleurs delais",
+                        "salarie_id": sid,
+                    })
+            except (ValueError, TypeError):
+                pass
+        else:
+            # Aucun entretien enregistre : verifier si le contrat a plus de 2 ans
+            try:
+                date_debut = date.fromisoformat(contrat["date_debut"])
+                anciennete_jours = (aujourdhui - date_debut).days
+                if anciennete_jours > 730:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "entretien_professionnel_manquant",
+                        "urgence": "haute",
+                        "message": (
+                            f"Aucun entretien professionnel enregistre pour {contrat['prenom_salarie']} "
+                            f"{contrat['nom_salarie']} (anciennete: {anciennete_jours} jours)"
+                        ),
+                        "reference": "Art. L.6315-1 CT - Entretien professionnel tous les 2 ans",
+                        "action_requise": "Planifier un entretien professionnel immediatement",
+                        "salarie_id": sid,
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # --- 3. Visites medicales en retard ---
+    dernieres_visites: dict[str, str] = {}
+    prochaines_visites: dict[str, str] = {}
+    for v in _rh_visites_med:
+        sid = v["salarie_id"]
+        if sid not in dernieres_visites or v["date_visite"] > dernieres_visites[sid]:
+            dernieres_visites[sid] = v["date_visite"]
+        if v.get("date_prochaine"):
+            if sid not in prochaines_visites or v["date_prochaine"] < prochaines_visites[sid]:
+                prochaines_visites[sid] = v["date_prochaine"]
+
+    for sid, date_prochaine in prochaines_visites.items():
+        try:
+            dp = date.fromisoformat(date_prochaine)
+            jours_restants = (dp - aujourdhui).days
+            if jours_restants < 0:
+                # Trouver le nom du salarie
+                nom_complet = sid
+                for c in _rh_contrats:
+                    if c["salarie_id"] == sid:
+                        nom_complet = f"{c['prenom_salarie']} {c['nom_salarie']}"
+                        break
+                alertes.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "type": "visite_medicale_retard",
+                    "urgence": "haute",
+                    "message": (
+                        f"Visite medicale en retard pour {nom_complet} "
+                        f"(prevue le {date_prochaine}, retard: {abs(jours_restants)} jour(s))"
+                    ),
+                    "reference": "Art. R.4624-16 CT - Suivi individuel de l'etat de sante",
+                    "action_requise": "Prendre rendez-vous avec la medecine du travail",
+                    "salarie_id": sid,
+                })
+            elif jours_restants <= 30:
+                nom_complet = sid
+                for c in _rh_contrats:
+                    if c["salarie_id"] == sid:
+                        nom_complet = f"{c['prenom_salarie']} {c['nom_salarie']}"
+                        break
+                alertes.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "type": "visite_medicale_a_planifier",
+                    "urgence": "moyenne",
+                    "message": (
+                        f"Visite medicale a planifier pour {nom_complet} "
+                        f"(echeance: {date_prochaine}, dans {jours_restants} jour(s))"
+                    ),
+                    "reference": "Art. R.4624-16 CT",
+                    "action_requise": "Prendre rendez-vous avec la medecine du travail",
+                    "salarie_id": sid,
+                })
+        except (ValueError, TypeError):
+            pass
+
+    # --- 4. Prevoyance obligatoire si effectif >= 1 ---
+    nb_actifs = sum(1 for c in _rh_contrats if c.get("statut") == "actif")
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "prevoyance_obligatoire",
+            "urgence": "info",
+            "message": (
+                f"Rappel: La prevoyance est obligatoire pour les cadres "
+                f"(ANI du 17/11/2017). Effectif actif: {nb_actifs} salarie(s)."
+            ),
+            "reference": "ANI du 17 novembre 2017 / Convention collective",
+            "action_requise": "Verifier la mise en place d'un contrat de prevoyance",
+        })
+
+    # --- 5. Interessement obligatoire si effectif >= 50 ---
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "interessement_participation",
+            "urgence": "moyenne",
+            "message": (
+                f"Participation obligatoire pour les entreprises de 50 salaries et plus. "
+                f"Effectif actuel: {nb_actifs}."
+            ),
+            "reference": "Art. L.3322-2 CT - Mise en place obligatoire de la participation",
+            "action_requise": "Verifier la mise en place d'un accord de participation",
+        })
+
+    # --- 6. Rappels declarations ---
+    # DSN mensuelle : a transmettre au plus tard le 5 ou le 15 du mois suivant
+    jour_du_mois = aujourdhui.day
+    if jour_du_mois <= 15:
+        date_limite_dsn = "le 5 du mois" if nb_actifs >= 50 else "le 15 du mois"
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "declaration_dsn_mensuelle",
+            "urgence": "info",
+            "message": f"Rappel: DSN mensuelle a transmettre avant {date_limite_dsn} en cours",
+            "reference": "Art. R.133-14 CSS - Declaration sociale nominative",
+            "action_requise": "Verifier et transmettre la DSN mensuelle",
+        })
+
+    # DPAE : avant toute embauche
+    for contrat in _rh_contrats:
+        if contrat.get("statut") == "actif":
+            try:
+                dd = date.fromisoformat(contrat["date_debut"])
+                if (dd - aujourdhui).days >= 0 and (dd - aujourdhui).days <= 8:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "dpae_a_effectuer",
+                        "urgence": "haute",
+                        "message": (
+                            f"DPAE a effectuer pour {contrat['prenom_salarie']} {contrat['nom_salarie']} "
+                            f"avant le {contrat['date_debut']}"
+                        ),
+                        "reference": "Art. L.1221-10 CT - DPAE au plus tard dans les 8 jours precedant l'embauche",
+                        "action_requise": "Effectuer la DPAE aupres de l'URSSAF",
+                        "contrat_id": contrat["id"],
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # --- 7. Periodes d'essai arrivant a echeance ---
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif":
+            continue
+        pe_jours = contrat.get("periode_essai_jours", 0)
+        if pe_jours <= 0:
+            continue
+        try:
+            dd = date.fromisoformat(contrat["date_debut"])
+            fin_pe = dd + __import__("datetime").timedelta(days=pe_jours)
+            jours_restants_pe = (fin_pe - aujourdhui).days
+            if 0 <= jours_restants_pe <= 14:
+                alertes.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "type": "fin_periode_essai",
+                    "urgence": "haute" if jours_restants_pe <= 3 else "moyenne",
+                    "message": (
+                        f"Periode d'essai de {contrat['prenom_salarie']} {contrat['nom_salarie']} "
+                        f"se termine dans {jours_restants_pe} jour(s) (le {fin_pe.isoformat()})"
+                    ),
+                    "reference": "Art. L.1221-19 et suivants CT",
+                    "action_requise": "Confirmer l'embauche ou notifier la rupture de la periode d'essai",
+                    "contrat_id": contrat["id"],
+                })
+        except (ValueError, TypeError):
+            pass
+
+    # Trier par urgence (haute > moyenne > info)
+    ordre_urgence = {"haute": 0, "moyenne": 1, "info": 2}
+    alertes.sort(key=lambda a: ordre_urgence.get(a.get("urgence", "info"), 3))
+
+    log_action("utilisateur", "consultation_alertes_rh", f"{len(alertes)} alerte(s) generee(s)")
+    return {"nb_alertes": len(alertes), "alertes": alertes}
+
+
+# ======================================================================
+# RH - ECHANGES SALARIES
+# ======================================================================
+
+@app.post("/api/rh/echanges")
+async def enregistrer_echange(
+    salarie_id: str = Form(...),
+    objet: str = Form(...),
+    contenu: str = Form(...),
+    type_echange: str = Form("email"),
+    date_echange: str = Form(""),
+):
+    """Enregistre un echange avec un salarie (email, courrier, reunion, entretien)."""
+    types_valides = ("email", "courrier", "reunion", "entretien")
+    if type_echange not in types_valides:
+        raise HTTPException(400, f"Type d'echange invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    if not date_echange:
+        date_echange = date.today().isoformat()
+
+    echange_id = str(uuid.uuid4())[:8]
+
+    echange = {
+        "id": echange_id,
+        "salarie_id": salarie_id,
+        "objet": objet,
+        "contenu": contenu,
+        "type_echange": type_echange,
+        "date_echange": date_echange,
+        "date_creation": datetime.now().isoformat(),
+    }
+
+    _rh_echanges.append(echange)
+    log_action("utilisateur", "enregistrement_echange", f"{type_echange} salarie {salarie_id}: {objet}")
+    return echange
+
+
+@app.get("/api/rh/echanges")
+async def liste_echanges():
+    """Liste tous les echanges enregistres."""
+    return _rh_echanges
+
+
+# ======================================================================
+# RH - PLANNING
+# ======================================================================
+
+@app.post("/api/rh/planning")
+async def ajouter_planning(
+    salarie_id: str = Form(...),
+    date: str = Form(...),
+    heure_debut: str = Form(...),
+    heure_fin: str = Form(...),
+    type_poste: str = Form("normal"),
+):
+    """Ajoute ou modifie une entree de planning pour un salarie."""
+    types_valides = ("normal", "astreinte", "nuit", "dimanche", "ferie")
+    if type_poste not in types_valides:
+        raise HTTPException(400, f"Type de poste invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    planning_id = str(uuid.uuid4())[:8]
+
+    # Calcul de la duree
+    try:
+        h_deb = datetime.strptime(heure_debut, "%H:%M")
+        h_fin = datetime.strptime(heure_fin, "%H:%M")
+        duree_minutes = (h_fin - h_deb).seconds // 60
+        duree_heures = round(duree_minutes / 60, 2)
+    except (ValueError, TypeError):
+        duree_heures = 0
+
+    # Majorations applicables
+    majorations = []
+    if type_poste == "nuit":
+        majorations.append({
+            "type": "travail_nuit",
+            "taux": "25% minimum",
+            "reference": "Art. L.3122-8 CT ou convention collective",
+        })
+    elif type_poste == "dimanche":
+        majorations.append({
+            "type": "travail_dimanche",
+            "taux": "Variable selon convention collective",
+            "reference": "Art. L.3132-1 et suivants CT",
+        })
+    elif type_poste == "ferie":
+        majorations.append({
+            "type": "travail_jour_ferie",
+            "taux": "100% si 1er mai, variable sinon selon convention",
+            "reference": "Art. L.3133-6 CT (1er mai) / Convention collective",
+        })
+    elif type_poste == "astreinte":
+        majorations.append({
+            "type": "astreinte",
+            "taux": "Compensation obligatoire (repos ou financiere)",
+            "reference": "Art. L.3121-9 CT",
+        })
+
+    # Verifier s'il existe deja une entree pour ce salarie a cette date, et la remplacer
+    index_existant = None
+    for i, p in enumerate(_rh_planning):
+        if p["salarie_id"] == salarie_id and p["date"] == date and p["heure_debut"] == heure_debut:
+            index_existant = i
+            break
+
+    entree = {
+        "id": planning_id,
+        "salarie_id": salarie_id,
+        "date": date,
+        "heure_debut": heure_debut,
+        "heure_fin": heure_fin,
+        "duree_heures": duree_heures,
+        "type_poste": type_poste,
+        "majorations": majorations,
+        "date_creation": datetime.now().isoformat(),
+    }
+
+    if index_existant is not None:
+        entree["id"] = _rh_planning[index_existant]["id"]  # Conserver l'id original
+        _rh_planning[index_existant] = entree
+        log_action("utilisateur", "modification_planning", f"salarie {salarie_id} le {date} {heure_debut}-{heure_fin}")
+    else:
+        _rh_planning.append(entree)
+        log_action("utilisateur", "ajout_planning", f"salarie {salarie_id} le {date} {heure_debut}-{heure_fin} ({type_poste})")
+
+    return entree
+
+
+@app.get("/api/rh/planning")
+async def liste_planning(semaine: Optional[str] = Query(None)):
+    """Liste le planning, avec filtre optionnel par semaine ISO (ex: 2026-W08).
+
+    Le format semaine est ISO 8601: YYYY-Www (ex: 2026-W08).
+    """
+    if not semaine:
+        return _rh_planning
+
+    # Parser la semaine ISO pour determiner les dates lundi-dimanche
+    try:
+        # Format: 2026-W08
+        parts = semaine.split("-W")
+        if len(parts) != 2:
+            raise HTTPException(400, "Format semaine invalide. Utiliser YYYY-Www (ex: 2026-W08)")
+        annee = int(parts[0])
+        num_semaine = int(parts[1])
+
+        # Calculer le lundi de la semaine ISO
+        # Le 4 janvier est toujours dans la semaine 1 ISO
+        jan4 = date(annee, 1, 4)
+        # Lundi de la semaine 1
+        lundi_s1 = jan4 - __import__("datetime").timedelta(days=jan4.weekday())
+        # Lundi de la semaine demandee
+        lundi = lundi_s1 + __import__("datetime").timedelta(weeks=num_semaine - 1)
+        dimanche = lundi + __import__("datetime").timedelta(days=6)
+
+        resultats = []
+        for p in _rh_planning:
+            try:
+                d = date.fromisoformat(p["date"])
+                if lundi <= d <= dimanche:
+                    resultats.append(p)
+            except (ValueError, TypeError):
+                pass
+
+        return {
+            "semaine": semaine,
+            "lundi": lundi.isoformat(),
+            "dimanche": dimanche.isoformat(),
+            "entrees": resultats,
+            "nb_entrees": len(resultats),
+        }
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, f"Format semaine invalide: {e}")
+
+
+# ======================================================================
+# CONFIGURATION - EN-TETE ENTREPRISE
+# ======================================================================
+
+@app.post("/api/config/entete")
+async def configurer_entete(
+    nom_entreprise: str = Form(...),
+    logo_url: str = Form(""),
+    adresse: str = Form(""),
+    telephone: str = Form(""),
+    email: str = Form(""),
+    siret: str = Form(""),
+    code_naf: str = Form(""),
+    forme_juridique: str = Form(""),
+    capital: str = Form(""),
+    rcs: str = Form(""),
+    tva_intracom: str = Form(""),
+):
+    """Configure l'en-tete entreprise utilise dans les documents generes."""
+    global _entete_config
+
+    # Validation SIRET (14 chiffres)
+    if siret and (len(siret.replace(" ", "")) != 14 or not siret.replace(" ", "").isdigit()):
+        raise HTTPException(400, "Le SIRET doit contenir exactement 14 chiffres")
+
+    # Validation TVA intracommunautaire (format FR + 2 chiffres + SIREN 9 chiffres = 13 chars)
+    if tva_intracom and len(tva_intracom.replace(" ", "")) < 4:
+        raise HTTPException(400, "Format TVA intracommunautaire invalide")
+
+    _entete_config = {
+        "nom_entreprise": nom_entreprise,
+        "logo_url": logo_url,
+        "adresse": adresse,
+        "telephone": telephone,
+        "email": email,
+        "siret": siret,
+        "code_naf": code_naf,
+        "forme_juridique": forme_juridique,
+        "capital": capital,
+        "rcs": rcs,
+        "tva_intracom": tva_intracom,
+        "date_modification": datetime.now().isoformat(),
+    }
+
+    # Mentions legales obligatoires sur les documents commerciaux
+    mentions_obligatoires = []
+    if not nom_entreprise:
+        mentions_obligatoires.append("Denomination sociale manquante")
+    if not siret:
+        mentions_obligatoires.append("SIRET manquant (obligatoire sur factures et documents commerciaux)")
+    if not rcs:
+        mentions_obligatoires.append("Numero RCS manquant (obligatoire pour les societes)")
+    if not tva_intracom:
+        mentions_obligatoires.append("Numero TVA intracommunautaire manquant (obligatoire sur factures)")
+    if not capital and forme_juridique in ("SARL", "SAS", "SASU", "SA", "EURL", "SCI"):
+        mentions_obligatoires.append(f"Capital social manquant (obligatoire pour {forme_juridique})")
+
+    _entete_config["mentions_manquantes"] = mentions_obligatoires
+    _entete_config["complet"] = len(mentions_obligatoires) == 0
+
+    log_action("utilisateur", "configuration_entete", f"{nom_entreprise} (SIRET: {siret})")
+    return _entete_config
+
+
+@app.get("/api/config/entete")
+async def get_entete():
+    """Retourne la configuration actuelle de l'en-tete entreprise."""
+    if not _entete_config:
+        return {"message": "Aucune configuration d'en-tete. Utilisez POST /api/config/entete pour configurer."}
+    return _entete_config
+
+
+# ==============================
 # DSN GENERATION
 # ==============================
 
@@ -831,7 +2219,7 @@ async def generer_dsn(
     add("S10.G00.00.001", siren_emetteur)
     add("S10.G00.00.002", nic_emetteur)
     add("S10.G00.00.003", nom_logiciel)
-    add("S10.G00.00.004", "NormaCheck v3.4")
+    add("S10.G00.00.004", "NormaCheck v3.5")
     add("S10.G00.00.005", "01")  # Nature de la declaration: DSN mensuelle
     add("S10.G00.00.006", "11")  # Type: normale
     add("S10.G00.00.007", "01")  # Numero de fraction
@@ -1170,7 +2558,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.4.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+NormaCheck v3.5.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 <span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
 </footer>
 <script>
@@ -1253,7 +2641,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 9 - Droit applicable</h2>
 <p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
 </div>
-<footer>NormaCheck v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.5.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -1310,7 +2698,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 8 - Droit applicable</h2>
 <p>Les presentes CGV sont soumises au droit francais. Tout litige releve de la competence des tribunaux francais.</p>
 </div>
-<footer>NormaCheck v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.5.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -1381,7 +2769,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Droit applicable</h2>
 <p>Le present site et ses mentions legales sont regis par le droit francais.</p>
 </div>
-<footer>NormaCheck v3.4.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.5.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -1545,7 +2933,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
 <div class="sidebar" id="sidebar">
-<div class="logo"><em>NormaCheck</em> <span>v3.4</span></div>
+<div class="logo"><em>NormaCheck</em> <span>v3.5</span></div>
 <div class="nav-group">Analyse</div>
 <div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
 <div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
@@ -1554,16 +2942,18 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="nl" onclick="showS('compta',this)"><span class="ico">&#128203;</span><span>Comptabilite</span></div>
 <div class="nl" onclick="showS('factures',this)"><span class="ico">&#128206;</span><span>Factures</span></div>
 <div class="nl" onclick="showS('dsn',this)"><span class="ico">&#128196;</span><span>Creation DSN</span></div>
+<div class="nl" onclick="showS('rh',this)"><span class="ico">&#128119;</span><span>Ressources humaines</span></div>
 <div class="nl" onclick="showS('simulation',this)"><span class="ico">&#128200;</span><span>Simulation</span></div>
 <div class="nav-group">Outils</div>
 <div class="nl" onclick="showS('veille',this)"><span class="ico">&#9878;</span><span>Veille juridique</span></div>
 <div class="nl" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
 <div class="nl" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
+<div class="nl" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
 <div class="spacer"></div>
 <div class="logout" onclick="window.location.href='/'"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.4.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.5.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
 """
@@ -1601,8 +2991,17 @@ APP_HTML += """
 <div class="card">
 <h2>Importer et analyser</h2>
 <div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>20 fichiers</strong> et <strong>500 Mo</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
+<div class="g2" style="margin-bottom:14px">
+<div><label>Mode d analyse</label><select id="mode-analyse">
+<option value="simple">Analyse simple</option>
+<option value="social">Audit social</option>
+<option value="fiscal">Audit fiscal</option>
+<option value="complet" selected>Audit complet</option>
+</select></div>
+<div style="display:flex;align-items:flex-end"><div class="al info" id="mode-info" style="margin:0;font-size:.78em;flex:1"><span class="ai">&#128161;</span><span>Audit complet : verification de toutes les coherences sociales, fiscales, DSN et rapprochements.</span></div></div>
+</div>
 <div class="uz" id="dz-analyse">
-<input type="file" id="fi-analyse" multiple accept=".pdf,.csv,.xlsx,.xls,.xml,.dsn,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.gif,.webp,.txt">
+<input type="file" id="fi-analyse" multiple accept=".pdf,.csv,.xlsx,.xls,.xml,.dsn,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.gif,.webp,.heic,.heif,.txt">
 <div class="uzi">&#128196;</div>
 <h3>Glissez vos fichiers ici</h3>
 <p>PDF, Excel, CSV, DSN, XML, Images, TXT</p>
@@ -1619,13 +3018,15 @@ APP_HTML += """
 <div class="card">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
 <h2>Resultats</h2>
-<div class="btn-group"><button class="btn btn-s btn-sm" onclick="exportSection('az')">&#128190; Exporter</button><button class="btn btn-s btn-sm" onclick="resetAz()">&#10227; Nouvelle</button></div>
+<div class="btn-group"><button class="btn btn-s btn-sm" onclick="exportPDF()">&#128196; Export PDF</button><button class="btn btn-s btn-sm" onclick="exportSection('az')">&#128190; CSV</button><button class="btn btn-s btn-sm" onclick="resetAz()">&#10227; Nouvelle</button></div>
 </div>
 <div class="g4" id="az-dashboard"></div>
 </div>
+<div class="card" id="az-fichiers-card"><h2>Fichiers analyses</h2><div id="az-fichiers-list"></div></div>
+<div class="card" id="az-audit-card" style="display:none"><h2>Points de controle Audit</h2><div id="az-audit-checks"></div></div>
 <div class="card"><h2>Anomalies</h2><div id="az-findings"></div></div>
 <div class="card"><h2>Recommandations</h2><div id="az-reco"></div></div>
-<div class="card" id="az-html-card" style="display:none"><h2>Rapport</h2><iframe id="az-html-frame" style="width:100%;height:600px;border:1px solid var(--brd);border-radius:10px"></iframe></div>
+<div class="card" id="az-html-card" style="display:none"><h2>Rapport visuel complet</h2><iframe id="az-html-frame" style="width:100%;height:600px;border:1px solid var(--brd);border-radius:10px"></iframe></div>
 </div>
 </div>
 
@@ -1868,6 +3269,174 @@ APP_HTML += """
 </div>
 </div>
 
+<!-- ===== RESSOURCES HUMAINES ===== -->
+<div class="sec" id="s-rh">
+<div class="tabs" id="rh-tabs">
+<div class="tab active" onclick="showRHTab('contrats',this)">Contrats</div>
+<div class="tab" onclick="showRHTab('conges',this)">Conges</div>
+<div class="tab" onclick="showRHTab('arrets',this)">Arrets</div>
+<div class="tab" onclick="showRHTab('sanctions',this)">Sanctions</div>
+<div class="tab" onclick="showRHTab('entretiens',this)">Entretiens</div>
+<div class="tab" onclick="showRHTab('visites',this)">Visites med.</div>
+<div class="tab" onclick="showRHTab('attestations',this)">Attestations</div>
+<div class="tab" onclick="showRHTab('planning',this)">Planning</div>
+<div class="tab" onclick="showRHTab('echanges',this)">Echanges</div>
+<div class="tab" onclick="showRHTab('alertes',this)">Alertes</div>
+</div>
+<div class="card">
+<div class="tc active" id="rh-contrats">
+<h2>Gestion des contrats de travail</h2>
+<div class="g2"><div>
+<label>Type de contrat</label><select id="rh-type-ctr"><option value="CDI">CDI</option><option value="CDD">CDD</option><option value="CTT">CTT (Interim)</option><option value="Apprentissage">Apprentissage</option><option value="Professionnalisation">Professionnalisation</option><option value="Saisonnier">Saisonnier</option><option value="Intermittent">Intermittent</option></select>
+<label>Nom</label><input id="rh-ctr-nom" placeholder="NOM">
+<label>Prenom</label><input id="rh-ctr-prenom" placeholder="Prenom">
+<label>Poste</label><input id="rh-ctr-poste" placeholder="Intitule du poste">
+<label>Date debut</label><input type="date" id="rh-ctr-debut">
+<label>Date fin (CDD)</label><input type="date" id="rh-ctr-fin">
+</div><div>
+<label>Salaire brut mensuel</label><input type="number" step="0.01" id="rh-ctr-salaire" placeholder="0.00">
+<label>Temps de travail</label><select id="rh-ctr-temps"><option value="complet">Temps complet</option><option value="partiel">Temps partiel</option></select>
+<label>Duree hebdomadaire (h)</label><input type="number" step="0.5" id="rh-ctr-heures" value="35">
+<label>Convention collective</label><input id="rh-ctr-ccn" placeholder="IDCC ou intitule">
+<label>Periode essai (jours)</label><input type="number" id="rh-ctr-essai" value="60">
+<label>Motif CDD</label><input id="rh-ctr-motif" placeholder="Remplacement, surcroit...">
+</div></div>
+<button class="btn btn-blue btn-f" onclick="creerContrat()">Generer le contrat</button>
+<div id="rh-ctr-res" style="margin-top:12px"></div>
+<h3 style="margin-top:20px">Contrats enregistres</h3>
+<div id="rh-ctr-list" style="margin-top:8px"><p style="color:var(--tx2)">Aucun contrat.</p></div>
+<h3 style="margin-top:20px">Avenants</h3>
+<div class="g3"><div><label>ID Contrat</label><input id="rh-av-ctr" placeholder="ID du contrat"></div>
+<div><label>Type</label><select id="rh-av-type"><option value="remuneration">Remuneration</option><option value="poste">Changement de poste</option><option value="temps_travail">Temps de travail</option><option value="lieu">Lieu de travail</option><option value="autre">Autre</option></select></div>
+<div><label>Date effet</label><input type="date" id="rh-av-date"></div></div>
+<label>Nouvelles conditions</label><textarea id="rh-av-desc" rows="2" placeholder="Description des modifications"></textarea>
+<button class="btn btn-s btn-f" onclick="creerAvenant()">Enregistrer l avenant</button>
+<div id="rh-av-list" style="margin-top:8px"></div>
+</div>
+<div class="tc" id="rh-conges">
+<h2>Gestion des conges et absences</h2>
+<div class="g3"><div><label>Salarie (nom)</label><input id="rh-cg-sal" placeholder="Nom du salarie"></div>
+<div><label>Type</label><select id="rh-cg-type"><option value="cp">Conges payes</option><option value="rtt">RTT</option><option value="maladie">Maladie</option><option value="maternite">Maternite</option><option value="paternite">Paternite</option><option value="sans_solde">Sans solde</option><option value="familial">Evenement familial</option><option value="formation">Formation</option></select></div>
+<div><label>Nb jours</label><input type="number" id="rh-cg-jours" value="1"></div></div>
+<div class="g3"><div><label>Date debut</label><input type="date" id="rh-cg-dd"></div>
+<div><label>Date fin</label><input type="date" id="rh-cg-df"></div>
+<div><label>Statut</label><select id="rh-cg-stat"><option value="demande">Demande</option><option value="valide">Valide</option><option value="refuse">Refuse</option></select></div></div>
+<button class="btn btn-blue btn-f" onclick="enregConge()">Enregistrer</button>
+<div id="rh-cg-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-arrets">
+<h2>Arrets de travail</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-ar-sal" placeholder="Nom"></div>
+<div><label>Type</label><select id="rh-ar-type"><option value="maladie">Maladie</option><option value="accident_travail">Accident du travail</option><option value="maladie_pro">Maladie professionnelle</option><option value="mi_temps_therapeutique">Mi-temps therapeutique</option></select></div>
+<div><label>Subrogation</label><select id="rh-ar-sub"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
+<div class="g3"><div><label>Date debut</label><input type="date" id="rh-ar-dd"></div>
+<div><label>Date fin</label><input type="date" id="rh-ar-df"></div>
+<div><label>Prolongation</label><select id="rh-ar-prol"><option value="false">Non</option><option value="true">Oui</option></select></div></div>
+<button class="btn btn-blue btn-f" onclick="enregArret()">Enregistrer</button>
+<div id="rh-ar-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-sanctions">
+<h2>Procedures disciplinaires</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-sa-sal" placeholder="Nom"></div>
+<div><label>Type</label><select id="rh-sa-type"><option value="avertissement">Avertissement</option><option value="blame">Blame</option><option value="mise_a_pied">Mise a pied</option><option value="retrogradation">Retrogradation</option><option value="licenciement">Licenciement</option></select></div>
+<div><label>Date sanction</label><input type="date" id="rh-sa-date"></div></div>
+<label>Motif</label><input id="rh-sa-motif" placeholder="Motif de la sanction">
+<label>Description</label><textarea id="rh-sa-desc" rows="2" placeholder="Details"></textarea>
+<label>Date entretien prealable</label><input type="date" id="rh-sa-epr">
+<button class="btn btn-blue btn-f" onclick="enregSanction()">Enregistrer</button>
+<div id="rh-sa-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-entretiens">
+<h2>Entretiens professionnels</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-en-sal" placeholder="Nom"></div>
+<div><label>Type</label><select id="rh-en-type"><option value="professionnel_2ans">Professionnel (2 ans)</option><option value="bilan_6ans">Bilan (6 ans)</option><option value="annuel">Annuel</option><option value="fin_periode_essai">Fin periode essai</option></select></div>
+<div><label>Date</label><input type="date" id="rh-en-date"></div></div>
+<label>Compte-rendu</label><textarea id="rh-en-cr" rows="3" placeholder="Notes de l entretien"></textarea>
+<label>Date prochain entretien</label><input type="date" id="rh-en-next">
+<button class="btn btn-blue btn-f" onclick="enregEntretien()">Enregistrer</button>
+<div id="rh-en-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-visites">
+<h2>Visites medicales</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-vm-sal" placeholder="Nom"></div>
+<div><label>Type</label><select id="rh-vm-type"><option value="embauche">Visite embauche (VIP)</option><option value="periodique">Periodique</option><option value="reprise">Reprise</option><option value="pre_reprise">Pre-reprise</option><option value="demande">A la demande</option></select></div>
+<div><label>Date</label><input type="date" id="rh-vm-date"></div></div>
+<div class="g3"><div><label>Resultat</label><select id="rh-vm-res"><option value="apte">Apte</option><option value="inapte">Inapte</option><option value="amenagement">Amenagement</option></select></div>
+<div><label>Remarques</label><input id="rh-vm-rem" placeholder="Observations"></div>
+<div><label>Prochaine visite</label><input type="date" id="rh-vm-next"></div></div>
+<button class="btn btn-blue btn-f" onclick="enregVisite()">Enregistrer</button>
+<div id="rh-vm-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-attestations">
+<h2>Generation d attestations</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-at-sal" placeholder="Nom"></div>
+<div><label>Type</label><select id="rh-at-type"><option value="travail">Attestation de travail</option><option value="employeur">Attestation employeur</option><option value="salaire">Attestation de salaire</option><option value="pole_emploi">Attestation Pole Emploi</option><option value="mutuelle">Attestation mutuelle</option><option value="stage">Attestation de stage</option></select></div>
+<div><button class="btn btn-blue btn-f" onclick="genererAttestation()" style="margin-top:22px">Generer</button></div></div>
+<div id="rh-at-res" style="margin-top:12px"></div>
+<div id="rh-at-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-planning">
+<h2>Planning</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-pl-sal" placeholder="Nom"></div>
+<div><label>Date</label><input type="date" id="rh-pl-date"></div>
+<div><label>Type</label><select id="rh-pl-type"><option value="normal">Normal</option><option value="astreinte">Astreinte</option><option value="nuit">Nuit</option><option value="dimanche">Dimanche</option><option value="ferie">Jour ferie</option></select></div></div>
+<div class="g3"><div><label>Heure debut</label><input type="time" id="rh-pl-hd" value="09:00"></div>
+<div><label>Heure fin</label><input type="time" id="rh-pl-hf" value="17:00"></div>
+<div><button class="btn btn-blue btn-f" onclick="ajouterPlanning()" style="margin-top:22px">Ajouter</button></div></div>
+<div id="rh-pl-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-echanges">
+<h2>Suivi des echanges salaries</h2>
+<div class="g3"><div><label>Salarie</label><input id="rh-ec-sal" placeholder="Nom"></div>
+<div><label>Type</label><select id="rh-ec-type"><option value="email">Email</option><option value="courrier">Courrier</option><option value="reunion">Reunion</option><option value="entretien">Entretien</option></select></div>
+<div><label>Date</label><input type="date" id="rh-ec-date"></div></div>
+<label>Objet</label><input id="rh-ec-obj" placeholder="Objet de l echange">
+<label>Contenu</label><textarea id="rh-ec-txt" rows="3" placeholder="Details"></textarea>
+<button class="btn btn-blue btn-f" onclick="enregEchange()">Enregistrer</button>
+<div id="rh-ec-list" style="margin-top:12px"></div>
+</div>
+<div class="tc" id="rh-alertes">
+<h2>Alertes et echeances RH</h2>
+<div class="al info"><span class="ai">&#128161;</span><span>Les alertes sont calculees automatiquement selon les donnees RH et les obligations legales.</span></div>
+<div id="rh-alertes-list" style="margin-top:12px"></div>
+</div>
+</div>
+</div>
+
+<!-- ===== CONFIGURATION ===== -->
+<div class="sec" id="s-config">
+<div class="card">
+<h2>En-tete des documents</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Configurez les informations qui apparaitront sur tous les documents generes (contrats, attestations, rapports, etc.)</p>
+<div class="g2"><div>
+<label>Nom de l entreprise</label><input id="cfg-nom" placeholder="Raison sociale">
+<label>Adresse</label><input id="cfg-adresse" placeholder="Adresse complete">
+<label>Telephone</label><input id="cfg-tel" placeholder="01 23 45 67 89">
+<label>Email</label><input type="email" id="cfg-email" placeholder="contact@entreprise.fr">
+</div><div>
+<label>SIRET</label><input id="cfg-siret" placeholder="123 456 789 00012">
+<label>Code NAF</label><input id="cfg-naf" placeholder="7022Z">
+<label>Forme juridique</label><input id="cfg-forme" placeholder="SARL, SAS, etc.">
+<label>Capital social</label><input id="cfg-capital" placeholder="10 000 EUR">
+</div></div>
+<div class="g3"><div><label>RCS</label><input id="cfg-rcs" placeholder="RCS Paris B 123 456 789"></div>
+<div><label>TVA intracommunautaire</label><input id="cfg-tva" placeholder="FR12345678901"></div>
+<div><label>Logo URL</label><input id="cfg-logo" placeholder="https://..."></div></div>
+<button class="btn btn-blue btn-f" onclick="sauverEntete()">Sauvegarder</button>
+<div id="cfg-res" style="margin-top:10px"></div>
+</div>
+<div class="card">
+<h2>Comptes URSSAF par etablissement</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Gerez les comptes URSSAF distincts pour chaque etablissement de l entreprise.</p>
+<div class="g3"><div><label>SIRET etablissement</label><input id="urssaf-siret" placeholder="123 456 789 00012"></div>
+<div><label>N compte URSSAF</label><input id="urssaf-compte" placeholder="527000000012345678"></div>
+<div><label>Caisse</label><input id="urssaf-caisse" placeholder="URSSAF Ile-de-France"></div></div>
+<label>Taux AT/MP (%)</label><input type="number" step="0.01" id="urssaf-at" placeholder="2.08">
+<button class="btn btn-blue btn-f" onclick="ajouterCompteURSSAF()">Ajouter</button>
+<div id="urssaf-list" style="margin-top:12px"></div>
+</div>
+</div>
+
 </div><!-- end .page -->
 </div><!-- end .content -->
 </div><!-- end .layout -->
@@ -1877,7 +3446,7 @@ APP_HTML += """
 APP_HTML += """
 <script>
 /* === INIT === */
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe"};
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration"};
 document.getElementById("topbar-date").textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
 
 /* === MOBILE SIDEBAR === */
@@ -1895,6 +3464,7 @@ document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
 if(n==="biblio")loadBiblio();if(n==="equipe")loadEquipe();
 if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
+if(n==="rh")loadRHAlertes();if(n==="config")loadEntete();
 }
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");});
@@ -1963,7 +3533,8 @@ var steps=[[10,"Import..."],[25,"SHA-256..."],[40,"Parsing + OCR..."],[55,"Coher
 var si=0;var iv=setInterval(function(){if(si<steps.length){fill.style.width=steps[si][0]+"%";txt.textContent=steps[si][1];si++;}},900);
 var fd=new FormData();for(var i=0;i<fichiers.length;i++){fd.append("fichiers",fichiers[i]);}
 var integ=document.getElementById("chk-integrer").checked;
-fetch("/api/analyze?format_rapport=json&integrer="+integ,{method:"POST",body:fd}).then(function(resp){
+var modeAz=document.getElementById("mode-analyse").value;
+fetch("/api/analyze?format_rapport=json&integrer="+integ+"&mode_analyse="+modeAz,{method:"POST",body:fd}).then(function(resp){
 clearInterval(iv);fill.style.width="100%";txt.textContent="Termine !";
 if(!resp.ok)return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});
 return resp.json().then(function(data){analysisData=data;showJsonResults(data);});
@@ -1977,6 +3548,7 @@ renderAnomalies("az-findings",data.constats||[]);
 var recos=data.recommandations||[];var rh="";for(var i=0;i<recos.length;i++){rh+="<div class='al info'><span class='ai'>&#128161;</span><span><strong>#"+(i+1)+"</strong> "+(recos[i].description||recos[i].titre||"")+"</span></div>";}
 document.getElementById("az-reco").innerHTML=rh||"<p style='color:var(--tx2)'>Aucune.</p>";
 if(data.html_report){document.getElementById("az-html-card").style.display="block";document.getElementById("az-html-frame").srcdoc=data.html_report;}else{document.getElementById("az-html-card").style.display="none";}
+showFileInterpretation(data);showAuditChecks(data);
 document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
 function resetAz(){fichiers=[];renderF();document.getElementById("res-analyse").style.display="none";}
 
@@ -2306,6 +3878,117 @@ var tables=el.querySelectorAll("table");
 if(tables.length===0){toast("Aucune donnee tabulaire.","warn");return;}
 var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll("tr");for(var i=0;i<rows.length;i++){var cells=rows[i].querySelectorAll("th,td");var line=[];for(var j=0;j<cells.length;j++){var txt=cells[j].textContent.replace(/"/g,'""');line.push('"'+txt+'"');}csv+=line.join(";")+"\\n";}csv+="\\n";}
 var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_"+name+".csv";a.click();toast("Export telecharge.","ok");}
+
+/* === MODE ANALYSE === */
+document.getElementById("mode-analyse").addEventListener("change",function(){
+var m=this.value;var msgs={"simple":"Analyse simple : detection des ecarts de taux et montants.","social":"Audit social : verification complete des cotisations, DSN, conges, conventions collectives.","fiscal":"Audit fiscal : coherence TVA, charges deductibles, IS/IR, declarations fiscales.","complet":"Audit complet : verification de toutes les coherences sociales, fiscales, DSN et rapprochements."};
+document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});
+
+/* === FILE INTERPRETATION + AUDIT === */
+function showFileInterpretation(data){
+var fl=document.getElementById("az-fichiers-list");if(!data||!data.declarations||!data.declarations.length){fl.innerHTML="<p style='color:var(--tx2)'>Aucun fichier interprete.</p>";return;}
+var h="<table><tr><th>Fichier</th><th>Type detecte</th><th>Interpretation</th><th>Employeur</th><th>Periode</th><th>Salaries</th></tr>";
+for(var i=0;i<data.declarations.length;i++){var d=data.declarations[i];
+var interp=d.type||"Document";if(d.employeur&&d.employeur.raison_sociale)interp+="-"+d.employeur.raison_sociale;if(d.periode)interp+="-"+d.periode;
+var empName=d.employeur?d.employeur.raison_sociale||d.employeur.siret||"-":"-";
+h+="<tr><td>"+(d.reference||"fichier "+(i+1))+"</td><td><span class='badge badge-blue'>"+(d.type||"inconnu")+"</span></td><td><strong>"+interp+"</strong></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.salaries?d.salaries.length:0)+"</td></tr>";}
+h+="</table>";fl.innerHTML=h;}
+
+function showAuditChecks(data){
+var mode=document.getElementById("mode-analyse").value;
+var card=document.getElementById("az-audit-card");var el=document.getElementById("az-audit-checks");
+if(mode==="simple"){card.style.display="none";return;}
+card.style.display="block";
+var checks=[];
+if(mode==="social"||mode==="complet"){
+checks.push({nom:"Rapprochement DSN / Bulletins de paie",present:data.declarations&&data.declarations.length>1});
+checks.push({nom:"Verification taux URSSAF 2026",present:true});
+checks.push({nom:"Coherence masse salariale / effectif",present:true});
+checks.push({nom:"Plafonnement PASS (vieillesse plafonnee)",present:true});
+checks.push({nom:"Detection apprentis et exonerations",present:true});
+checks.push({nom:"Controle NIR / identite salaries",present:data.declarations&&data.declarations.length>1});
+checks.push({nom:"Verification blocs obligatoires DSN",present:data.declarations&&data.declarations.some(function(d){return d.type==="DSN"||d.type==="dsn";})});
+checks.push({nom:"Prevoyance obligatoire",present:false});
+checks.push({nom:"Mutuelle obligatoire ANI",present:false});}
+if(mode==="fiscal"||mode==="complet"){
+checks.push({nom:"Coherence TVA collectee / deductible",present:true});
+checks.push({nom:"Rapprochement CA / declarations",present:false});
+checks.push({nom:"Verification charges deductibles",present:false});}
+var h="";for(var i=0;i<checks.length;i++){var c=checks[i];
+h+="<div class='al "+(c.present?"ok":"warn")+"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?"Verifie":"Documents insuffisants - point non controle")+"</span></div>";}
+el.innerHTML=h;}
+
+/* === PDF EXPORT === */
+function exportPDF(){
+var frame=document.getElementById("az-html-frame");
+if(!frame||!frame.srcdoc){toast("Aucun rapport a exporter.","warn");return;}
+var w=window.open("","_blank");
+w.document.write(frame.srcdoc);
+w.document.close();
+setTimeout(function(){w.print();},500);}
+
+/* === RH MODULE === */
+function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
+if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning")loadRHPlanning();if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();}
+
+function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
+function rhGet(url,cb){fetch(url).then(function(r){return r.json();}).then(cb).catch(function(){});}
+
+function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
+rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");document.getElementById("rh-ctr-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";loadRHContrats();});}
+
+function loadRHContrats(){rhGet("/api/rh/contrats",function(list){
+var el=document.getElementById("rh-ctr-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun contrat.</p>";return;}
+var h="<table><tr><th>ID</th><th>Type</th><th>Salarie</th><th>Poste</th><th>Debut</th><th>Fin</th><th class='num'>Brut</th></tr>";
+for(var i=0;i<list.length;i++){var c=list[i];h+="<tr><td style='font-size:.78em'>"+c.id+"</td><td><span class='badge badge-blue'>"+c.type_contrat+"</span></td><td>"+c.prenom_salarie+" "+c.nom_salarie+"</td><td>"+c.poste+"</td><td>"+c.date_debut+"</td><td>"+(c.date_fin||"-")+"</td><td class='num'>"+parseFloat(c.salaire_brut).toFixed(2)+"</td></tr>";}
+h+="</table>";el.innerHTML=h;});}
+
+function creerAvenant(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-av-ctr").value);fd.append("type_avenant",document.getElementById("rh-av-type").value);fd.append("description",document.getElementById("rh-av-desc").value);fd.append("date_effet",document.getElementById("rh-av-date").value);fd.append("nouvelles_conditions",document.getElementById("rh-av-desc").value);
+rhPost("/api/rh/avenants",fd,function(){toast("Avenant enregistre.","ok");loadRHAvenants();});}
+function loadRHAvenants(){rhGet("/api/rh/avenants",function(list){var el=document.getElementById("rh-av-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Contrat</th><th>Type</th><th>Date effet</th><th>Description</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.contrat_id+"</td><td><span class='badge badge-blue'>"+a.type_avenant+"</span></td><td>"+a.date_effet+"</td><td>"+a.description+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function enregConge(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-cg-sal").value);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
+rhPost("/api/rh/conges",fd,function(){toast("Conge enregistre.","ok");loadRHConges();});}
+function loadRHConges(){rhGet("/api/rh/conges",function(list){var el=document.getElementById("rh-cg-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun conge enregistre.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Jours</th><th>Statut</th></tr>";for(var i=0;i<list.length;i++){var c=list[i];var cls=c.statut==="valide"?"badge-green":(c.statut==="refuse"?"badge-red":"badge-amber");h+="<tr><td>"+c.salarie_id+"</td><td>"+c.type_conge+"</td><td>"+c.date_debut+"</td><td>"+c.date_fin+"</td><td class='num'>"+c.nb_jours+"</td><td><span class='badge "+cls+"'>"+c.statut+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function enregArret(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ar-sal").value);fd.append("type_arret",document.getElementById("rh-ar-type").value);fd.append("date_debut",document.getElementById("rh-ar-dd").value);fd.append("date_fin",document.getElementById("rh-ar-df").value);fd.append("prolongation",document.getElementById("rh-ar-prol").value);fd.append("subrogation",document.getElementById("rh-ar-sub").value);
+rhPost("/api/rh/arrets",fd,function(){toast("Arret enregistre.","ok");loadRHArrets();});}
+function loadRHArrets(){rhGet("/api/rh/arrets",function(list){var el=document.getElementById("rh-ar-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun arret.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Subrogation</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-amber'>"+a.type_arret+"</span></td><td>"+a.date_debut+"</td><td>"+a.date_fin+"</td><td>"+(a.subrogation==="true"?"Oui":"Non")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function enregSanction(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-sa-sal").value);fd.append("type_sanction",document.getElementById("rh-sa-type").value);fd.append("date_sanction",document.getElementById("rh-sa-date").value);fd.append("motif",document.getElementById("rh-sa-motif").value);fd.append("description",document.getElementById("rh-sa-desc").value);fd.append("date_entretien_prealable",document.getElementById("rh-sa-epr").value);
+rhPost("/api/rh/sanctions",fd,function(){toast("Sanction enregistree.","ok");loadRHSanctions();});}
+function loadRHSanctions(){rhGet("/api/rh/sanctions",function(list){var el=document.getElementById("rh-sa-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune sanction.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Motif</th></tr>";for(var i=0;i<list.length;i++){var s=list[i];h+="<tr><td>"+s.salarie_id+"</td><td><span class='badge badge-red'>"+s.type_sanction+"</span></td><td>"+s.date_sanction+"</td><td>"+s.motif+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function enregEntretien(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-en-sal").value);fd.append("type_entretien",document.getElementById("rh-en-type").value);fd.append("date_entretien",document.getElementById("rh-en-date").value);fd.append("compte_rendu",document.getElementById("rh-en-cr").value);fd.append("date_prochain",document.getElementById("rh-en-next").value);
+rhPost("/api/rh/entretiens",fd,function(){toast("Entretien enregistre.","ok");loadRHEntretiens();});}
+function loadRHEntretiens(){rhGet("/api/rh/entretiens",function(list){var el=document.getElementById("rh-en-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun entretien.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Prochain</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_entretien+"</span></td><td>"+e.date_entretien+"</td><td>"+(e.date_prochain||"-")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function enregVisite(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-vm-sal").value);fd.append("type_visite",document.getElementById("rh-vm-type").value);fd.append("date_visite",document.getElementById("rh-vm-date").value);fd.append("resultat",document.getElementById("rh-vm-res").value);fd.append("remarques",document.getElementById("rh-vm-rem").value);fd.append("date_prochaine",document.getElementById("rh-vm-next").value);
+rhPost("/api/rh/visites-medicales",fd,function(){toast("Visite enregistree.","ok");loadRHVisites();});}
+function loadRHVisites(){rhGet("/api/rh/visites-medicales",function(list){var el=document.getElementById("rh-vm-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune visite.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Resultat</th><th>Prochaine</th></tr>";for(var i=0;i<list.length;i++){var v=list[i];var cls=v.resultat==="apte"?"badge-green":(v.resultat==="inapte"?"badge-red":"badge-amber");h+="<tr><td>"+v.salarie_id+"</td><td>"+v.type_visite+"</td><td>"+v.date_visite+"</td><td><span class='badge "+cls+"'>"+v.resultat+"</span></td><td>"+(v.date_prochaine||"-")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function genererAttestation(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-at-sal").value);fd.append("type_attestation",document.getElementById("rh-at-type").value);fd.append("date_generation",new Date().toISOString().substring(0,10));
+rhPost("/api/rh/attestations/generer",fd,function(d){document.getElementById("rh-at-res").innerHTML="<div class='card' style='background:var(--pl);margin-top:8px'><pre style='white-space:pre-wrap;font-size:.82em;line-height:1.6'>"+d.contenu+"</pre><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer</button></div>";toast("Attestation generee.","ok");loadRHAttestations();});}
+function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el=document.getElementById("rh-at-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-blue'>"+a.type_attestation+"</span></td><td>"+a.date_generation+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
+rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");loadRHPlanning();});}
+function loadRHPlanning(){rhGet("/api/rh/planning",function(list){var el=document.getElementById("rh-pl-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun planning.</p>";return;}var h="<table><tr><th>Salarie</th><th>Date</th><th>Debut</th><th>Fin</th><th>Type</th></tr>";for(var i=0;i<list.length;i++){var p=list[i];h+="<tr><td>"+p.salarie_id+"</td><td>"+p.date+"</td><td>"+p.heure_debut+"</td><td>"+p.heure_fin+"</td><td><span class='badge badge-blue'>"+p.type_poste+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ec-sal").value);fd.append("objet",document.getElementById("rh-ec-obj").value);fd.append("contenu",document.getElementById("rh-ec-txt").value);fd.append("type_echange",document.getElementById("rh-ec-type").value);fd.append("date_echange",document.getElementById("rh-ec-date").value);
+rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
+function loadRHEchanges(){rhGet("/api/rh/echanges",function(list){var el=document.getElementById("rh-ec-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun echange.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Objet</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_echange+"</span></td><td>"+e.date_echange+"</td><td>"+e.objet+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+
+function loadRHAlertes(){rhGet("/api/rh/alertes",function(list){var el=document.getElementById("rh-alertes-list");if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}var h="";for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");h+="<div class='al "+cls+"'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+a.titre+"</strong> - "+a.description+(a.echeance?" (echeance: "+a.echeance+")":"")+"</span></div>";}el.innerHTML=h;});}
+
+/* === CONFIGURATION === */
+var _urssafComptes=[];
+function sauverEntete(){var fd=new FormData();fd.append("nom_entreprise",document.getElementById("cfg-nom").value);fd.append("logo_url",document.getElementById("cfg-logo").value);fd.append("adresse",document.getElementById("cfg-adresse").value);fd.append("telephone",document.getElementById("cfg-tel").value);fd.append("email",document.getElementById("cfg-email").value);fd.append("siret",document.getElementById("cfg-siret").value);fd.append("code_naf",document.getElementById("cfg-naf").value);fd.append("forme_juridique",document.getElementById("cfg-forme").value);fd.append("capital",document.getElementById("cfg-capital").value);fd.append("rcs",document.getElementById("cfg-rcs").value);fd.append("tva_intracom",document.getElementById("cfg-tva").value);
+rhPost("/api/config/entete",fd,function(){toast("En-tete sauvegarde.","ok");document.getElementById("cfg-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Configuration enregistree.</span></div>";});}
+function loadEntete(){rhGet("/api/config/entete",function(d){if(!d||!d.nom_entreprise)return;document.getElementById("cfg-nom").value=d.nom_entreprise||"";document.getElementById("cfg-adresse").value=d.adresse||"";document.getElementById("cfg-tel").value=d.telephone||"";document.getElementById("cfg-email").value=d.email||"";document.getElementById("cfg-siret").value=d.siret||"";document.getElementById("cfg-naf").value=d.code_naf||"";document.getElementById("cfg-forme").value=d.forme_juridique||"";document.getElementById("cfg-capital").value=d.capital||"";document.getElementById("cfg-rcs").value=d.rcs||"";document.getElementById("cfg-tva").value=d.tva_intracom||"";document.getElementById("cfg-logo").value=d.logo_url||"";});}
+
+function ajouterCompteURSSAF(){var c={siret:document.getElementById("urssaf-siret").value,compte:document.getElementById("urssaf-compte").value,caisse:document.getElementById("urssaf-caisse").value,taux_at:document.getElementById("urssaf-at").value};if(!c.siret||!c.compte){toast("SIRET et N compte obligatoires.");return;}_urssafComptes.push(c);renderComptesURSSAF();toast("Compte URSSAF ajoute.","ok");}
+function renderComptesURSSAF(){var el=document.getElementById("urssaf-list");if(!_urssafComptes.length){el.innerHTML="";return;}var h="<table><tr><th>SIRET</th><th>N Compte</th><th>Caisse</th><th>Taux AT</th></tr>";for(var i=0;i<_urssafComptes.length;i++){var c=_urssafComptes[i];h+="<tr><td>"+c.siret+"</td><td>"+c.compte+"</td><td>"+c.caisse+"</td><td>"+c.taux_at+"%</td></tr>";}h+="</table>";el.innerHTML=h;}
 
 /* === TOAST === */
 function toast(msg,type){

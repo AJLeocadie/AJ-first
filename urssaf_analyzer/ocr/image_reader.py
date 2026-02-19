@@ -38,7 +38,7 @@ class FormatFichier(str, Enum):
 
 
 # Extensions par format
-EXTENSIONS_IMAGES = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
+EXTENSIONS_IMAGES = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp", ".heic", ".heif"}
 EXTENSIONS_PDF = {".pdf"}
 EXTENSIONS_EXCEL = {".xlsx", ".xls"}
 EXTENSIONS_CSV = {".csv"}
