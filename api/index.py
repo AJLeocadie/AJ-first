@@ -2534,8 +2534,18 @@ async def get_rh_alertes():
 
     # Appliquer les personnalisations
     for cfg in _alertes_config:
+        type_cfg = cfg["type_alerte"]
         if not cfg.get("actif", True):
-            alertes = [a for a in alertes if a.get("type") != cfg["type_alerte"]]
+            # Desactiver ce type d'alerte
+            alertes = [a for a in alertes if a.get("type") != type_cfg]
+        else:
+            # Appliquer delai et message personnalise
+            for a in alertes:
+                if a.get("type") == type_cfg:
+                    if cfg.get("delai_jours"):
+                        a["delai_personnalise"] = cfg["delai_jours"]
+                    if cfg.get("message_personnalise"):
+                        a["message_personnalise"] = cfg["message_personnalise"]
 
     # Trier par urgence (haute > moyenne > info)
     ordre_urgence = {"haute": 0, "moyenne": 1, "info": 2}
@@ -4094,7 +4104,7 @@ APP_HTML += """
 <h2>Personnalisation des alertes</h2>
 <p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Activez/desactivez les types d alertes et personnalisez les delais de notification.</p>
 <div id="cfg-alertes-list" style="margin-top:8px"></div>
-<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type"><option value="dpae">DPAE</option><option value="visite_medicale">Visite medicale</option><option value="fin_contrat">Fin de contrat</option><option value="fin_periode_essai">Fin periode essai</option><option value="entretien_professionnel">Entretien professionnel</option><option value="prevoyance">Prevoyance obligatoire</option><option value="mutuelle">Mutuelle obligatoire</option><option value="duerp">DUERP</option><option value="cse">Elections CSE</option><option value="formation">Formation professionnelle</option></select></div>
+<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type"><option value="dpae_a_effectuer">DPAE embauche</option><option value="visite_medicale_expiration">Visite medicale</option><option value="fin_contrat_cdd">Fin de contrat CDD</option><option value="fin_periode_essai">Fin periode essai</option><option value="entretien_professionnel_retard">Entretien professionnel</option><option value="prevoyance_cadres">Prevoyance cadres</option><option value="mutuelle_obligatoire">Mutuelle obligatoire</option><option value="duerp_obligatoire">DUERP</option><option value="cse_obligatoire">Elections CSE</option><option value="formation_professionnelle">Formation professionnelle</option><option value="registre_personnel">Registre du personnel</option><option value="declaration_dsn_mensuelle">DSN mensuelle</option><option value="participation_obligatoire">Participation (>=50)</option><option value="reglement_interieur">Reglement interieur (>=50)</option><option value="index_egalite">Index egalite pro (>=50)</option><option value="bilan_social">Bilan social (>=300)</option></select></div>
 <div><label>Delai notification (jours)</label><input type="number" id="cfg-al-delai" value="30"></div>
 <div><label>Actif</label><select id="cfg-al-actif"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
 <label>Message personnalise (optionnel)</label><input id="cfg-al-msg" placeholder="Message personnalise pour cette alerte">
@@ -4775,16 +4785,23 @@ function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.ge
 rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
 function loadRHEchanges(){rhGet("/api/rh/echanges",function(list){var el=document.getElementById("rh-ec-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun echange.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Objet</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_echange+"</span></td><td>"+e.date_echange+"</td><td>"+e.objet+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function loadRHAlertes(){rhGet("/api/rh/alertes",function(list){var el=document.getElementById("rh-alertes-list");if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
-var h="";for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
+function loadRHAlertes(){rhGet("/api/rh/alertes",function(resp){var el=document.getElementById("rh-alertes-list");
+var list=(resp&&resp.alertes)?resp.alertes:(Array.isArray(resp)?resp:[]);
+if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
+var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s) - Cliquez pour voir les details</p>";
+for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
 h+="<div class='al "+cls+"' style='cursor:pointer' onclick='this.querySelector(\".al-detail\")&&this.querySelector(\".al-detail\").classList.toggle(\"show\")'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+(a.titre||a.type||"Alerte")+"</strong> - "+(a.description||"");
 if(a.echeance)h+=" <em>(echeance: "+a.echeance+")</em>";
+if(a.message_personnalise)h+=" <em style='color:var(--p2)'>["+a.message_personnalise+"]</em>";
 h+="</span>";
-if(a.incidence_legale||a.documents_requis){h+="<div class='al-detail' style='display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,.03);border-radius:6px;font-size:.86em'>";
-if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600'>Consequence legale : "+a.incidence_legale+"</p>";
+h+="<div class='al-detail' style='display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,.03);border-radius:6px;font-size:.86em'>";
+if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600'>&#9888; Consequence legale : "+a.incidence_legale+"</p>";
+if(a.reference)h+="<p style='margin-top:4px;color:var(--tx2)'>Reference : "+a.reference+"</p>";
+if(a.action_requise)h+="<p style='margin-top:4px'><strong>Action requise :</strong> "+a.action_requise+"</p>";
 if(a.documents_requis){h+="<p style='margin-top:4px'><strong>Documents requis :</strong></p><ul style='margin:2px 0 0 16px'>";
 var docs=a.documents_requis;if(typeof docs==="string")docs=docs.split(",");for(var j=0;j<docs.length;j++){h+="<li>"+docs[j]+"</li>";}h+="</ul>";}
-h+="</div>";}h+="</div>";}
+if(a.delai_personnalise)h+="<p style='margin-top:4px;color:var(--p2)'>Delai de notification personnalise : "+a.delai_personnalise+" jours</p>";
+h+="</div></div>";}
 h+="<style>.al-detail.show{display:block!important}</style>";
 el.innerHTML=h;});}
 function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("heures_sup",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences",document.getElementById("rh-bp-abs").value||"0");
