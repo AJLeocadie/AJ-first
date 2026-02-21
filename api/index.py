@@ -757,48 +757,53 @@ async def analyser_documents(
                 employes_valides = [e for e in decl.employes if e.nom or e.nir]
                 if not employes_valides:
                     # Tous les employes etaient sans nom ni NIR (OCR incomplet)
-                    # Creer un salarie a partir des infos disponibles
-                    _integration_log.append(f"  -> RH: aucun nom/NIR extrait, creation depuis document")
-                    brut_decl = float(decl.masse_salariale_brute) if decl.masse_salariale_brute > 0 else 0
-                    if brut_decl > 0 or d_type in ("bulletin_de_paie", "bulletin"):
-                        nom_fallback = "Salarie"
-                        # Essayer d utiliser le nom de fichier
+                    # Creer un contrat par employe depuis les infos disponibles
+                    nb_emp_fb = max(len(decl.employes), 1)
+                    _integration_log.append(f"  -> RH: aucun nom/NIR extrait, creation depuis document ({nb_emp_fb} employes)")
+                    brut_total = float(decl.masse_salariale_brute) if decl.masse_salariale_brute > 0 else 0
+                    if brut_total > 0 or d_type in ("bulletin_de_paie", "bulletin"):
+                        # Base du nom depuis le fichier
+                        nom_base = "Salarie"
                         ref = decl.reference or ""
                         if ref:
                             import re as _re
-                            # Ex: "BP_DUPONT_202601.pdf" -> "DUPONT"
                             parts = _re.split(r'[_\-\s]', Path(ref).stem)
                             for p in parts:
                                 if len(p) >= 3 and p.isalpha() and p.upper() not in ("PDF", "BULLETIN", "PAIE", "SALAIRE", "FICHE"):
-                                    nom_fallback = p.title()
+                                    nom_base = p.title()
                                     break
                         if decl.employeur and decl.employeur.raison_sociale:
-                            nom_fallback = f"{nom_fallback} ({decl.employeur.raison_sociale})"
-                        existing = [c for c in _rh_contrats if c.get("nom_salarie", "").lower() == nom_fallback.lower()]
-                        if not existing:
-                            emp0 = decl.employes[0] if decl.employes else None
+                            nom_base = f"{nom_base} ({decl.employeur.raison_sociale})"
+                        # Creer un contrat par employe detecte
+                        for emp_idx in range(nb_emp_fb):
+                            emp_obj = decl.employes[emp_idx] if emp_idx < len(decl.employes) else None
+                            brut_emp = brut_total / nb_emp_fb
+                            nom_fb = nom_base if emp_idx == 0 else f"{nom_base} #{emp_idx + 1}"
+                            # Verifier unicite globale
+                            if any(c.get("nom_salarie", "").lower() == nom_fb.lower() for c in _rh_contrats):
+                                nom_fb = f"{nom_fb} #{len(_rh_contrats) + 1}"
                             contrat = {
                                 "id": str(uuid.uuid4())[:8],
                                 "type_contrat": "CDI",
-                                "nom_salarie": nom_fallback,
+                                "nom_salarie": nom_fb,
                                 "prenom_salarie": "",
-                                "poste": (emp0.convention_collective or "Employe") if emp0 else "Employe",
+                                "poste": (emp_obj.convention_collective or "Employe") if emp_obj else "Employe",
                                 "date_debut": date.today().strftime("%Y-%m-%d"),
                                 "date_fin": "",
-                                "salaire_brut": str(round(brut_decl, 2)) if brut_decl > 0 else "0",
+                                "salaire_brut": str(round(brut_emp, 2)) if brut_emp > 0 else "0",
                                 "temps_travail": "temps_complet",
                                 "duree_hebdo": "35",
                                 "convention_collective": "",
                                 "periode_essai_jours": "0",
                                 "motif_cdd": "",
                                 "statut": "actif",
-                                "nir": (emp0.nir or "") if emp0 else "",
+                                "nir": (emp_obj.nir or "") if emp_obj else "",
                                 "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
                                 "date_creation": datetime.now().isoformat(),
                             }
                             _rh_contrats.append(contrat)
                             nb_rh_new += 1
-                            _integration_log.append(f"  -> RH nouveau (fallback): {nom_fallback} brut={brut_decl:.2f}")
+                            _integration_log.append(f"  -> RH nouveau (fallback): {nom_fb} brut={brut_emp:.2f}")
                     continue
                 for emp in decl.employes:
                     if not emp.nom and not emp.nir:
@@ -6349,13 +6354,13 @@ h+="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th clas
 for(var k=0;k<e.lignes.length;k++){var l=e.lignes[k];var sj=l.libelle.indexOf("[SANS JUSTIFICATIF]")>=0;
 if(e.validee){h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td>"+l.libelle+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}
 else{h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td style='display:flex;align-items:center;gap:4px'><span id='ecr-lig-"+e.id+"-"+k+"'>"+l.libelle+"</span>"+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"<button class='btn btn-s btn-sm edl-btn' style='padding:1px 6px;font-size:.72em' data-ecr='"+e.id+"' data-span='ecr-lig-"+e.id+"-"+k+"' data-lig='"+k+"' title='Modifier'>&#9998;</button></td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}}
-h+="</table></div>";}document.getElementById("ct-journal-c").innerHTML=h;}).catch(function(){});
+h+="</table></div>";}document.getElementById("ct-journal-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-journal-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 fetch("/api/comptabilite/balance").then(safeJson).then(function(b){
 var h="";if(!b.length)h="<p style='color:var(--tx2)'>Aucune donnee.</p>";
 else{h="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th class='num'>Credit</th><th class='num'>Solde D</th><th class='num'>Solde C</th></tr>";
 for(var i=0;i<b.length;i++){var r2=b[i];h+="<tr><td>"+r2.compte+"</td><td>"+r2.libelle+"</td><td class='num'>"+r2.total_debit.toFixed(2)+"</td><td class='num'>"+r2.total_credit.toFixed(2)+"</td><td class='num'>"+r2.solde_debiteur.toFixed(2)+"</td><td class='num'>"+r2.solde_crediteur.toFixed(2)+"</td></tr>";}h+="</table>";}
-document.getElementById("ct-balance-c").innerHTML=h;}).catch(function(){});
+document.getElementById("ct-balance-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-balance-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 var glUrl="/api/comptabilite/grand-livre-detail";if(dd)glUrl+="?date_debut="+dd+(df?"&date_fin="+df:"");
 fetch(glUrl).then(safeJson).then(function(gl){
@@ -6363,14 +6368,14 @@ var h="";if(!gl.length)h="<p style='color:var(--tx2)'>Aucune donnee.</p>";
 for(var i=0;i<gl.length;i++){var c=gl[i];h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'><strong>"+c.compte+" - "+(c.libelle||"")+"</strong>";
 var mvts=c.mouvements||[];if(mvts.length){h+="<table style='margin-top:6px'><tr><th>Date</th><th>Libelle</th><th class='num'>Debit</th><th class='num'>Credit</th></tr>";
 for(var k=0;k<mvts.length;k++){var m=mvts[k];var sj=m.sans_justificatif;h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+(m.date||"")+"</td><td>"+(m.libelle||"")+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+(m.debit||0).toFixed(2)+"</td><td class='num'>"+(m.credit||0).toFixed(2)+"</td></tr>";}
-h+="</table>";}h+="</div>";}document.getElementById("ct-grandlivre-c").innerHTML=h;}).catch(function(){});
+h+="</table>";}h+="</div>";}document.getElementById("ct-grandlivre-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-grandlivre-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 fetch("/api/comptabilite/compte-resultat").then(safeJson).then(function(cr){
 var clr=cr.resultat_net>=0?"var(--g)":"var(--r)";var bg=cr.resultat_net>=0?"var(--gl)":"var(--rl)";
 var h="<div class='g2'><div class='card' style='text-align:center'><h2>Charges</h2><div style='font-size:1.4em;font-weight:800;color:var(--r)'>"+cr.charges.total.toFixed(2)+" EUR</div></div>";
 h+="<div class='card' style='text-align:center'><h2>Produits</h2><div style='font-size:1.4em;font-weight:800;color:var(--g)'>"+cr.produits.total.toFixed(2)+" EUR</div></div></div>";
 h+="<div class='sc' style='margin-top:14px;background:"+bg+"'><div class='val' style='color:"+clr+"'>"+cr.resultat_net.toFixed(2)+" EUR</div><div class='lab'>Resultat net</div></div>";
-document.getElementById("ct-resultat-c").innerHTML=h;}).catch(function(){});
+document.getElementById("ct-resultat-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-resultat-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 fetch("/api/comptabilite/bilan").then(safeJson).then(function(bi){
 var a=bi.actif,p=bi.passif;
@@ -6382,7 +6387,7 @@ h+="<div><h3 style='margin-bottom:8px;color:var(--p)'>Passif</h3><table><tr><th>
 h+="<tr><td>Capitaux propres</td><td class='num'>"+p.capitaux_propres.toFixed(2)+"</td></tr><tr><td>Dettes financieres</td><td class='num'>"+p.dettes_financieres.toFixed(2)+"</td></tr>";
 h+="<tr><td>Dettes exploitation</td><td class='num'>"+p.dettes_exploitation.toFixed(2)+"</td></tr>";
 h+="<tr style='font-weight:bold;background:var(--pl)'><td>TOTAL PASSIF</td><td class='num'>"+p.total.toFixed(2)+"</td></tr></table></div></div>";
-document.getElementById("ct-bilan-c").innerHTML=h;}).catch(function(){});
+document.getElementById("ct-bilan-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-bilan-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 (function(){var now=new Date();fetch("/api/comptabilite/declaration-tva?mois="+(now.getMonth()+1)+"&annee="+now.getFullYear()).then(safeJson).then(function(t){
 var h="<div class='g3'><div class='sc'><div class='val'>"+t.chiffre_affaires_ht.toFixed(2)+"</div><div class='lab'>CA HT</div></div><div class='sc'><div class='val'>"+t.tva_collectee.toFixed(2)+"</div><div class='lab'>TVA collectee</div></div><div class='sc'><div class='val'>"+t.tva_deductible_totale.toFixed(2)+"</div><div class='lab'>TVA deductible</div></div></div>";
@@ -6699,7 +6704,7 @@ function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(func
 if(n==="salaries")loadRHSalaries();if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
-function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(){});}
+function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
 function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
