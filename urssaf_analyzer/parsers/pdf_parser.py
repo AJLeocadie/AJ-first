@@ -242,9 +242,9 @@ _COTISATION_PATTERNS = [
     (re.compile(r"fnal", re.I), ContributionType.FNAL),
     (re.compile(r"formation\s*pro", re.I), ContributionType.FORMATION_PROFESSIONNELLE),
     (re.compile(r"taxe\s*apprenti", re.I), ContributionType.TAXE_APPRENTISSAGE),
-    (re.compile(r"transport|mobilit[eé]", re.I), ContributionType.VERSEMENT_TRANSPORT),
-    (re.compile(r"pr[eé]voyance", re.I), ContributionType.PREVOYANCE),
-    (re.compile(r"mutuelle|compl[eé]mentaire\s*sant[eé]", re.I), ContributionType.COMPLEMENTAIRE_SANTE),
+    (re.compile(r"transport|mobilit[eé]|versement\s*mobilit", re.I), ContributionType.VERSEMENT_MOBILITE),
+    (re.compile(r"pr[eé]voyance", re.I), ContributionType.PREVOYANCE_CADRE),
+    (re.compile(r"mutuelle|compl[eé]mentaire\s*sant[eé]", re.I), ContributionType.PREVOYANCE_NON_CADRE),
 ]
 
 _RE_MONTANT_NUM = re.compile(r"([\d\s]+[.,]\d{2})")
