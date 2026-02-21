@@ -14,6 +14,8 @@ from urssaf_analyzer.analyzers.base_analyzer import BaseAnalyzer
 from urssaf_analyzer.config.constants import (
     ContributionType, Severity, FindingCategory,
     TOLERANCE_MONTANT, TOLERANCE_TAUX, PASS_MENSUEL, SMIC_MENSUEL_BRUT,
+    SEUIL_EFFECTIF_11, SEUIL_EFFECTIF_20, SEUIL_EFFECTIF_50,
+    SEUIL_EFFECTIF_250,
 )
 from urssaf_analyzer.models.documents import Declaration, Finding, Cotisation, Employe
 from urssaf_analyzer.rules.contribution_rules import ContributionRules
@@ -41,6 +43,32 @@ class AnomalyDetector(BaseAnalyzer):
     def __init__(self, effectif: int = 0, taux_at: Decimal = Decimal("0.0208")):
         self.rules = ContributionRules(effectif, taux_at)
 
+    # Cotisations obligatoires pour TOUT employeur (regime general)
+    COTISATIONS_UNIVERSELLES = [
+        ContributionType.MALADIE,
+        ContributionType.VIEILLESSE_PLAFONNEE,
+        ContributionType.VIEILLESSE_DEPLAFONNEE,
+        ContributionType.ALLOCATIONS_FAMILIALES,
+        ContributionType.ACCIDENT_TRAVAIL,
+        ContributionType.CSG_DEDUCTIBLE,
+        ContributionType.CRDS,
+        ContributionType.ASSURANCE_CHOMAGE,
+        ContributionType.AGS,
+        ContributionType.RETRAITE_COMPLEMENTAIRE_T1,
+        ContributionType.FNAL,
+        ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE,
+        ContributionType.FORMATION_PROFESSIONNELLE,
+        ContributionType.TAXE_APPRENTISSAGE,
+    ]
+
+    # Cotisations conditionnelles par seuil d'effectif
+    COTISATIONS_PAR_SEUIL = [
+        (SEUIL_EFFECTIF_11, ContributionType.VERSEMENT_MOBILITE,
+         "Art. L2333-64 CGCT", "Versement mobilite obligatoire >= 11 salaries (zone avec AOM)"),
+        (SEUIL_EFFECTIF_20, ContributionType.PEEC,
+         "Art. L313-1 Code construction", "Participation effort construction obligatoire >= 20 salaries"),
+    ]
+
     def analyser(self, declarations: list[Declaration]) -> list[Finding]:
         findings = []
         for decl in declarations:
@@ -54,6 +82,134 @@ class AnomalyDetector(BaseAnalyzer):
             for cotisation in decl.cotisations:
                 employe = employes_par_id.get(cotisation.employe_id)
                 findings.extend(self._verifier_cotisation(cotisation, decl, employe))
+
+            # Verifier les cotisations obligatoires manquantes
+            if decl.cotisations and len(decl.cotisations) >= 3:
+                findings.extend(self._verifier_cotisations_obligatoires(decl))
+        return findings
+
+    def _verifier_cotisations_obligatoires(self, decl: Declaration) -> list[Finding]:
+        """Detecte les cotisations obligatoires manquantes dans une declaration.
+
+        C'est le controle le plus important : verifier que toutes les
+        cotisations requises par la legislation sont effectivement presentes
+        selon l'effectif de l'entreprise.
+        """
+        findings = []
+        effectif = decl.employeur.effectif if decl.employeur else 0
+        types_presents = {c.type_cotisation for c in decl.cotisations}
+        ref_doc = decl.reference or decl.id
+        doc_type = (decl.type_declaration or "").lower()
+
+        # Ne verifier que les declarations de type bulletin ou DSN
+        # (pas les factures, contrats, etc.)
+        if doc_type in ("facture", "contrat", "interessement", "participation", "attestation"):
+            return findings
+
+        # --- Cotisations universelles ---
+        for ct in self.COTISATIONS_UNIVERSELLES:
+            if ct not in types_presents:
+                ct_label = ct.value.replace("_", " ").title()
+                # CSG peut etre regroupee, pas de faux positif si CSG non deductible manque
+                if ct == ContributionType.CSG_DEDUCTIBLE and ContributionType.CSG_NON_DEDUCTIBLE in types_presents:
+                    continue
+                if ct == ContributionType.CRDS and ContributionType.CSG_DEDUCTIBLE in types_presents:
+                    continue  # CRDS souvent regroupee avec CSG
+                # Retraite T1 peut apparaitre comme "retraite complementaire" generique
+                if ct == ContributionType.RETRAITE_COMPLEMENTAIRE_T1 and ContributionType.RETRAITE_COMPLEMENTAIRE_T2 in types_presents:
+                    continue
+                # FNAL et CSA souvent non detailles sur bulletins simplifies
+                if ct in (ContributionType.FNAL, ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE):
+                    severity = Severity.FAIBLE
+                    score = 30
+                else:
+                    severity = Severity.MOYENNE
+                    score = 50
+                findings.append(Finding(
+                    categorie=FindingCategory.DONNEE_MANQUANTE,
+                    severite=severity,
+                    titre=f"Cotisation obligatoire absente : {ct_label}",
+                    description=(
+                        f"La cotisation {ct_label} n'apparait pas dans le document "
+                        f"'{ref_doc}'. Cette cotisation est obligatoire pour tout "
+                        f"employeur du regime general.\\n\\n"
+                        f"Cela peut indiquer :\\n"
+                        f"- Une cotisation regroupee sous un autre libelle\\n"
+                        f"- Un oubli dans le logiciel de paie\\n"
+                        f"- Un document incomplet ou tronque\\n\\n"
+                        f"Que faire ?\\n"
+                        f"Verifier que cette cotisation est bien declaree, "
+                        f"eventuellement sous un libelle different."
+                    ),
+                    score_risque=score,
+                    recommandation=f"Verifier la presence de la cotisation {ct_label} dans les declarations.",
+                    detecte_par=self.nom,
+                    documents_concernes=[decl.source_document_id or decl.id],
+                    reference_legale="Art. L242-1 CSS - Assiette des cotisations",
+                ))
+
+        # --- Cotisations conditionnelles par effectif ---
+        if effectif > 0:
+            for seuil, ct, ref_legale, description in self.COTISATIONS_PAR_SEUIL:
+                if effectif >= seuil and ct not in types_presents:
+                    ct_label = ct.value.replace("_", " ").title()
+                    findings.append(Finding(
+                        categorie=FindingCategory.DONNEE_MANQUANTE,
+                        severite=Severity.HAUTE,
+                        titre=f"Cotisation obligatoire manquante : {ct_label} (effectif {effectif})",
+                        description=(
+                            f"L'entreprise declare un effectif de {effectif} salaries. "
+                            f"A partir de {seuil} salaries, la cotisation {ct_label} "
+                            f"est obligatoire.\\n\\n"
+                            f"{description}.\\n\\n"
+                            f"Cette cotisation n'apparait dans aucune ligne du document "
+                            f"'{ref_doc}'.\\n\\n"
+                            f"Impact potentiel :\\n"
+                            f"En cas de controle URSSAF, l'absence de cette cotisation "
+                            f"entrainera un redressement sur les 3 derniers exercices "
+                            f"avec application de majorations de retard (5% + 0.4%/mois).\\n\\n"
+                            f"Que faire ?\\n"
+                            f"1. Verifier dans le logiciel de paie que cette cotisation est parametree\\n"
+                            f"2. Si applicable, regulariser les periodes anterieures\\n"
+                            f"3. Contacter l'URSSAF pour une mise en conformite volontaire"
+                        ),
+                        score_risque=85,
+                        recommandation=(
+                            f"Ajouter la cotisation {ct_label} dans le parametrage de paie. "
+                            f"Regulariser les periodes anterieures si necessaire."
+                        ),
+                        detecte_par=self.nom,
+                        documents_concernes=[decl.source_document_id or decl.id],
+                        reference_legale=ref_legale,
+                    ))
+
+            # FNAL deplafonne >= 50 salaries : verifier que c'est bien le bon taux
+            if effectif >= SEUIL_EFFECTIF_50 and ContributionType.FNAL in types_presents:
+                fnal_cots = [c for c in decl.cotisations if c.type_cotisation == ContributionType.FNAL]
+                for fc in fnal_cots:
+                    if fc.taux_patronal > 0 and fc.taux_patronal < Decimal("0.004"):
+                        findings.append(Finding(
+                            categorie=FindingCategory.ANOMALIE,
+                            severite=Severity.HAUTE,
+                            titre="FNAL : taux plafonne applique au lieu du deplafonne",
+                            description=(
+                                f"L'entreprise a {effectif} salaries (>= 50). "
+                                f"Le FNAL doit etre calcule au taux deplafonne de 0.50% "
+                                f"sur la totalite du salaire, et non au taux plafonne "
+                                f"de 0.10%.\\n\\n"
+                                f"Taux constate : {float(fc.taux_patronal)*100:.2f}%\\n"
+                                f"Taux attendu : 0.50%\\n\\n"
+                                f"Impact : sous-declaration systematique de cotisations."
+                            ),
+                            valeur_constatee=f"{float(fc.taux_patronal)*100:.2f}%",
+                            valeur_attendue="0.50%",
+                            score_risque=80,
+                            recommandation="Corriger le taux FNAL a 0.50% deplafonne pour effectif >= 50.",
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="Art. L834-1 CSS - FNAL deplafonne >= 50 salaries",
+                        ))
+
         return findings
 
     def _verifier_cotisation(

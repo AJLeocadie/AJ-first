@@ -350,6 +350,17 @@ def _get_knowledge_summary() -> dict:
     # Entretiens
     nb_entretiens = len(_rh_entretiens)
 
+    # Types de cotisations presentes
+    types_cot = {}
+    for cot in kb["cotisations"]:
+        code = cot.get("code", "")
+        if code:
+            if code not in types_cot:
+                types_cot[code] = {"count": 0, "total_patronal": 0, "total_salarial": 0}
+            types_cot[code]["count"] += 1
+            types_cot[code]["total_patronal"] += cot.get("montant_patronal", 0)
+            types_cot[code]["total_salarial"] += cot.get("montant_salarial", 0)
+
     return {
         "nb_salaries_connus": nb_sal,
         "nb_cadres": nb_cadres,
@@ -371,6 +382,7 @@ def _get_knowledge_summary() -> dict:
         "exonerations": kb["exonerations_detectees"],
         "conventions": kb["conventions_collectives"],
         "derniere_maj": kb["derniere_maj"],
+        "types_cotisations": types_cot,
     }
 
 
@@ -2020,23 +2032,123 @@ async def knowledge_audit():
         alerte=len(ecarts) > 0,
     ))
 
-    # 4. Taux URSSAF (L.242-1 CSS)
+    # 4. Taux URSSAF (L.242-1 CSS) - verification reelle des taux
     nb_taux = len(ks["taux_verifies"])
+    taux_non_conformes = []
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules as _CR
+    from urssaf_analyzer.config.constants import ContributionType as _CT
+    effectif_audit = max(ks.get("nb_salaries_connus", 0), max((kb["effectifs"].values()), default=0))
+    _rules_audit = _CR(effectif_audit)
+    for code_t, info_t in ks["taux_verifies"].items():
+        taux_c = info_t.get("taux_constate", 0)
+        if taux_c > 0:
+            try:
+                ct_enum = _CT(code_t)
+                conforme, attendu = _rules_audit.verifier_taux(ct_enum, Decimal(str(taux_c)), Decimal(str(info_t.get("base", 0))))
+                if not conforme and attendu is not None:
+                    taux_non_conformes.append({"code": code_t, "constate": taux_c, "attendu": float(attendu)})
+            except (ValueError, KeyError):
+                pass
+    if taux_non_conformes:
+        taux_detail = f"{nb_taux} taux verifies, {len(taux_non_conformes)} NON CONFORME(S): "
+        for tnc in taux_non_conformes[:3]:
+            taux_detail += f"[{tnc['code']}: {tnc['constate']*100:.2f}% vs attendu {tnc['attendu']*100:.2f}%] "
+    elif nb_taux > 0:
+        taux_detail = f"{nb_taux} taux de cotisation verifies - tous conformes"
+    else:
+        taux_detail = "Aucun taux verifie - importer des bulletins de paie avec detail des cotisations"
     social_checks.append(_audit_check(
-        "Verification des taux URSSAF 2025-2026",
-        "Art. L.242-1 CSS",
-        ks["has_bulletins"] and nb_taux > 0,
-        f"{nb_taux} taux de cotisation verifies" if nb_taux > 0 else "Aucun taux verifie - importer des bulletins de paie",
+        "Verification des taux URSSAF 2026",
+        "Art. L.242-1 CSS - Baremes URSSAF 2026",
+        ks["has_bulletins"] and nb_taux > 0 and len(taux_non_conformes) == 0,
+        taux_detail,
         "Bulletins de paie avec detail des cotisations",
+        incidence="Redressement URSSAF pour application de taux incorrects" if taux_non_conformes else "",
+        alerte=len(taux_non_conformes) > 0,
+    ))
+
+    # 4bis. Cotisations obligatoires - completude (controle negatif)
+    types_cot_presents = set()
+    for cot_kb in kb["cotisations"]:
+        code_c = cot_kb.get("code", "")
+        if code_c:
+            types_cot_presents.add(code_c)
+    # Cotisations universelles obligatoires
+    universelles = [
+        ("maladie", "Maladie"),
+        ("vieillesse_plafonnee", "Vieillesse plafonnee"),
+        ("vieillesse_deplafonnee", "Vieillesse deplafonnee"),
+        ("allocations_familiales", "Allocations familiales"),
+        ("accident_travail", "AT/MP"),
+        ("csg_deductible", "CSG deductible"),
+        ("assurance_chomage", "Assurance chomage"),
+        ("retraite_complementaire_t1", "Retraite complementaire T1"),
+        ("fnal", "FNAL"),
+        ("formation_professionnelle", "Formation professionnelle"),
+        ("taxe_apprentissage", "Taxe apprentissage"),
+    ]
+    # Cotisations par seuil
+    par_seuil = [
+        (11, "versement_mobilite", "Versement mobilite"),
+        (20, "peec", "PEEC (1% logement)"),
+    ]
+    cots_manquantes = []
+    cots_presentes = []
+    if ks["has_bulletins"] or len(types_cot_presents) > 0:
+        for code_u, label_u in universelles:
+            if code_u in types_cot_presents:
+                cots_presentes.append(label_u)
+            else:
+                # Tolerance pour CSG/CRDS souvent regroupees
+                if code_u == "csg_deductible" and "csg_non_deductible" in types_cot_presents:
+                    cots_presentes.append(label_u)
+                    continue
+                cots_manquantes.append(label_u)
+        for seuil_c, code_c, label_c in par_seuil:
+            if effectif_audit >= seuil_c:
+                if code_c in types_cot_presents:
+                    cots_presentes.append(label_c)
+                else:
+                    cots_manquantes.append(f"{label_c} (obligatoire >= {seuil_c} sal.)")
+    if cots_manquantes:
+        completude_detail = f"{len(cots_presentes)} cotisation(s) trouvee(s), {len(cots_manquantes)} MANQUANTE(S): " + ", ".join(cots_manquantes[:5])
+    elif len(cots_presentes) > 0:
+        completude_detail = f"{len(cots_presentes)} cotisations obligatoires presentes - completude OK"
+    else:
+        completude_detail = "Aucune cotisation analysee - importer des bulletins de paie"
+    social_checks.append(_audit_check(
+        "Completude des cotisations obligatoires",
+        "Art. L242-1 CSS - Art. L2333-64 CGCT - Art. L313-1 CCH",
+        len(cots_presentes) > 0 and len(cots_manquantes) == 0,
+        completude_detail,
+        "Bulletins de paie complets avec toutes les lignes de cotisations",
+        incidence="Redressement URSSAF sur 3 ans + majorations 5% + 0.4%/mois pour cotisations non declarees" if cots_manquantes else "",
+        alerte=len(cots_manquantes) > 0,
     ))
 
     # 5. Coherence masse salariale / effectif (L.242-1 CSS)
+    masse_par_sal = ks["total_masse_salariale"] / max(ks["nb_salaries_connus"], 1) if ks["nb_salaries_connus"] > 0 else 0
+    masse_coherente = ks["total_masse_salariale"] > 0 and ks["nb_salaries_connus"] > 0
+    # Verifier si la masse par salarie est plausible (entre SMIC et 15000 EUR/mois)
+    masse_alerte = False
+    if masse_par_sal > 0:
+        smic_m = 1823.03
+        if masse_par_sal < smic_m * 0.5:
+            masse_alerte = True
+            masse_detail_extra = f" - ATTENTION: moyenne {masse_par_sal:.2f} EUR/sal. est anormalement basse (< 50% SMIC)"
+        elif masse_par_sal > 15000:
+            masse_detail_extra = f" - moyenne {masse_par_sal:.2f} EUR/sal. (a verifier si coherent)"
+        else:
+            masse_detail_extra = f" - moyenne {masse_par_sal:.2f} EUR/salarie"
+    else:
+        masse_detail_extra = ""
     social_checks.append(_audit_check(
         "Coherence masse salariale / effectif declare",
         "Art. L.242-1 CSS",
-        ks["total_masse_salariale"] > 0 and ks["nb_salaries_connus"] > 0,
-        f"Masse salariale: {ks['total_masse_salariale']:.2f} EUR pour {ks['nb_salaries_connus']} salarie(s)" if ks["total_masse_salariale"] > 0 else "Pas assez de donnees",
+        masse_coherente and not masse_alerte,
+        (f"Masse salariale: {ks['total_masse_salariale']:.2f} EUR pour {ks['nb_salaries_connus']} salarie(s)" + masse_detail_extra) if ks["total_masse_salariale"] > 0 else "Pas assez de donnees",
         "Bulletins de paie, DADS ou DSN annuelle",
+        alerte=masse_alerte,
     ))
 
     # 6. Plafonnement PASS (L.241-3 CSS)
@@ -6277,6 +6389,25 @@ if(rm.ecarts&&rm.ecarts.length>0){
 h+="<div class='al err' style='margin-top:8px'><span class='ai'>&#9888;</span><span><strong>"+rm.ecarts.length+" ecart(s) significatif(s) detecte(s)</strong> (seuil: "+rm.seuil_tolerance_pct+"%) - Un rapprochement detaille est necessaire. Verifier les elements de paie et declarations pour identifier l origine des ecarts.</span></div>";}
 else if(Object.keys(rm.masses_bs).length>0&&Object.keys(rm.masses_dsn).length>0){
 h+="<div class='al ok' style='margin-top:8px'><span class='ai'>&#9989;</span><span><strong>Masses concordantes</strong> - Les montants declares (DSN) correspondent aux montants verses (bulletins).</span></div>";}}
+var tc=ks.types_cotisations;
+if(tc&&Object.keys(tc).length>0&&(mode==="social"||mode==="complet")){
+h+="<h3 style='color:var(--p);margin:20px 0 8px'>Matrice des cotisations detectees</h3>";
+var obligatoires=["maladie","vieillesse_plafonnee","vieillesse_deplafonnee","allocations_familiales","accident_travail","csg_deductible","crds","assurance_chomage","ags","retraite_complementaire_t1","fnal","csa","formation_professionnelle","taxe_apprentissage","versement_mobilite","peec"];
+var labels={"maladie":"Maladie","vieillesse_plafonnee":"Vieillesse plaf.","vieillesse_deplafonnee":"Vieillesse deplaf.","allocations_familiales":"Alloc. familiales","accident_travail":"AT/MP","csg_deductible":"CSG deductible","crds":"CRDS","assurance_chomage":"Chomage","ags":"AGS","retraite_complementaire_t1":"Retraite T1","fnal":"FNAL","csa":"CSA","formation_professionnelle":"Formation pro","taxe_apprentissage":"Taxe apprentissage","versement_mobilite":"Versement mobilite","peec":"PEEC (1% logement)"};
+var seuils={"versement_mobilite":11,"peec":20};
+var eff=ks.nb_salaries_connus||0;
+h+="<div style='overflow-x:auto'><table class='tb'><thead><tr><th>Cotisation</th><th>Obligatoire</th><th>Detectee</th><th>Nb lignes</th><th>Total patronal</th></tr></thead><tbody>";
+for(var ci=0;ci<obligatoires.length;ci++){var co=obligatoires[ci];var lb=labels[co]||co;
+var oblig=true;var seuilC=seuils[co];if(seuilC&&eff<seuilC&&eff>0){oblig=false;}
+var det=tc[co];var found=!!det;
+var cls2=found?"color:var(--g)":"color:var(--r);font-weight:600";
+if(!oblig&&!found)cls2="color:var(--tx2)";
+h+="<tr><td>"+lb+"</td>";
+h+="<td>"+(oblig?(seuilC?"Oui (>= "+seuilC+" sal.)":"Oui"):"Non applicable")+"</td>";
+h+="<td style='"+cls2+"'>"+(found?"&#9989; Oui":"&#10060; Non")+"</td>";
+h+="<td class='num'>"+(det?det.count:"-")+"</td>";
+h+="<td class='num'>"+(det?det.total_patronal.toFixed(2)+" EUR":"-")+"</td></tr>";}
+h+="</tbody></table></div>";}
 el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur chargement audit: "+e.message+"</div>";});}
 
 /* === CONFORMITY SCORE === */
