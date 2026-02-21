@@ -4691,7 +4691,7 @@ if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons
 if(n==="rh")loadRHAlertes();if(n==="config"){loadEntete();loadAlertConfigs();}
 }
 
-document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");});
+document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
 
 /* === DASHBOARD === */
 var analysisData=null;
@@ -5078,8 +5078,8 @@ clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
 var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
 fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)).then(function(r){return r.json();}).then(function(d){
 var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
-var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){h+="<div class='sug-item' onclick='pickSug(\""+inputId+"\",\""+sugId+"\",\""+items[i].numero+"\",\""+counterpartId+"\",\""+((d.contreparties||{})[items[i].numero]||"")+"\")'><span class='sug-num'>"+items[i].numero+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>";}
-h+="</div>";box.innerHTML=h;}).catch(function(){});},250);}
+var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";h+="<div class='sug-item' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>";}
+h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(){});},250);}
 function pickSug(inputId,sugId,val,cpId,cpVal){document.getElementById(inputId).value=val;closeSugs(sugId);if(cpId&&cpVal){var cpInput=document.getElementById(cpId);if(cpInput&&!cpInput.value)cpInput.value=cpVal;}}
 function closeSugs(sugId){var b=document.getElementById(sugId);if(b)b.innerHTML="";}
 document.addEventListener("click",function(e){if(!e.target.closest(".sug-box")&&!e.target.closest("input")){document.querySelectorAll(".sug-list").forEach(function(s){s.classList.remove("show");});}});
@@ -5197,7 +5197,7 @@ if(!checks||!checks.length)return"";
 var nb_ok=0;for(var i=0;i<checks.length;i++){if(checks[i].present)nb_ok++;}
 var out="<h3 style='color:var(--p);margin:16px 0 8px'>"+titre+" <span class='badge "+(nb_ok===checks.length?"badge-green":"badge-amber")+"'>"+nb_ok+"/"+checks.length+"</span></h3>";
 for(var i=0;i<checks.length;i++){var c=checks[i];var cls=c.present?(c.alerte?"warn":"ok"):"warn";
-out+="<div class='al "+cls+"' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?c.detail:"Documents insuffisants");
+out+="<div class='al "+cls+"' style='cursor:pointer' data-toggle-detail='1'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?c.detail:"Documents insuffisants");
 out+="<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'>";
 out+="<p><strong>Etat :</strong> "+c.detail+"</p>";
 if(!c.present)out+="<p style='margin-top:4px'><strong>Documents necessaires :</strong> "+c.documents_requis+"</p>";
@@ -5271,7 +5271,7 @@ function rhGet(url,cb){fetch(url).then(function(r){return r.json();}).then(cb).c
 function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
 var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
-h+="<button class='btn btn-s btn-sm' style='margin:8px 4px 0 0' onclick='voirContrat(\""+d.id+"\")'>Visualiser le contrat</button>";
+h+="<button class='btn btn-s btn-sm' style='margin:8px 4px 0 0' onclick='voirContrat("+JSON.stringify(d.id)+")'>Visualiser le contrat</button>";
 var eff=d.cascading_effects;if(eff){h+="<div style='margin-top:12px;padding:10px;background:var(--pl);border-radius:8px'><strong>Effets en cascade :</strong><ul style='margin:6px 0 0 16px;font-size:.86em'>";
 if(eff.dpae)h+="<li>&#9989; DPAE generee (ref: "+eff.dpae.reference+")</li>";
 if(eff.visite_medicale)h+="<li>&#128197; Visite medicale programmee avant le "+eff.visite_medicale.echeance+"</li>";
@@ -5343,7 +5343,7 @@ var list=(resp&&resp.alertes)?resp.alertes:(Array.isArray(resp)?resp:[]);
 if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
 var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s) - Cliquez pour voir les details</p>";
 for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
-h+="<div class='al "+cls+"' style='cursor:pointer' onclick='this.querySelector(\".al-detail\")&&this.querySelector(\".al-detail\").classList.toggle(\"show\")'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+(a.titre||a.type||"Alerte")+"</strong> - "+(a.description||"");
+h+="<div class='al "+cls+"' style='cursor:pointer' data-toggle-detail='1'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+(a.titre||a.type||"Alerte")+"</strong> - "+(a.description||"");
 if(a.echeance)h+=" <em>(echeance: "+a.echeance+")</em>";
 if(a.message_personnalise)h+=" <em style='color:var(--p2)'>["+a.message_personnalise+"]</em>";
 h+="</span>";
@@ -5363,11 +5363,11 @@ var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Bulletin genere p
 h+="<div class='card' style='background:var(--pl);margin-top:8px'>";
 h+="<div class='g3'><div class='sc blue'><div class='val'>"+(d.brut_total||0).toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+(d.net_a_payer||0).toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+(d.cout_employeur||0).toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div>";
 if(d.lignes){h+="<table style='margin-top:10px'><tr><th>Rubrique</th><th class='num'>Base</th><th class='num'>Taux sal.</th><th class='num'>Part sal.</th><th class='num'>Taux pat.</th><th class='num'>Part pat.</th></tr>";for(var i=0;i<d.lignes.length;i++){var l=d.lignes[i];h+="<tr><td>"+l.libelle+"</td><td class='num'>"+(l.base||0).toFixed(2)+"</td><td class='num'>"+(l.taux_salarial||0).toFixed(2)+"%</td><td class='num'>"+(l.montant_salarial||0).toFixed(2)+"</td><td class='num'>"+(l.taux_patronal||0).toFixed(2)+"%</td><td class='num'>"+(l.montant_patronal||0).toFixed(2)+"</td></tr>";}h+="</table>";}
-h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick='window.open(\"/api/rh/bulletins/"+d.id+"/document\",\"_blank\")'>Visualiser / Imprimer</button></div>";
+h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick='window.open("+JSON.stringify("/api/rh/bulletins/"+d.id+"/document")+","+JSON.stringify("_blank")+")'>Visualiser / Imprimer</button></div>";
 document.getElementById("rh-bp-res").innerHTML=h;loadRHBulletins();});}
 function loadRHBulletins(){rhGet("/api/rh/bulletins",function(list){var el=document.getElementById("rh-bp-list");if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun bulletin.</p>";return;}
 var h="<table><tr><th>Mois</th><th>Salarie</th><th class='num'>Brut</th><th class='num'>Net</th><th>Actions</th></tr>";
-for(var i=0;i<list.length;i++){var b=list[i];h+="<tr><td>"+b.mois+"</td><td>"+(b.nom_salarie||"-")+"</td><td class='num'>"+(b.brut_total||0).toFixed(2)+"</td><td class='num'>"+(b.net_a_payer||0).toFixed(2)+"</td><td><button class='btn btn-s btn-sm' onclick='window.open(\"/api/rh/bulletins/"+b.id+"/document\",\"_blank\")'>Voir</button></td></tr>";}
+for(var i=0;i<list.length;i++){var b=list[i];h+="<tr><td>"+b.mois+"</td><td>"+(b.nom_salarie||"-")+"</td><td class='num'>"+(b.brut_total||0).toFixed(2)+"</td><td class='num'>"+(b.net_a_payer||0).toFixed(2)+"</td><td><button class='btn btn-s btn-sm' onclick='window.open("+JSON.stringify("/api/rh/bulletins/"+b.id+"/document")+","+JSON.stringify("_blank")+")'>Voir</button></td></tr>";}
 h+="</table>";el.innerHTML=h;});}
 function sauverAlertConfig(){var fd=new FormData();fd.append("type_alerte",document.getElementById("cfg-al-type").value);fd.append("actif",document.getElementById("cfg-al-actif").value);fd.append("delai_jours",document.getElementById("cfg-al-delai").value);var msg=document.getElementById("cfg-al-msg").value;if(msg)fd.append("message_personnalise",msg);
 rhPost("/api/rh/alertes/personnaliser",fd,function(d){document.getElementById("cfg-al-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Configuration alerte sauvegardee : "+d.type_alerte+" ("+(d.actif?"actif":"inactif")+")</span></div>";loadAlertConfigs();toast("Configuration alerte sauvegardee.","ok");});}
