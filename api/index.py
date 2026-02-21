@@ -459,42 +459,56 @@ async def analyser_documents(
             periode_str = ""
             if decl.periode and decl.periode.debut:
                 periode_str = decl.periode.debut.strftime("%Y%m")
-            # Determine document nature from content (not file format)
-            fmt = (decl.type_declaration or "").upper()
+            # Determine document nature from parser type_declaration and metadata
+            fmt = (decl.type_declaration or "").lower()
             nb_cots = len(decl.cotisations)
             nb_sal = len(decl.employes)
-            # Use filename hint for better detection
-            fname = ""
-            if idx_f < len(fichiers):
-                fname = (fichiers[idx_f].filename or "").lower()
-            fname_hint_bulletin = any(kw in fname for kw in ["bulletin", "paie", "salaire", "fiche_paie", "bp_", "bul_"])
-            fname_hint_dsn = any(kw in fname for kw in ["dsn", "declaration_sociale"])
-            fname_hint_ldp = any(kw in fname for kw in ["livre_de_paie", "ldp", "recapitulatif", "recap"])
-            nature = "Document"
-            if fmt in ("DSN", "DSN/XML") or fname_hint_dsn:
-                nature = "Declaration sociale nominative (DSN)"
-            elif (nb_cots > 0 and nb_sal == 1) or (fname_hint_bulletin and nb_sal <= 1):
-                nature = "Bulletin de paie"
-            elif nb_cots > 0 and nb_sal > 1:
-                nature = "Livre de paie / Recapitulatif cotisations"
-            elif fname_hint_ldp:
-                nature = "Livre de paie / Recapitulatif cotisations"
-            elif nb_sal > 0 and nb_cots == 0:
-                nature = "Liste du personnel / Registre"
-            elif float(decl.masse_salariale_brute) > 0:
-                if nb_sal == 1 or fname_hint_bulletin:
+            decl_meta = getattr(decl, "metadata", {}) or {}
+            doc_type = decl_meta.get("type_document", "")
+
+            # Map from parser-detected type
+            nature_map = {
+                "bulletin_de_paie": "Bulletin de paie",
+                "bulletin": "Bulletin de paie",
+                "livre_de_paie": "Livre de paie / Recapitulatif cotisations",
+                "facture_achat": "Facture d achat",
+                "facture_vente": "Facture de vente",
+                "contrat_de_travail": "Contrat de travail",
+                "accord_interessement": "Accord d interessement",
+                "accord_participation": "Accord de participation",
+                "attestation": "Attestation employeur",
+            }
+            nature = nature_map.get(doc_type, "")
+
+            # Fallback: use type_declaration from parser
+            if not nature:
+                if fmt in ("dsn", "dsn/xml"):
+                    nature = "Declaration sociale nominative (DSN)"
+                elif fmt == "bulletin":
                     nature = "Bulletin de paie"
-                else:
-                    nature = "Recapitulatif de paie"
-            elif fmt == "XML/BORDEREAU":
-                nature = "Bordereau recapitulatif de cotisations (BRC)"
-            elif fmt in ("PDF", "CSV", "EXCEL", "XML"):
-                if fname_hint_bulletin:
+                elif fmt == "livre_de_paie":
+                    nature = "Livre de paie / Recapitulatif cotisations"
+                elif fmt == "facture":
+                    nature = "Facture"
+                elif fmt == "contrat":
+                    nature = "Contrat de travail"
+                elif fmt in ("interessement", "participation"):
+                    nature = "Accord d " + fmt
+                elif fmt == "attestation":
+                    nature = "Attestation employeur"
+                elif fmt == "xml/bordereau":
+                    nature = "Bordereau recapitulatif de cotisations (BRC)"
+                elif nb_cots > 0 and nb_sal == 1:
                     nature = "Bulletin de paie"
+                elif nb_cots > 0 and nb_sal > 1:
+                    nature = "Livre de paie / Recapitulatif cotisations"
+                elif nb_sal > 0 and nb_cots == 0:
+                    nature = "Liste du personnel / Registre"
+                elif float(decl.masse_salariale_brute) > 0:
+                    nature = "Bulletin de paie" if nb_sal <= 1 else "Recapitulatif de paie"
                 else:
                     nature = "Document comptable / social"
-            decl_meta = getattr(decl, "metadata", {}) or {}
-            declarations_out.append({
+            decl_out = {
                 "type": decl.type_declaration,
                 "reference": decl.reference,
                 "periode": periode_str,
@@ -507,32 +521,89 @@ async def analyser_documents(
                 "s89_total_cotisations": decl_meta.get("s89_total_cotisations"),
                 "s89_total_brut": decl_meta.get("s89_total_brut"),
                 "nb_salaries": nb_sal,
-            })
+            }
+            # Add parsed metadata (net_a_payer, facture amounts, contrat type, etc.)
+            if decl_meta.get("net_a_payer"):
+                decl_out["net_a_payer"] = decl_meta["net_a_payer"]
+            if decl_meta.get("total_patronal"):
+                decl_out["total_patronal"] = decl_meta["total_patronal"]
+            if decl_meta.get("total_salarial"):
+                decl_out["total_salarial"] = decl_meta["total_salarial"]
+            if decl_meta.get("date_virement"):
+                decl_out["date_virement"] = decl_meta["date_virement"]
+            if decl_meta.get("montant_ht"):
+                decl_out["montant_ht"] = decl_meta["montant_ht"]
+            if decl_meta.get("montant_tva"):
+                decl_out["montant_tva"] = decl_meta["montant_tva"]
+            if decl_meta.get("montant_ttc"):
+                decl_out["montant_ttc"] = decl_meta["montant_ttc"]
+            if decl_meta.get("tiers"):
+                decl_out["tiers"] = decl_meta["tiers"]
+            if decl_meta.get("type_contrat"):
+                decl_out["type_contrat"] = decl_meta["type_contrat"]
+            if decl_meta.get("remuneration_brute"):
+                decl_out["remuneration_brute"] = decl_meta["remuneration_brute"]
+            declarations_out.append(decl_out)
 
         # Auto-generer les ecritures comptables a partir des declarations
         try:
             moteur = get_moteur()
             for decl in result.declarations:
-                if not decl.employes:
+                d_meta = getattr(decl, "metadata", {}) or {}
+                d_type = d_meta.get("type_document", "")
+
+                # --- Ecritures de paie (bulletins, DSN, livres de paie) ---
+                if d_type in ("facture_achat", "facture_vente"):
+                    # Factures: generer ecriture facture
+                    ht = Decimal(str(d_meta.get("montant_ht", 0)))
+                    tva = Decimal(str(d_meta.get("montant_tva", 0)))
+                    ttc = Decimal(str(d_meta.get("montant_ttc", 0)))
+                    if ht > 0 or ttc > 0:
+                        try:
+                            moteur.generer_ecriture_facture(
+                                type_doc=d_type,
+                                date_piece=date.today(),
+                                numero_piece=d_meta.get("numero_facture", decl.reference),
+                                montant_ht=ht,
+                                montant_tva=tva if tva > 0 else ht * Decimal("0.20"),
+                                montant_ttc=ttc if ttc > 0 else ht * Decimal("1.20"),
+                                nom_tiers=d_meta.get("tiers", "Tiers"),
+                            )
+                        except Exception:
+                            pass
                     continue
+
+                if d_type in ("contrat_de_travail", "accord_interessement", "accord_participation", "attestation"):
+                    continue  # pas d ecriture comptable
+
+                # Ecritures de paie
                 for emp in decl.employes:
                     cots = [c for c in decl.cotisations if c.employe_id == emp.id]
                     brut = sum(c.base_brute for c in cots) if cots else Decimal("0")
+                    # Fallback: use masse_salariale / nb_employes
+                    if brut <= 0 and decl.masse_salariale_brute > 0:
+                        brut = decl.masse_salariale_brute / max(len(decl.employes), 1)
                     if brut <= 0:
                         continue
-                    cot_sal = round(float(brut) * 0.22, 2)
-                    cot_pat_urssaf = round(float(brut) * 0.35, 2)
-                    cot_pat_retraite = round(float(brut) * 0.10, 2)
-                    net_a_payer = round(float(brut) * 0.78, 2)
+                    # Use actual parsed cotisation totals when available
+                    actual_pat = sum(c.montant_patronal for c in cots) if cots else Decimal("0")
+                    actual_sal = sum(c.montant_salarial for c in cots) if cots else Decimal("0")
+                    net_from_meta = Decimal(str(d_meta.get("net_a_payer", 0)))
+                    cot_sal = float(actual_sal) if actual_sal > 0 else round(float(brut) * 0.22, 2)
+                    cot_pat_total = float(actual_pat) if actual_pat > 0 else round(float(brut) * 0.45, 2)
+                    cot_pat_urssaf = round(cot_pat_total * 0.78, 2)
+                    cot_pat_retraite = round(cot_pat_total * 0.22, 2)
+                    net_a_payer = float(net_from_meta) if net_from_meta > 0 else round(float(brut) - cot_sal, 2)
                     date_piece = date.today()
                     if decl.periode and decl.periode.debut:
                         date_piece = decl.periode.debut
                     elif decl.periode and decl.periode.fin:
                         date_piece = decl.periode.fin
+                    nom_sal = f"{emp.prenom} {emp.nom}".strip() or "Salarie"
                     try:
                         moteur.generer_ecriture_paie(
                             date_piece=date_piece,
-                            nom_salarie=f"{emp.prenom} {emp.nom}",
+                            nom_salarie=nom_sal,
                             salaire_brut=brut,
                             cotisations_salariales=Decimal(str(cot_sal)),
                             cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
@@ -544,25 +615,43 @@ async def analyser_documents(
         except Exception:
             pass
 
-        # Auto-integrer les salaries dans le module RH
+        # Auto-integrer les salaries dans le module RH + Planning
         try:
             for decl in result.declarations:
+                d_meta = getattr(decl, "metadata", {}) or {}
+                d_type = d_meta.get("type_document", "")
                 for emp in decl.employes:
-                    # Verifier si le salarie existe deja dans RH
+                    if not emp.nom and not emp.nir:
+                        continue
+                    # Identifier le salarie par nom+prenom OU par NIR
                     existing = [c for c in _rh_contrats if
-                                c.get("nom_salarie", "").lower() == (emp.nom or "").lower() and
-                                c.get("prenom_salarie", "").lower() == (emp.prenom or "").lower()]
-                    if not existing and emp.nom:
+                                (c.get("nom_salarie", "").lower() == (emp.nom or "").lower() and
+                                 c.get("prenom_salarie", "").lower() == (emp.prenom or "").lower()) or
+                                (emp.nir and c.get("nir", "") == emp.nir)]
+                    if not existing:
                         cots = [c for c in decl.cotisations if c.employe_id == emp.id]
                         brut = float(sum(c.base_brute for c in cots)) if cots else 0
+                        if brut <= 0:
+                            brut = float(decl.masse_salariale_brute / max(len(decl.employes), 1))
                         is_cadre = emp.statut and "cadre" in emp.statut.lower()
-                        date_debut_str = decl.periode.debut.strftime("%Y-%m-%d") if decl.periode and decl.periode.debut else date.today().strftime("%Y-%m-%d")
+                        # Type contrat from document or default
+                        type_ctr = d_meta.get("type_contrat", "CDI")
+                        # Date from document or period
+                        date_debut_str = ""
+                        if emp.date_embauche:
+                            date_debut_str = emp.date_embauche.strftime("%Y-%m-%d")
+                        elif decl.periode and decl.periode.debut:
+                            date_debut_str = decl.periode.debut.strftime("%Y-%m-%d")
+                        else:
+                            date_debut_str = date.today().strftime("%Y-%m-%d")
+                        # Poste from parser
+                        poste = emp.convention_collective or ("Cadre" if is_cadre else "Employe")
                         contrat = {
                             "id": str(uuid.uuid4())[:8],
-                            "type_contrat": "CDI",
-                            "nom_salarie": emp.nom,
-                            "prenom_salarie": emp.prenom,
-                            "poste": "Cadre" if is_cadre else "Employe",
+                            "type_contrat": type_ctr,
+                            "nom_salarie": emp.nom or "",
+                            "prenom_salarie": emp.prenom or "",
+                            "poste": poste,
                             "date_debut": date_debut_str,
                             "date_fin": "",
                             "salaire_brut": str(round(brut, 2)) if brut > 0 else "0",
@@ -573,10 +662,41 @@ async def analyser_documents(
                             "motif_cdd": "",
                             "statut": "actif",
                             "nir": emp.nir or "",
-                            "source": "analyse_automatique",
+                            "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
                             "date_creation": datetime.now().isoformat(),
                         }
                         _rh_contrats.append(contrat)
+                        # Auto-creer un planning pour le salarie
+                        try:
+                            if date_debut_str:
+                                from datetime import timedelta
+                                d0 = date.fromisoformat(date_debut_str)
+                                for j in range(5):
+                                    d_planning = d0 + timedelta(days=j)
+                                    if d_planning.weekday() < 5:
+                                        _rh_planning.append({
+                                            "id": str(uuid.uuid4())[:8],
+                                            "salarie_id": contrat["id"],
+                                            "salarie_nom": f"{emp.prenom} {emp.nom}".strip(),
+                                            "date": d_planning.strftime("%Y-%m-%d"),
+                                            "heure_debut": "09:00",
+                                            "heure_fin": "17:00",
+                                            "type": "normal",
+                                            "note": "Planning auto (analyse)",
+                                        })
+                        except Exception:
+                            pass
+                    else:
+                        # Mettre a jour le salarie existant si nouvelles infos
+                        c = existing[0]
+                        cots = [ct for ct in decl.cotisations if ct.employe_id == emp.id]
+                        brut = float(sum(ct.base_brute for ct in cots)) if cots else 0
+                        if brut <= 0:
+                            brut = float(decl.masse_salariale_brute / max(len(decl.employes), 1))
+                        if brut > 0 and (not c.get("salaire_brut") or c.get("salaire_brut") == "0"):
+                            c["salaire_brut"] = str(round(brut, 2))
+                        if emp.nir and not c.get("nir"):
+                            c["nir"] = emp.nir
         except Exception:
             pass
 
@@ -5949,8 +6069,23 @@ if(nature.indexOf("Bulletin")>=0)badgeCls="badge-green";
 else if(nature.indexOf("DSN")>=0)badgeCls="badge-purple";
 else if(nature.indexOf("Livre")>=0||nature.indexOf("Recapitulatif")>=0)badgeCls="badge-amber";
 else if(nature.indexOf("Bordereau")>=0)badgeCls="badge-teal";
+else if(nature.indexOf("Facture")>=0)badgeCls="badge-blue";
+else if(nature.indexOf("Contrat")>=0)badgeCls="badge-purple";
+else if(nature.indexOf("Attestation")>=0)badgeCls="badge-amber";
+else if(nature.indexOf("interessement")>=0||nature.indexOf("participation")>=0)badgeCls="badge-teal";
 var masse=(d.masse_salariale_brute||0);
-h+="<tr><td style='font-size:.84em'>"+fname+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td><td class='num'>"+(masse>0?masse.toFixed(2)+" EUR":"-")+"</td></tr>";}
+var extraInfo="";
+if(d.net_a_payer)extraInfo+=" | Net: "+d.net_a_payer.toFixed(2)+" EUR";
+if(d.date_virement)extraInfo+=" | Virement: "+d.date_virement;
+if(d.total_patronal)extraInfo+=" | Pat: "+d.total_patronal.toFixed(2);
+if(d.total_salarial)extraInfo+=" | Sal: "+d.total_salarial.toFixed(2);
+if(d.montant_ht)extraInfo=" | HT: "+d.montant_ht.toFixed(2)+" | TVA: "+(d.montant_tva||0).toFixed(2)+" | TTC: "+(d.montant_ttc||0).toFixed(2);
+if(d.tiers)extraInfo+=" | Tiers: "+d.tiers;
+if(d.type_contrat)extraInfo=" | Type: "+d.type_contrat;
+if(d.remuneration_brute)extraInfo+=" | Remun: "+d.remuneration_brute.toFixed(2)+" EUR";
+h+="<tr><td style='font-size:.84em'>"+fname+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td><td class='num'>"+(masse>0?masse.toFixed(2)+" EUR":"-")+"</td></tr>";
+if(extraInfo){h+="<tr><td colspan='7' style='font-size:.82em;color:var(--tx2);padding:2px 8px;border-top:none'>"+extraInfo+"</td></tr>";}
+if(d.salaries&&d.salaries.length>0){for(var si=0;si<d.salaries.length;si++){var s=d.salaries[si];h+="<tr style='font-size:.82em;color:var(--tx2)'><td></td><td colspan='2'>"+((s.prenom||"")+" "+(s.nom||"")).trim()||"Salarie "+(si+1)+"</td><td>"+(s.nir?"NIR: "+s.nir.substring(0,5)+"...":"-")+"</td><td class='num'>"+s.brut_mensuel.toFixed(2)+" EUR</td><td class='num'>"+s.net_fiscal.toFixed(2)+" EUR</td><td></td></tr>";}}}
 if(data.declarations.length>1){var totMasse=0;var totSal=0;for(var j=0;j<data.declarations.length;j++){totMasse+=(data.declarations[j].masse_salariale_brute||0);totSal+=(data.declarations[j].nb_salaries||0);}
 h+="<tr style='font-weight:bold;background:var(--pl)'><td colspan='4'>TOTAL</td><td class='num'>"+totSal+"</td><td></td><td class='num'>"+totMasse.toFixed(2)+" EUR</td></tr>";}
 h+="</table>";
