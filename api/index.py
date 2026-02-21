@@ -804,6 +804,26 @@ async def analyser_documents(
                             _rh_contrats.append(contrat)
                             nb_rh_new += 1
                             _integration_log.append(f"  -> RH nouveau (fallback): {nom_fb} brut={brut_emp:.2f}")
+                            # Auto-creer planning pour le salarie fallback
+                            try:
+                                from datetime import timedelta
+                                d0 = date.today()
+                                for j in range(5):
+                                    d_pl = d0 + timedelta(days=j)
+                                    if d_pl.weekday() < 5:
+                                        _rh_planning.append({
+                                            "id": str(uuid.uuid4())[:8],
+                                            "salarie_id": contrat["id"],
+                                            "salarie_nom": nom_fb,
+                                            "date": d_pl.strftime("%Y-%m-%d"),
+                                            "heure_debut": "09:00",
+                                            "heure_fin": "17:00",
+                                            "type_poste": "normal",
+                                            "note": "Planning auto (analyse)",
+                                        })
+                                        nb_planning_new += 1
+                            except Exception as e:
+                                _integration_log.append(f"  -> ERREUR planning fallback: {e}")
                     continue
                 for emp in decl.employes:
                     if not emp.nom and not emp.nir:
