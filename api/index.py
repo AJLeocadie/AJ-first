@@ -1118,6 +1118,45 @@ async def valider_ecritures():
     return {"nb_validees": nb_validees, "erreurs": erreurs}
 
 
+@app.put("/api/comptabilite/ecriture/{ecriture_id}/libelle")
+async def modifier_libelle_ecriture(ecriture_id: str, request: Request):
+    """Modifie le libelle d'une ecriture et/ou de ses lignes."""
+    moteur = get_moteur()
+    body = await request.json()
+    nouveau_libelle = body.get("libelle", "").strip()
+    lignes_libelles = body.get("lignes", {})  # {index: nouveau_libelle}
+
+    ecriture = None
+    for e in moteur.ecritures:
+        if e.id == ecriture_id:
+            ecriture = e
+            break
+
+    if not ecriture:
+        raise HTTPException(404, "Ecriture non trouvee")
+
+    if ecriture.validee:
+        raise HTTPException(400, "Impossible de modifier une ecriture validee")
+
+    modifs = []
+    if nouveau_libelle:
+        ancien = ecriture.libelle
+        ecriture.libelle = nouveau_libelle
+        modifs.append(f"libelle: '{ancien}' -> '{nouveau_libelle}'")
+
+    for idx_str, lib in lignes_libelles.items():
+        idx = int(idx_str)
+        if 0 <= idx < len(ecriture.lignes):
+            lib = lib.strip()
+            if lib:
+                ancien_l = ecriture.lignes[idx].libelle
+                ecriture.lignes[idx].libelle = lib
+                modifs.append(f"ligne {idx}: '{ancien_l}' -> '{lib}'")
+
+    log_action("utilisateur", "modification_libelle", f"Ecriture {ecriture_id}: {', '.join(modifs)}")
+    return {"ok": True, "modifications": modifs}
+
+
 # ==============================
 # SIMULATION
 # ==============================
@@ -6250,11 +6289,14 @@ var dd=document.getElementById("gl-dd").value;var df=document.getElementById("gl
 fetch("/api/comptabilite/journal").then(safeJson).then(function(j){
 var h="";if(!j.length)h="<p style='color:var(--tx2)'>Aucune ecriture.</p>";
 for(var i=0;i<j.length;i++){var e=j[i];
-h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'>";
+h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0' data-ecr-id='"+e.id+"'>";
 h+="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px'><strong>"+e.date+" | "+e.journal+" | "+e.piece+"</strong><span class='badge "+(e.validee?"badge-green":"badge-amber")+"'>"+(e.validee?"Validee":"Brouillon")+"</span></div>";
-h+="<div style='color:var(--tx2);font-size:.86em;margin-bottom:6px'>"+e.libelle+"</div>";
+if(e.validee){h+="<div style='color:var(--tx2);font-size:.86em;margin-bottom:6px'>"+e.libelle+"</div>";}
+else{h+="<div style='color:var(--tx2);font-size:.86em;margin-bottom:6px;display:flex;align-items:center;gap:6px'><span class='ecr-lib' id='ecr-lib-"+e.id+"'>"+e.libelle+"</span><button class='btn btn-s btn-sm' style='padding:2px 8px;font-size:.78em' onclick='editLibelle(\""+e.id+"\",\"ecr-lib-"+e.id+"\",null)' title='Modifier le libelle'>&#9998;</button></div>";}
 h+="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th class='num'>Credit</th></tr>";
-for(var k=0;k<e.lignes.length;k++){var l=e.lignes[k];var sj=l.libelle.indexOf("[SANS JUSTIFICATIF]")>=0;h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td>"+l.libelle+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}
+for(var k=0;k<e.lignes.length;k++){var l=e.lignes[k];var sj=l.libelle.indexOf("[SANS JUSTIFICATIF]")>=0;
+if(e.validee){h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td>"+l.libelle+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}
+else{h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td style='display:flex;align-items:center;gap:4px'><span id='ecr-lig-"+e.id+"-"+k+"'>"+l.libelle+"</span>"+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"<button class='btn btn-s btn-sm' style='padding:1px 6px;font-size:.72em' onclick='editLibelle(\""+e.id+"\",\"ecr-lig-"+e.id+"-"+k+"\","+k+")' title='Modifier'>&#9998;</button></td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}}
 h+="</table></div>";}document.getElementById("ct-journal-c").innerHTML=h;}).catch(function(){});
 
 fetch("/api/comptabilite/balance").then(safeJson).then(function(b){
@@ -6312,6 +6354,7 @@ document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(){});
 
 function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(){});}
 function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(safeJson).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
+function editLibelle(ecrId,spanId,ligneIdx){var sp=document.getElementById(spanId);if(!sp)return;var old=sp.textContent;var inp=document.createElement("input");inp.type="text";inp.value=old;inp.style.cssText="font-size:.86em;padding:4px 8px;border:1px solid var(--p);border-radius:6px;width:100%;min-width:200px";sp.parentNode.replaceChild(inp,sp);inp.focus();inp.select();function save(){var nv=inp.value.trim();if(!nv||nv===old){var ns=document.createElement("span");ns.id=spanId;ns.textContent=old;inp.parentNode.replaceChild(ns,inp);return;}var body={};if(ligneIdx===null)body.libelle=nv;else{body.lignes={};body.lignes[ligneIdx]=nv;}fetch("/api/comptabilite/ecriture/"+ecrId+"/libelle",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(safeJson).then(function(){var ns=document.createElement("span");ns.id=spanId;ns.textContent=nv;if(inp.parentNode)inp.parentNode.replaceChild(ns,inp);toast("Libelle modifie","ok");}).catch(function(e){toast(e.message||"Erreur");var ns=document.createElement("span");ns.id=spanId;ns.textContent=old;if(inp.parentNode)inp.parentNode.replaceChild(ns,inp);});}inp.addEventListener("keydown",function(ev){if(ev.key==="Enter")save();if(ev.key==="Escape"){var ns=document.createElement("span");ns.id=spanId;ns.textContent=old;inp.parentNode.replaceChild(ns,inp);}});inp.addEventListener("blur",save);}
 var _sugTimer=null;
 function suggestCompte(inputId,sugId,counterpartId){
 clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){

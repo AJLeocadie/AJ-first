@@ -405,11 +405,11 @@ class MoteurEcritures:
             e.date_validation = datetime.now()
         return erreurs
 
-    def get_grand_livre(self) -> dict[str, list[dict]]:
+    def get_grand_livre(self, validees_seulement: bool = False) -> dict[str, list[dict]]:
         """Retourne le grand livre (mouvements par compte)."""
         grand_livre: dict[str, list[dict]] = {}
         for e in self.ecritures:
-            if not e.validee:
+            if validees_seulement and not e.validee:
                 continue
             for l in e.lignes:
                 if l.compte not in grand_livre:
@@ -424,11 +424,11 @@ class MoteurEcritures:
                 })
         return dict(sorted(grand_livre.items()))
 
-    def get_balance(self) -> list[dict]:
+    def get_balance(self, validees_seulement: bool = False) -> list[dict]:
         """Retourne la balance des comptes."""
         totaux: dict[str, dict] = {}
         for e in self.ecritures:
-            if not e.validee:
+            if validees_seulement and not e.validee:
                 continue
             for l in e.lignes:
                 if l.compte not in totaux:
