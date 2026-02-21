@@ -753,6 +753,53 @@ async def analyser_documents(
                             _rh_contrats.append(contrat)
                             nb_rh_new += 1
                     continue
+                # Filtrer les employes valides (avec nom ou NIR)
+                employes_valides = [e for e in decl.employes if e.nom or e.nir]
+                if not employes_valides:
+                    # Tous les employes etaient sans nom ni NIR (OCR incomplet)
+                    # Creer un salarie a partir des infos disponibles
+                    _integration_log.append(f"  -> RH: aucun nom/NIR extrait, creation depuis document")
+                    brut_decl = float(decl.masse_salariale_brute) if decl.masse_salariale_brute > 0 else 0
+                    if brut_decl > 0 or d_type in ("bulletin_de_paie", "bulletin"):
+                        nom_fallback = "Salarie"
+                        # Essayer d utiliser le nom de fichier
+                        ref = decl.reference or ""
+                        if ref:
+                            import re as _re
+                            # Ex: "BP_DUPONT_202601.pdf" -> "DUPONT"
+                            parts = _re.split(r'[_\-\s]', Path(ref).stem)
+                            for p in parts:
+                                if len(p) >= 3 and p.isalpha() and p.upper() not in ("PDF", "BULLETIN", "PAIE", "SALAIRE", "FICHE"):
+                                    nom_fallback = p.title()
+                                    break
+                        if decl.employeur and decl.employeur.raison_sociale:
+                            nom_fallback = f"{nom_fallback} ({decl.employeur.raison_sociale})"
+                        existing = [c for c in _rh_contrats if c.get("nom_salarie", "").lower() == nom_fallback.lower()]
+                        if not existing:
+                            emp0 = decl.employes[0] if decl.employes else None
+                            contrat = {
+                                "id": str(uuid.uuid4())[:8],
+                                "type_contrat": "CDI",
+                                "nom_salarie": nom_fallback,
+                                "prenom_salarie": "",
+                                "poste": (emp0.convention_collective or "Employe") if emp0 else "Employe",
+                                "date_debut": date.today().strftime("%Y-%m-%d"),
+                                "date_fin": "",
+                                "salaire_brut": str(round(brut_decl, 2)) if brut_decl > 0 else "0",
+                                "temps_travail": "temps_complet",
+                                "duree_hebdo": "35",
+                                "convention_collective": "",
+                                "periode_essai_jours": "0",
+                                "motif_cdd": "",
+                                "statut": "actif",
+                                "nir": (emp0.nir or "") if emp0 else "",
+                                "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
+                                "date_creation": datetime.now().isoformat(),
+                            }
+                            _rh_contrats.append(contrat)
+                            nb_rh_new += 1
+                            _integration_log.append(f"  -> RH nouveau (fallback): {nom_fallback} brut={brut_decl:.2f}")
+                    continue
                 for emp in decl.employes:
                     if not emp.nom and not emp.nir:
                         _integration_log.append(f"  -> RH skip: employe sans nom ni NIR")

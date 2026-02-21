@@ -436,6 +436,20 @@ class PDFParser(BaseParser):
             except (ValueError, TypeError):
                 pass
 
+        # --- Fallback nom depuis le nom de fichier ---
+        if not emp.nom and document.nom_fichier:
+            stem = Path(document.nom_fichier).stem
+            parts = re.split(r'[_\-\s]+', stem)
+            excluded_fn = {"bulletin", "paie", "salaire", "fiche", "bp", "bs",
+                           "pdf", "janv", "fev", "mars", "avr", "mai", "juin",
+                           "juil", "aout", "sept", "oct", "nov", "dec"}
+            for p in parts:
+                if (len(p) >= 3 and p.isalpha()
+                        and p.lower() not in excluded_fn
+                        and not p.isdigit()):
+                    emp.nom = p.upper()
+                    break
+
         # --- Cotisations ---
         cotisations = self._extraire_cotisations_bulletin(texte, tableaux, doc_id, emp.id, brut)
 
@@ -872,6 +886,37 @@ class PDFParser(BaseParser):
             if m:
                 emp.nom = m.group(1).strip()
                 emp.prenom = m.group(2).strip()
+
+        # Pattern: "Matricule: xxx" followed by "LASTNAME Firstname" on next line
+        if not emp.nom:
+            m = re.search(
+                r"(?:matricule|n[°o]\s*salari[eé]|identifiant)\s*[:\s]*\w+\s*\n\s*"
+                r"([A-Z\u00C0-\u00FF]{2,})\s+([A-Z\u00C0-\u00FF][a-z\u00E0-\u00FF'-]+)",
+                texte, re.IGNORECASE,
+            )
+            if m:
+                emp.nom = m.group(1).strip()
+                emp.prenom = m.group(2).strip()
+
+        # Pattern: near "bulletin" or "paie", look for "LASTNAME Firstname" (all-caps last, title-case first)
+        if not emp.nom:
+            m = re.search(
+                r"(?:bulletin|paie|salaire).{0,100}?"
+                r"([A-Z\u00C0-\u00FF]{2,}[A-Z\u00C0-\u00FF'-]*)\s+"
+                r"([A-Z\u00C0-\u00FF][a-z\u00E0-\u00FF'-]{2,})",
+                texte, re.IGNORECASE | re.DOTALL,
+            )
+            if m:
+                cand_nom = m.group(1).strip()
+                cand_prenom = m.group(2).strip()
+                # Exclude false positives (common words)
+                excluded = {"BULLETIN", "SALAIRE", "PAIE", "FICHE", "TOTAL", "BRUT",
+                            "SECURITE", "SOCIALE", "SALARIALE", "PATRONALE", "EMPLOI",
+                            "PERIODE", "MOIS", "ENTREPRISE", "SIRET", "SIREN", "CODE",
+                            "MONTANT", "NET", "PAYER", "COTISATION", "BASE", "TAUX"}
+                if cand_nom.upper() not in excluded and len(cand_nom) >= 2:
+                    emp.nom = cand_nom
+                    emp.prenom = cand_prenom
 
         # Statut
         if _RE_APPRENTI.search(texte):
