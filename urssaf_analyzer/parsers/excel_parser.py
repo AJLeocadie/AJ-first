@@ -56,7 +56,7 @@ class ExcelParser(BaseParser):
         declarations = []
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
-            decl = self._parser_feuille(ws, sheet_name, document.id)
+            decl = self._parser_feuille(ws, sheet_name, document)
             if decl and (decl.cotisations or decl.employes):
                 declarations.append(decl)
 
@@ -64,22 +64,23 @@ class ExcelParser(BaseParser):
         return declarations
 
     def _parser_feuille(
-        self, ws: Any, nom_feuille: str, doc_id: str
+        self, ws: Any, nom_feuille: str, document: Document
     ) -> Declaration | None:
         """Parse une feuille Excel."""
         rows = list(ws.iter_rows(values_only=True))
         if len(rows) < 2:
             return None
 
-        # Premiere ligne = en-tetes
-        header = [str(c).strip().lower().replace(" ", "_") if c else "" for c in rows[0]]
-        col_indices = self._mapper_colonnes(header)
+        # Premiere ligne = en-tetes (normaliser)
+        header = [self._normaliser_entete(c) for c in rows[0]]
+        col_map = self._mapper_colonnes(header)
 
-        if not col_indices:
+        if not col_map:
             return None
 
         cotisations = []
-        employes_vus = {}
+        employes_vus = {}  # cle = nir ou "nom|prenom"
+        employe_ids = {}   # cle de dedup -> employe.id
 
         for row_data in rows[1:]:
             if not row_data or all(c is None for c in row_data):
@@ -90,52 +91,142 @@ class ExcelParser(BaseParser):
                 if i < len(header) and header[i]:
                     row_dict[header[i]] = val
 
-            cotisation = self._extraire_cotisation(row_dict, col_indices, doc_id)
+            employe = self._extraire_employe(row_dict, col_map, document.id)
+            emp_key = None
+            if employe:
+                # Deduplication par NIR ou par nom+prenom
+                if employe.nir:
+                    emp_key = employe.nir
+                elif employe.nom:
+                    emp_key = f"{(employe.nom or '').lower()}|{(employe.prenom or '').lower()}"
+                if emp_key and emp_key not in employes_vus:
+                    employes_vus[emp_key] = employe
+                    employe_ids[emp_key] = employe.id
+
+            cotisation = self._extraire_cotisation(row_dict, col_map, document.id)
             if cotisation:
+                # Lier la cotisation a l employe de la meme ligne
+                if emp_key and emp_key in employe_ids:
+                    cotisation.employe_id = employe_ids[emp_key]
                 cotisations.append(cotisation)
 
-            employe = self._extraire_employe(row_dict, col_indices, doc_id)
-            if employe and employe.nir and employe.nir not in employes_vus:
-                employes_vus[employe.nir] = employe
+        # Detecter si c est un livre de paie (plusieurs employes)
+        is_livre_paie = len(employes_vus) > 1
+        type_decl = "livre_de_paie" if is_livre_paie else "EXCEL"
 
         declaration = Declaration(
-            type_declaration="EXCEL",
-            reference=nom_feuille,
+            type_declaration=type_decl,
+            reference=document.nom_fichier or nom_feuille,
             cotisations=cotisations,
             employes=list(employes_vus.values()),
             effectif_declare=len(employes_vus),
-            source_document_id=doc_id,
+            source_document_id=document.id,
+            metadata={"type_document": "livre_de_paie" if is_livre_paie else "bulletin_de_paie"},
         )
         if cotisations:
             declaration.masse_salariale_brute = sum(c.base_brute for c in cotisations)
 
         return declaration
 
+    @staticmethod
+    def _normaliser_entete(cellule: Any) -> str:
+        """Normalise un en-tete de colonne pour le mapping."""
+        if cellule is None:
+            return ""
+        s = str(cellule).strip().lower()
+        # Retirer accents courants
+        for a, b in [("é", "e"), ("è", "e"), ("ê", "e"), ("ë", "e"),
+                      ("à", "a"), ("â", "a"), ("ô", "o"), ("î", "i"),
+                      ("ù", "u"), ("û", "u"), ("ç", "c")]:
+            s = s.replace(a, b)
+        # Normaliser separateurs
+        s = s.replace(" ", "_").replace("-", "_").replace(".", "_")
+        s = s.replace("'", "").replace("°", "")
+        # Supprimer underscores multiples
+        while "__" in s:
+            s = s.replace("__", "_")
+        return s.strip("_")
+
     def _mapper_colonnes(self, header: list[str]) -> dict[str, int]:
         """Identifie les colonnes utiles a partir des en-tetes."""
         mapping = {}
         keywords = {
-            "nir": ["nir", "numero_ss", "securite_sociale"],
-            "nom": ["nom", "nom_salarie"],
-            "prenom": ["prenom"],
-            "base_brute": ["base", "base_brute", "salaire_brut", "brut"],
-            "taux_patronal": ["taux_patronal", "taux_employeur"],
-            "taux_salarial": ["taux_salarial", "taux_salarie"],
-            "montant_patronal": ["montant_patronal", "cotisation_employeur"],
-            "montant_salarial": ["montant_salarial", "cotisation_salarie"],
-            "type_cotisation": ["type_cotisation", "code_cotisation", "libelle"],
+            "nir": [
+                "nir", "numero_ss", "securite_sociale", "n_ss", "nss",
+                "numero_securite_sociale", "n_securite_sociale",
+                "matricule", "num_matricule", "numero_matricule",
+            ],
+            "nom": [
+                "nom", "nom_salarie", "salarie", "nom_du_salarie",
+                "nom_employe", "employe", "nom_de_l_employe",
+                "nom_agent", "agent",
+            ],
+            "prenom": [
+                "prenom", "prenom_salarie", "prenom_du_salarie",
+                "prenom_employe",
+            ],
+            "nom_prenom": [
+                "nom_prenom", "nom_et_prenom", "prenom_nom",
+                "identite", "salarie_nom_prenom",
+            ],
+            "base_brute": [
+                "base", "base_brute", "salaire_brut", "brut",
+                "remuneration_brute", "remuneration", "montant_brut",
+                "sal_brut", "total_brut", "brut_mensuel",
+            ],
+            "net": [
+                "net", "net_a_payer", "salaire_net", "montant_net",
+                "net_paye", "net_verse",
+            ],
+            "taux_patronal": [
+                "taux_patronal", "taux_employeur", "tx_patronal",
+                "taux_part_employeur",
+            ],
+            "taux_salarial": [
+                "taux_salarial", "taux_salarie", "tx_salarial",
+                "taux_part_salarie",
+            ],
+            "montant_patronal": [
+                "montant_patronal", "cotisation_employeur",
+                "part_employeur", "charges_patronales",
+                "cotisations_patronales", "patronal",
+            ],
+            "montant_salarial": [
+                "montant_salarial", "cotisation_salarie",
+                "part_salarie", "charges_salariales",
+                "cotisations_salariales", "retenues", "salarial",
+            ],
+            "type_cotisation": [
+                "type_cotisation", "code_cotisation", "libelle",
+                "designation", "intitule", "nature",
+            ],
         }
         for i, col in enumerate(header):
+            if not col:
+                continue
             for field_name, kws in keywords.items():
-                if col in kws and field_name not in mapping:
+                if field_name in mapping:
+                    continue
+                # Match exact ou par inclusion
+                if col in kws:
+                    mapping[field_name] = i
+                elif any(kw in col for kw in kws):
                     mapping[field_name] = i
         return mapping
 
     def _extraire_cotisation(
-        self, row: dict, col_indices: dict, doc_id: str
+        self, row: dict, col_map: dict, doc_id: str
     ) -> Cotisation | None:
-        base = row.get("base_brute") or row.get("base") or row.get("salaire_brut") or row.get("brut")
-        montant_p = row.get("montant_patronal") or row.get("cotisation_employeur")
+        base = self._get_val(row, [
+            "base_brute", "base", "salaire_brut", "brut",
+            "remuneration_brute", "remuneration", "montant_brut",
+            "sal_brut", "total_brut", "brut_mensuel",
+        ])
+        montant_p = self._get_val(row, [
+            "montant_patronal", "cotisation_employeur",
+            "part_employeur", "charges_patronales",
+            "cotisations_patronales", "patronal",
+        ])
 
         if base is None and montant_p is None:
             return None
@@ -147,17 +238,21 @@ class ExcelParser(BaseParser):
         if montant_p is not None:
             c.montant_patronal = Decimal(str(montant_p)) if not isinstance(montant_p, str) else parser_montant(montant_p)
 
-        montant_s = row.get("montant_salarial") or row.get("cotisation_salarie")
+        montant_s = self._get_val(row, [
+            "montant_salarial", "cotisation_salarie",
+            "part_salarie", "charges_salariales",
+            "cotisations_salariales", "retenues", "salarial",
+        ])
         if montant_s is not None:
             c.montant_salarial = Decimal(str(montant_s)) if not isinstance(montant_s, str) else parser_montant(montant_s)
 
-        tp = row.get("taux_patronal") or row.get("taux_employeur")
+        tp = self._get_val(row, ["taux_patronal", "taux_employeur", "tx_patronal", "taux_part_employeur"])
         if tp is not None:
             c.taux_patronal = Decimal(str(tp)) if not isinstance(tp, str) else parser_montant(tp)
             if c.taux_patronal > 1:
                 c.taux_patronal = c.taux_patronal / 100
 
-        ts = row.get("taux_salarial") or row.get("taux_salarie")
+        ts = self._get_val(row, ["taux_salarial", "taux_salarie", "tx_salarial", "taux_part_salarie"])
         if ts is not None:
             c.taux_salarial = Decimal(str(ts)) if not isinstance(ts, str) else parser_montant(ts)
             if c.taux_salarial > 1:
@@ -165,14 +260,51 @@ class ExcelParser(BaseParser):
 
         return c
 
-    def _extraire_employe(self, row: dict, col_indices: dict, doc_id: str) -> Employe | None:
-        nir = row.get("nir") or row.get("numero_ss") or row.get("securite_sociale")
-        nom = row.get("nom") or row.get("nom_salarie")
+    def _extraire_employe(self, row: dict, col_map: dict, doc_id: str) -> Employe | None:
+        nir = self._get_val(row, [
+            "nir", "numero_ss", "securite_sociale", "n_ss", "nss",
+            "numero_securite_sociale", "n_securite_sociale",
+            "matricule", "num_matricule", "numero_matricule",
+        ])
+        nom = self._get_val(row, [
+            "nom", "nom_salarie", "salarie", "nom_du_salarie",
+            "nom_employe", "employe", "nom_de_l_employe",
+            "nom_agent", "agent",
+        ])
+        prenom = self._get_val(row, [
+            "prenom", "prenom_salarie", "prenom_du_salarie",
+            "prenom_employe",
+        ])
+
+        # Gerer les colonnes combinees "Nom Prenom" ou "Prenom Nom"
+        if not nom:
+            nom_prenom = self._get_val(row, [
+                "nom_prenom", "nom_et_prenom", "prenom_nom",
+                "identite", "salarie_nom_prenom",
+            ])
+            if nom_prenom and str(nom_prenom).strip():
+                parts = str(nom_prenom).strip().split()
+                if len(parts) >= 2:
+                    nom = parts[0]
+                    prenom = " ".join(parts[1:])
+                else:
+                    nom = parts[0]
+
         if not nir and not nom:
             return None
+
         return Employe(
-            nir=str(nir) if nir else "",
-            nom=str(nom) if nom else "",
-            prenom=str(row.get("prenom", "")),
+            nir=str(nir).strip() if nir else "",
+            nom=str(nom).strip() if nom else "",
+            prenom=str(prenom).strip() if prenom else "",
             source_document_id=doc_id,
         )
+
+    @staticmethod
+    def _get_val(row: dict, keys: list[str]) -> Any:
+        """Cherche la premiere valeur non-None parmi plusieurs cles."""
+        for k in keys:
+            v = row.get(k)
+            if v is not None and str(v).strip() != "":
+                return v
+        return None
