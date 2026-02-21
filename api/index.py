@@ -570,6 +570,16 @@ async def analyser_documents(
 
         result = orchestrator.result
 
+        # --- Build document-to-declaration mapping by source_document_id ---
+        # Each document has a unique id; declarations reference it via source_document_id
+        _doc_to_decls = {}
+        for decl in result.declarations:
+            did = decl.source_document_id
+            if did:
+                _doc_to_decls.setdefault(did, []).append(decl)
+        # Also build ordered list of documents (same order as chemins/fichiers)
+        _docs_ordered = result.documents_analyses
+
         # --- Alimenter la bibliotheque de connaissances ---
         _alimenter_knowledge(result)
 
@@ -578,26 +588,32 @@ async def analyser_documents(
                 await f.seek(0)
                 raw = await f.read()
                 sha = hashlib.sha256(raw).hexdigest()[:16]
-                # Extraire les donnees du document correspondant
+                # Find declarations for this file using source_document_id
                 doc_data = {}
                 doc_statut = "analyse"
-                if idx_f < len(result.declarations):
-                    decl = result.declarations[idx_f]
-                    d_meta_lib = getattr(decl, "metadata", {}) or {}
-                    doc_type_lib = d_meta_lib.get("type_document", "")
-                    if doc_type_lib == "inconnu" or not doc_type_lib:
-                        doc_statut = "non_reconnu"
-                    doc_data = {
-                        "nb_salaries": len(decl.employes),
-                        "nb_cotisations": len(decl.cotisations),
-                        "masse_salariale": float(decl.masse_salariale_brute),
-                        "type_declaration": decl.type_declaration,
-                        "type_document": doc_type_lib or "inconnu",
-                        "employeur_siret": decl.employeur.siret if decl.employeur else "",
-                        "employeur_nom": decl.employeur.raison_sociale if decl.employeur else "",
-                        "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
-                        "salaries_noms": [f"{e.prenom} {e.nom}" for e in decl.employes],
-                    }
+                matched_decl = None
+                if idx_f < len(_docs_ordered):
+                    doc_obj = _docs_ordered[idx_f]
+                    matching = _doc_to_decls.get(doc_obj.id, [])
+                    if matching:
+                        matched_decl = matching[0]  # primary declaration
+                        d_meta_lib = getattr(matched_decl, "metadata", {}) or {}
+                        doc_type_lib = d_meta_lib.get("type_document", "")
+                        if doc_type_lib == "inconnu" or not doc_type_lib:
+                            doc_statut = "non_reconnu"
+                        doc_data = {
+                            "nb_salaries": len(matched_decl.employes),
+                            "nb_cotisations": len(matched_decl.cotisations),
+                            "masse_salariale": float(matched_decl.masse_salariale_brute),
+                            "type_declaration": matched_decl.type_declaration,
+                            "type_document": doc_type_lib or "inconnu",
+                            "employeur_siret": matched_decl.employeur.siret if matched_decl.employeur else "",
+                            "employeur_nom": matched_decl.employeur.raison_sociale if matched_decl.employeur else "",
+                            "periode": matched_decl.periode.debut.strftime("%Y-%m") if matched_decl.periode and matched_decl.periode.debut else "",
+                            "salaries_noms": [f"{e.prenom} {e.nom}" for e in matched_decl.employes],
+                        }
+                    else:
+                        doc_statut = "erreur"
                 else:
                     doc_statut = "erreur"
                 _doc_library.append({
@@ -861,9 +877,11 @@ async def analyser_documents(
             declarations_out.append(decl_out)
 
         # Auto-generer les ecritures comptables a partir des declarations
+        # Deduplication: check existing entries by reference to avoid duplicates
         _integration_log = []
         try:
             moteur = get_moteur()
+            _existing_refs = {e.libelle for e in moteur.ecritures}
             nb_ecr_paie = 0
             nb_ecr_facture = 0
             for decl in result.declarations:
@@ -879,23 +897,29 @@ async def analyser_documents(
                     _integration_log.append(f"  Employe detecte: {_emp.nom} {_emp.prenom} NIR={_emp.nir} id={_emp.id}")
 
                 # --- Ecritures de paie (bulletins, DSN, livres de paie) ---
-                if d_type in ("facture_achat", "facture_vente"):
-                    # Factures: generer ecriture facture
+                if d_type in ("facture_achat", "facture_vente", "devis", "avoir", "bon_commande", "note_frais"):
+                    # Documents avec montants: generer ecriture facture
                     ht = Decimal(str(d_meta.get("montant_ht", 0)))
                     tva = Decimal(str(d_meta.get("montant_tva", 0)))
                     ttc = Decimal(str(d_meta.get("montant_ttc", 0)))
+                    num_piece = d_meta.get("numero_facture") or d_meta.get("numero_devis") or d_meta.get("numero_avoir") or d_meta.get("numero_commande") or decl.reference
+                    dedup_key_fac = f"Facture {num_piece} HT={float(ht):.2f}"
+                    if dedup_key_fac in _existing_refs:
+                        _integration_log.append(f"  -> Skip doublon facture {num_piece}")
+                        continue
                     if ht > 0 or ttc > 0:
                         try:
                             moteur.generer_ecriture_facture(
                                 type_doc=d_type,
                                 date_piece=date.today(),
-                                numero_piece=d_meta.get("numero_facture", decl.reference),
+                                numero_piece=num_piece,
                                 montant_ht=ht,
                                 montant_tva=tva if tva > 0 else ht * Decimal("0.20"),
                                 montant_ttc=ttc if ttc > 0 else ht * Decimal("1.20"),
-                                nom_tiers=d_meta.get("tiers", "Tiers"),
+                                nom_tiers=d_meta.get("tiers") or d_meta.get("prestataire") or "Tiers",
                             )
                             nb_ecr_facture += 1
+                            _existing_refs.add(dedup_key_fac)
                             _integration_log.append(f"  -> Ecriture facture OK: HT={ht} TVA={tva} TTC={ttc}")
                         except Exception as e:
                             _integration_log.append(f"  -> ERREUR facture: {e}")
@@ -917,49 +941,57 @@ async def analyser_documents(
                     _integration_log.append(f"  -> Skip ecriture (type {d_type})")
                     continue  # pas d ecriture comptable de paie
 
-                # Ecritures de paie
+                # Ecritures de paie (with deduplication check)
                 if not decl.employes:
                     # Pas d employe mais masse salariale > 0 : generer une ecriture globale
                     if decl.masse_salariale_brute > 0:
                         brut = decl.masse_salariale_brute
-                        d_meta_net = Decimal(str(d_meta.get("net_a_payer", 0)))
-                        d_meta_pat = Decimal(str(d_meta.get("total_patronal", 0)))
-                        d_meta_sal = Decimal(str(d_meta.get("total_salarial", 0)))
-                        cot_sal = float(d_meta_sal) if d_meta_sal > 0 else round(float(brut) * 0.22, 2)
-                        cot_pat_total = float(d_meta_pat) if d_meta_pat > 0 else round(float(brut) * 0.45, 2)
-                        cot_pat_urssaf = round(cot_pat_total * 0.78, 2)
-                        cot_pat_retraite = round(cot_pat_total * 0.22, 2)
-                        net_a_payer = float(d_meta_net) if d_meta_net > 0 else round(float(brut) - cot_sal, 2)
-                        date_piece = date.today()
-                        if decl.periode and decl.periode.debut:
-                            date_piece = decl.periode.debut
-                        try:
-                            moteur.generer_ecriture_paie(
-                                date_piece=date_piece,
-                                nom_salarie="Salaries (global)",
-                                salaire_brut=brut,
-                                cotisations_salariales=Decimal(str(cot_sal)),
-                                cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
-                                cotisations_patronales_retraite=Decimal(str(cot_pat_retraite)),
-                                net_a_payer=Decimal(str(net_a_payer)),
-                            )
-                            nb_ecr_paie += 1
-                            _integration_log.append(f"  -> Ecriture paie globale OK: brut={brut}")
-                        except Exception as e:
-                            _integration_log.append(f"  -> ERREUR paie globale: {e}")
+                        dedup_key = f"Paie Salaries (global) {float(brut):.2f}"
+                        if dedup_key in _existing_refs:
+                            _integration_log.append(f"  -> Skip doublon ecriture paie globale (deja existante)")
+                        else:
+                            d_meta_net = Decimal(str(d_meta.get("net_a_payer", 0)))
+                            d_meta_pat = Decimal(str(d_meta.get("total_patronal", 0)))
+                            d_meta_sal = Decimal(str(d_meta.get("total_salarial", 0)))
+                            cot_sal = float(d_meta_sal) if d_meta_sal > 0 else round(float(brut) * 0.22, 2)
+                            cot_pat_total = float(d_meta_pat) if d_meta_pat > 0 else round(float(brut) * 0.45, 2)
+                            cot_pat_urssaf = round(cot_pat_total * 0.78, 2)
+                            cot_pat_retraite = round(cot_pat_total * 0.22, 2)
+                            net_a_payer = float(d_meta_net) if d_meta_net > 0 else round(float(brut) - cot_sal, 2)
+                            date_piece = date.today()
+                            if decl.periode and decl.periode.debut:
+                                date_piece = decl.periode.debut
+                            try:
+                                moteur.generer_ecriture_paie(
+                                    date_piece=date_piece,
+                                    nom_salarie="Salaries (global)",
+                                    salaire_brut=brut,
+                                    cotisations_salariales=Decimal(str(cot_sal)),
+                                    cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
+                                    cotisations_patronales_retraite=Decimal(str(cot_pat_retraite)),
+                                    net_a_payer=Decimal(str(net_a_payer)),
+                                )
+                                nb_ecr_paie += 1
+                                _existing_refs.add(dedup_key)
+                                _integration_log.append(f"  -> Ecriture paie globale OK: brut={brut}")
+                            except Exception as e:
+                                _integration_log.append(f"  -> ERREUR paie globale: {e}")
                     else:
                         _integration_log.append(f"  -> Pas d employe ni de masse salariale")
                 else:
                     for emp in decl.employes:
                         cots = [c for c in decl.cotisations if c.employe_id == emp.id]
                         brut = sum(c.base_brute for c in cots) if cots else Decimal("0")
-                        # Fallback: use masse_salariale / nb_employes
                         if brut <= 0 and decl.masse_salariale_brute > 0:
                             brut = decl.masse_salariale_brute / max(len(decl.employes), 1)
                         if brut <= 0:
-                            _integration_log.append(f"  -> Skip emp {emp.nom}: brut=0, cots={len(cots)}, masse={float(decl.masse_salariale_brute)}")
+                            _integration_log.append(f"  -> Skip emp {emp.nom}: brut=0")
                             continue
-                        # Use actual parsed cotisation totals when available
+                        nom_sal = f"{emp.prenom} {emp.nom}".strip() or "Salarie"
+                        dedup_key = f"Paie {nom_sal} {float(brut):.2f}"
+                        if dedup_key in _existing_refs:
+                            _integration_log.append(f"  -> Skip doublon ecriture paie {nom_sal}")
+                            continue
                         actual_pat = sum(c.montant_patronal for c in cots) if cots else Decimal("0")
                         actual_sal = sum(c.montant_salarial for c in cots) if cots else Decimal("0")
                         net_from_meta = Decimal(str(d_meta.get("net_a_payer", 0)))
@@ -973,7 +1005,6 @@ async def analyser_documents(
                             date_piece = decl.periode.debut
                         elif decl.periode and decl.periode.fin:
                             date_piece = decl.periode.fin
-                        nom_sal = f"{emp.prenom} {emp.nom}".strip() or "Salarie"
                         try:
                             moteur.generer_ecriture_paie(
                                 date_piece=date_piece,
@@ -985,6 +1016,7 @@ async def analyser_documents(
                                 net_a_payer=Decimal(str(net_a_payer)),
                             )
                             nb_ecr_paie += 1
+                            _existing_refs.add(dedup_key)
                             _integration_log.append(f"  -> Ecriture paie OK: {nom_sal} brut={float(brut):.2f}")
                         except Exception as e:
                             _integration_log.append(f"  -> ERREUR paie {nom_sal}: {e}")
@@ -993,220 +1025,196 @@ async def analyser_documents(
             _integration_log.append(f"ERREUR COMPTA GLOBALE: {e}\\n{traceback.format_exc()}")
 
         # Auto-integrer les salaries dans le module RH + Planning
+        # PRINCIPE: On ne cree des contrats QUE pour les employes reellement detectes
+        # (avec nom ou NIR). On genere des ALERTES pour les documents manquants.
         nb_rh_new = 0
         nb_rh_updated = 0
         nb_planning_new = 0
+        _rh_alertes = []
+        # Track document types found for alert generation
+        _doc_types_found = set()
+        _employees_found = {}  # key: "nom|prenom" or nir -> employee info
         try:
+            from datetime import timedelta
+
+            # Phase 1: Collect all employees and document types from all declarations
             for decl in result.declarations:
                 d_meta = getattr(decl, "metadata", {}) or {}
-                d_type = d_meta.get("type_document", "")
-                _skip_rh_types = (
-                    "facture_achat", "facture_vente", "contrat_de_travail", "contrat_service",
-                    "statuts", "kbis", "bail", "assurance", "lettre_mission",
-                    "bilan", "compte_resultat", "rapport_cac", "rapport_gestion", "budget",
-                    "fec", "cerfa", "releve_bancaire", "devis", "avoir", "bon_commande",
-                    "image_non_ocr", "duerp", "reglement_interieur", "bilan_social",
-                    "das2", "taxe_salaires", "cfe_cvae", "releve_frais_generaux",
-                )
-                _skip_rh_prefixes = ("accord_", "pv_ag", "declaration_", "liasse_")
-                _is_rh_skip = d_type in _skip_rh_types or any(d_type.startswith(p) for p in _skip_rh_prefixes)
-                if not decl.employes:
-                    # Pas d employe dans la declaration : tenter de creer un salarie generique
-                    # si on a la masse salariale (LDP sans detail employe par ex.)
-                    if decl.masse_salariale_brute > 0 and not _is_rh_skip:
-                        emp_nom = "Salarie"
-                        if decl.employeur and decl.employeur.raison_sociale:
-                            emp_nom = f"Salarie ({decl.employeur.raison_sociale})"
-                        existing = [c for c in _rh_contrats if c.get("nom_salarie", "").lower() == emp_nom.lower()]
-                        if not existing:
-                            contrat = {
-                                "id": str(uuid.uuid4())[:8],
-                                "type_contrat": "CDI",
-                                "nom_salarie": emp_nom,
-                                "prenom_salarie": "",
-                                "poste": "Employe",
-                                "date_debut": date.today().strftime("%Y-%m-%d"),
-                                "date_fin": "",
-                                "salaire_brut": str(round(float(decl.masse_salariale_brute), 2)),
-                                "temps_travail": "temps_complet",
-                                "duree_hebdo": "35",
-                                "convention_collective": "",
-                                "periode_essai_jours": "0",
-                                "motif_cdd": "",
-                                "statut": "actif",
-                                "nir": "",
-                                "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
-                                "date_creation": datetime.now().isoformat(),
-                            }
-                            _rh_contrats.append(contrat)
-                            nb_rh_new += 1
-                    continue
-                # Filtrer les employes valides (avec nom ou NIR)
-                employes_valides = [e for e in decl.employes if e.nom or e.nir]
-                if not employes_valides:
-                    # Tous les employes etaient sans nom ni NIR (OCR incomplet)
-                    # Creer un contrat par employe depuis les infos disponibles
-                    nb_emp_fb = max(len(decl.employes), 1)
-                    _integration_log.append(f"  -> RH: aucun nom/NIR extrait, creation depuis document ({nb_emp_fb} employes)")
-                    brut_total = float(decl.masse_salariale_brute) if decl.masse_salariale_brute > 0 else 0
-                    if brut_total > 0 or d_type in ("bulletin_de_paie", "bulletin"):
-                        # Base du nom depuis le fichier
-                        nom_base = "Salarie"
-                        ref = decl.reference or ""
-                        if ref:
-                            import re as _re
-                            parts = _re.split(r'[_\-\s]', Path(ref).stem)
-                            for p in parts:
-                                if len(p) >= 3 and p.isalpha() and p.upper() not in ("PDF", "BULLETIN", "PAIE", "SALAIRE", "FICHE"):
-                                    nom_base = p.title()
-                                    break
-                        if decl.employeur and decl.employeur.raison_sociale:
-                            nom_base = f"{nom_base} ({decl.employeur.raison_sociale})"
-                        # Creer un contrat par employe detecte
-                        for emp_idx in range(nb_emp_fb):
-                            emp_obj = decl.employes[emp_idx] if emp_idx < len(decl.employes) else None
-                            brut_emp = brut_total / nb_emp_fb
-                            nom_fb = nom_base if emp_idx == 0 else f"{nom_base} #{emp_idx + 1}"
-                            # Verifier unicite globale
-                            if any(c.get("nom_salarie", "").lower() == nom_fb.lower() for c in _rh_contrats):
-                                nom_fb = f"{nom_fb} #{len(_rh_contrats) + 1}"
-                            contrat = {
-                                "id": str(uuid.uuid4())[:8],
-                                "type_contrat": "CDI",
-                                "nom_salarie": nom_fb,
-                                "prenom_salarie": "",
-                                "poste": (emp_obj.convention_collective or "Employe") if emp_obj else "Employe",
-                                "date_debut": date.today().strftime("%Y-%m-%d"),
-                                "date_fin": "",
-                                "salaire_brut": str(round(brut_emp, 2)) if brut_emp > 0 else "0",
-                                "temps_travail": "temps_complet",
-                                "duree_hebdo": "35",
-                                "convention_collective": "",
-                                "periode_essai_jours": "0",
-                                "motif_cdd": "",
-                                "statut": "actif",
-                                "nir": (emp_obj.nir or "") if emp_obj else "",
-                                "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
-                                "date_creation": datetime.now().isoformat(),
-                            }
-                            _rh_contrats.append(contrat)
-                            nb_rh_new += 1
-                            _integration_log.append(f"  -> RH nouveau (fallback): {nom_fb} brut={brut_emp:.2f}")
-                            # Auto-creer planning pour le salarie fallback (lun-ven semaine courante)
-                            try:
-                                from datetime import timedelta
-                                today = date.today()
-                                lundi = today - timedelta(days=today.weekday())
-                                for j in range(5):
-                                    d_pl = lundi + timedelta(days=j)
-                                    _rh_planning.append({
-                                        "id": str(uuid.uuid4())[:8],
-                                        "salarie_id": contrat["id"],
-                                        "salarie_nom": nom_fb,
-                                        "date": d_pl.strftime("%Y-%m-%d"),
-                                        "heure_debut": "09:00",
-                                        "heure_fin": "17:00",
-                                        "type_poste": "normal",
-                                        "note": "Planning auto (analyse)",
-                                    })
-                                    nb_planning_new += 1
-                            except Exception as e:
-                                _integration_log.append(f"  -> ERREUR planning fallback: {e}")
-                    continue
+                d_type = d_meta.get("type_document", "") or decl.type_declaration or ""
+                if d_type:
+                    _doc_types_found.add(d_type)
+
                 for emp in decl.employes:
                     if not emp.nom and not emp.nir:
-                        _integration_log.append(f"  -> RH skip: employe sans nom ni NIR")
                         continue
-                    # Identifier le salarie par nom+prenom OU par NIR
-                    existing = [c for c in _rh_contrats if
-                                (c.get("nom_salarie", "").lower() == (emp.nom or "").lower() and
-                                 c.get("prenom_salarie", "").lower() == (emp.prenom or "").lower()) or
-                                (emp.nir and c.get("nir", "") == emp.nir)]
-                    if not existing:
+                    # Build dedup key
+                    if emp.nir:
+                        emp_key = emp.nir
+                    else:
+                        emp_key = f"{(emp.nom or '').strip().lower()}|{(emp.prenom or '').strip().lower()}"
+                    if emp_key not in _employees_found:
                         cots = [c for c in decl.cotisations if c.employe_id == emp.id]
                         brut = float(sum(c.base_brute for c in cots)) if cots else 0
-                        if brut <= 0:
+                        if brut <= 0 and decl.masse_salariale_brute > 0:
                             brut = float(decl.masse_salariale_brute / max(len(decl.employes), 1))
-                        is_cadre = emp.statut and "cadre" in emp.statut.lower()
-                        # Type contrat from document or default
-                        type_ctr = d_meta.get("type_contrat", "CDI")
-                        # Date from document or period
-                        date_debut_str = ""
-                        if emp.date_embauche:
-                            date_debut_str = emp.date_embauche.strftime("%Y-%m-%d")
-                        elif decl.periode and decl.periode.debut:
-                            date_debut_str = decl.periode.debut.strftime("%Y-%m-%d")
-                        else:
-                            date_debut_str = date.today().strftime("%Y-%m-%d")
-                        # Poste from parser
-                        poste = emp.convention_collective or ("Cadre" if is_cadre else "Employe")
-                        contrat = {
-                            "id": str(uuid.uuid4())[:8],
-                            "type_contrat": type_ctr,
-                            "nom_salarie": emp.nom or "",
-                            "prenom_salarie": emp.prenom or "",
-                            "poste": poste,
-                            "date_debut": date_debut_str,
-                            "date_fin": "",
-                            "salaire_brut": str(round(brut, 2)) if brut > 0 else "0",
-                            "temps_travail": "temps_complet",
-                            "duree_hebdo": "35",
-                            "convention_collective": "",
-                            "periode_essai_jours": "0",
-                            "motif_cdd": "",
-                            "statut": "actif",
-                            "nir": emp.nir or "",
-                            "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
-                            "date_creation": datetime.now().isoformat(),
+                        _employees_found[emp_key] = {
+                            "nom": emp.nom or "", "prenom": emp.prenom or "",
+                            "nir": emp.nir or "", "statut": emp.statut or "",
+                            "poste": emp.convention_collective or "",
+                            "brut": brut, "date_embauche": emp.date_embauche,
+                            "source": d_type or decl.type_declaration,
                         }
-                        _rh_contrats.append(contrat)
-                        nb_rh_new += 1
-                        _integration_log.append(f"  -> RH nouveau: {emp.prenom} {emp.nom} brut={brut:.2f}")
-                        # Auto-creer un planning pour le salarie (lun-ven semaine courante)
-                        try:
-                            from datetime import timedelta
-                            today = date.today()
-                            lundi = today - timedelta(days=today.weekday())
-                            nom_planning = f"{emp.prenom} {emp.nom}".strip() or contrat["nom_salarie"]
-                            for j in range(5):
-                                d_planning = lundi + timedelta(days=j)
-                                _rh_planning.append({
-                                    "id": str(uuid.uuid4())[:8],
-                                    "salarie_id": contrat["id"],
-                                    "salarie_nom": nom_planning,
-                                    "date": d_planning.strftime("%Y-%m-%d"),
-                                    "heure_debut": "09:00",
-                                    "heure_fin": "17:00",
-                                    "type_poste": "normal",
-                                    "note": "Planning auto (analyse)",
-                                })
-                                nb_planning_new += 1
-                        except Exception as e:
-                            _integration_log.append(f"  -> ERREUR planning: {e}")
                     else:
-                        # Mettre a jour le salarie existant si nouvelles infos
-                        c = existing[0]
-                        cots = [ct for ct in decl.cotisations if ct.employe_id == emp.id]
-                        brut = float(sum(ct.base_brute for ct in cots)) if cots else 0
-                        if brut <= 0:
-                            brut = float(decl.masse_salariale_brute / max(len(decl.employes), 1))
-                        if brut > 0 and (not c.get("salaire_brut") or c.get("salaire_brut") == "0"):
-                            c["salaire_brut"] = str(round(brut, 2))
-                            nb_rh_updated += 1
-                        if emp.nir and not c.get("nir"):
-                            c["nir"] = emp.nir
-                            nb_rh_updated += 1
-            _integration_log.append(f"RH: {nb_rh_new} nouveaux contrats, {nb_rh_updated} mis a jour, {nb_planning_new} creneaux planning")
+                        # Update existing with new info if better
+                        existing_emp = _employees_found[emp_key]
+                        cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                        brut = float(sum(c.base_brute for c in cots)) if cots else 0
+                        if brut > existing_emp["brut"]:
+                            existing_emp["brut"] = brut
+                        if emp.nir and not existing_emp["nir"]:
+                            existing_emp["nir"] = emp.nir
+                        if emp.convention_collective and not existing_emp["poste"]:
+                            existing_emp["poste"] = emp.convention_collective
+
+            _integration_log.append(f"RH: {len(_employees_found)} salaries uniques detectes, {len(_doc_types_found)} types de documents")
+
+            # Phase 2: Create/update RH contracts for found employees only
+            for emp_key, emp_info in _employees_found.items():
+                nom = emp_info["nom"]
+                prenom = emp_info["prenom"]
+                nir = emp_info["nir"]
+                # Check for existing contract (by NIR or by name)
+                existing = [c for c in _rh_contrats if
+                            (nir and c.get("nir", "") == nir) or
+                            (nom and c.get("nom_salarie", "").strip().lower() == nom.strip().lower() and
+                             c.get("prenom_salarie", "").strip().lower() == prenom.strip().lower())]
+                if not existing:
+                    brut = emp_info["brut"]
+                    is_cadre = emp_info["statut"] and "cadre" in emp_info["statut"].lower()
+                    date_debut_str = ""
+                    if emp_info["date_embauche"]:
+                        date_debut_str = emp_info["date_embauche"].strftime("%Y-%m-%d")
+                    else:
+                        date_debut_str = date.today().strftime("%Y-%m-%d")
+                    poste = emp_info["poste"] or ("Cadre" if is_cadre else "Employe")
+                    contrat = {
+                        "id": str(uuid.uuid4())[:8],
+                        "type_contrat": "CDI",
+                        "nom_salarie": nom,
+                        "prenom_salarie": prenom,
+                        "poste": poste,
+                        "date_debut": date_debut_str,
+                        "date_fin": "",
+                        "salaire_brut": str(round(brut, 2)) if brut > 0 else "0",
+                        "temps_travail": "temps_complet",
+                        "duree_hebdo": "35",
+                        "convention_collective": "",
+                        "periode_essai_jours": "0",
+                        "motif_cdd": "",
+                        "statut": "actif",
+                        "nir": nir,
+                        "source": "analyse_automatique (" + emp_info["source"] + ")",
+                        "date_creation": datetime.now().isoformat(),
+                    }
+                    _rh_contrats.append(contrat)
+                    nb_rh_new += 1
+                    _integration_log.append(f"  -> RH nouveau: {prenom} {nom} brut={brut:.2f}")
+                    # Auto-creer planning (lun-ven semaine courante) - check if already exists
+                    today = date.today()
+                    lundi = today - timedelta(days=today.weekday())
+                    nom_planning = f"{prenom} {nom}".strip()
+                    existing_planning = any(p.get("salarie_id") == contrat["id"] for p in _rh_planning)
+                    if not existing_planning:
+                        for j in range(5):
+                            d_planning = lundi + timedelta(days=j)
+                            _rh_planning.append({
+                                "id": str(uuid.uuid4())[:8],
+                                "salarie_id": contrat["id"],
+                                "salarie_nom": nom_planning,
+                                "date": d_planning.strftime("%Y-%m-%d"),
+                                "heure_debut": "09:00",
+                                "heure_fin": "17:00",
+                                "type_poste": "normal",
+                                "note": "Planning auto (analyse)",
+                            })
+                            nb_planning_new += 1
+                else:
+                    # Update existing contract with new info
+                    c = existing[0]
+                    brut = emp_info["brut"]
+                    if brut > 0 and (not c.get("salaire_brut") or c.get("salaire_brut") == "0"):
+                        c["salaire_brut"] = str(round(brut, 2))
+                        nb_rh_updated += 1
+                    if nir and not c.get("nir"):
+                        c["nir"] = nir
+                        nb_rh_updated += 1
+
+            # Phase 3: Generate alerts for missing mandatory documents
+            has_dpae = any(t in _doc_types_found for t in ("dpae",))
+            has_contrat = any(t in _doc_types_found for t in ("contrat_de_travail", "contrat"))
+            has_registre = any(t in _doc_types_found for t in ("registre_personnel",))
+            has_duerp = any(t in _doc_types_found for t in ("duerp",))
+            has_reglement = any(t in _doc_types_found for t in ("reglement_interieur",))
+
+            if _employees_found and not has_dpae:
+                _rh_alertes.append({
+                    "type": "absence_document",
+                    "severite": "haute",
+                    "titre": "DPAE absente",
+                    "description": f"Aucune DPAE (Declaration Prealable a l Embauche) n a ete trouvee pour {len(_employees_found)} salarie(s) detecte(s). La DPAE est obligatoire avant toute embauche (art. L.1221-10 Code du travail).",
+                    "reference_legale": "Art. L.1221-10 et R.1221-1 Code du travail",
+                })
+            if _employees_found and not has_contrat:
+                _rh_alertes.append({
+                    "type": "absence_document",
+                    "severite": "haute",
+                    "titre": "Contrat de travail absent",
+                    "description": f"Aucun contrat de travail n a ete trouve pour {len(_employees_found)} salarie(s). Le contrat ecrit est obligatoire pour tout CDD et recommande pour tout CDI (art. L.1221-1 Code du travail).",
+                    "reference_legale": "Art. L.1221-1 et L.1242-12 Code du travail",
+                })
+            if _employees_found and not has_registre:
+                _rh_alertes.append({
+                    "type": "absence_document",
+                    "severite": "moyenne",
+                    "titre": "Registre unique du personnel absent",
+                    "description": "Aucun registre unique du personnel n a ete fourni. Ce document est obligatoire dans toute entreprise (art. L.1221-13 Code du travail).",
+                    "reference_legale": "Art. L.1221-13 Code du travail",
+                })
+            if not has_duerp:
+                _rh_alertes.append({
+                    "type": "absence_document",
+                    "severite": "moyenne",
+                    "titre": "DUERP absent",
+                    "description": "Aucun Document Unique d Evaluation des Risques Professionnels n a ete fourni. Ce document est obligatoire pour tout employeur (art. R.4121-1 Code du travail).",
+                    "reference_legale": "Art. R.4121-1 Code du travail",
+                })
+            # Store alerts in knowledge base
+            kb = _biblio_knowledge
+            if "alertes_contextuelles" not in kb:
+                kb["alertes_contextuelles"] = []
+            for alerte in _rh_alertes:
+                if not any(a.get("titre") == alerte["titre"] for a in kb["alertes_contextuelles"]):
+                    kb["alertes_contextuelles"].append(alerte)
+
+            _integration_log.append(f"RH: {nb_rh_new} nouveaux contrats, {nb_rh_updated} mis a jour, {nb_planning_new} creneaux planning, {len(_rh_alertes)} alertes")
         except Exception as e:
             _integration_log.append(f"ERREUR RH GLOBALE: {e}\\n{traceback.format_exc()}")
 
         # Build file info with per-file parse status and document type
+        # Use source_document_id mapping (not index) for reliability
         fichiers_info = []
         for i, f in enumerate(fichiers):
             ext = Path(f.filename).suffix.lower() if f.filename else ""
             finfo = {"nom": f.filename, "extension": ext, "index": i}
-            if i < len(result.declarations):
-                decl = result.declarations[i]
+            # Find matching declaration by source_document_id
+            matched_decl_fi = None
+            if i < len(_docs_ordered):
+                doc_obj_fi = _docs_ordered[i]
+                matching_fi = _doc_to_decls.get(doc_obj_fi.id, [])
+                if matching_fi:
+                    matched_decl_fi = matching_fi[0]
+            if matched_decl_fi is not None:
+                decl = matched_decl_fi
                 d_meta = getattr(decl, "metadata", {}) or {}
                 doc_type = d_meta.get("type_document", "")
                 nature_labels = {
@@ -1293,6 +1301,9 @@ async def analyser_documents(
                 "rh_contrats_crees": nb_rh_new,
                 "rh_contrats_maj": nb_rh_updated,
                 "rh_planning_crees": nb_planning_new,
+                "alertes_rh": _rh_alertes,
+                "documents_detectes": sorted(_doc_types_found),
+                "salaries_uniques": len(_employees_found),
                 "log": _integration_log,
             },
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
@@ -1627,6 +1638,69 @@ async def modifier_libelle_ecriture(ecriture_id: str, request: Request):
 
     log_action("utilisateur", "modification_libelle", f"Ecriture {ecriture_id}: {', '.join(modifs)}")
     return {"ok": True, "modifications": modifs}
+
+
+@app.delete("/api/comptabilite/ecriture/{ecriture_id}")
+async def supprimer_ecriture(ecriture_id: str):
+    """Supprime une ecriture comptable non validee."""
+    moteur = get_moteur()
+    idx = None
+    for i, e in enumerate(moteur.ecritures):
+        if e.id == ecriture_id:
+            if e.validee:
+                raise HTTPException(400, "Impossible de supprimer une ecriture validee")
+            idx = i
+            break
+    if idx is None:
+        raise HTTPException(404, "Ecriture non trouvee")
+    removed = moteur.ecritures.pop(idx)
+    log_action("utilisateur", "suppression_ecriture", f"Ecriture {ecriture_id} supprimee: {removed.libelle}")
+    return {"ok": True, "message": f"Ecriture {ecriture_id} supprimee"}
+
+
+@app.put("/api/comptabilite/ecriture/{ecriture_id}/montants")
+async def modifier_montants_ecriture(ecriture_id: str, request: Request):
+    """Modifie les montants d une ecriture comptable."""
+    moteur = get_moteur()
+    body = await request.json()
+
+    ecriture = None
+    for e in moteur.ecritures:
+        if e.id == ecriture_id:
+            ecriture = e
+            break
+    if not ecriture:
+        raise HTTPException(404, "Ecriture non trouvee")
+    if ecriture.validee:
+        raise HTTPException(400, "Impossible de modifier une ecriture validee")
+
+    modifs = []
+    lignes_data = body.get("lignes", {})
+    for idx_str, vals in lignes_data.items():
+        idx = int(idx_str)
+        if 0 <= idx < len(ecriture.lignes):
+            ligne = ecriture.lignes[idx]
+            if "debit" in vals:
+                ancien = float(ligne.debit)
+                ligne.debit = Decimal(str(vals["debit"]))
+                modifs.append(f"ligne {idx} debit: {ancien} -> {vals['debit']}")
+            if "credit" in vals:
+                ancien = float(ligne.credit)
+                ligne.credit = Decimal(str(vals["credit"]))
+                modifs.append(f"ligne {idx} credit: {ancien} -> {vals['credit']}")
+    log_action("utilisateur", "modification_montants", f"Ecriture {ecriture_id}: {', '.join(modifs)}")
+    return {"ok": True, "modifications": modifs}
+
+
+@app.delete("/api/comptabilite/ecritures/reset")
+async def reset_ecritures():
+    """Reinitialise toutes les ecritures comptables non validees."""
+    moteur = get_moteur()
+    nb_avant = len(moteur.ecritures)
+    moteur.ecritures = [e for e in moteur.ecritures if e.validee]
+    nb_supprimees = nb_avant - len(moteur.ecritures)
+    log_action("utilisateur", "reset_ecritures", f"{nb_supprimees} ecritures supprimees")
+    return {"ok": True, "nb_supprimees": nb_supprimees}
 
 
 # ==============================
