@@ -55,6 +55,24 @@ _moteur: Optional[MoteurEcritures] = None
 
 # --- In-memory stores ---
 _doc_library: list[dict] = []
+_biblio_knowledge: dict = {
+    "salaries": {},        # nir -> {nom, prenom, brut, net, statut, contrat_type, ...}
+    "employeurs": {},      # siret -> {raison_sociale, effectif, code_naf, ...}
+    "cotisations": [],     # [{code, libelle, base, taux_salarial, taux_patronal, employe_nir, ...}]
+    "declarations_dsn": [],# DSN importees
+    "bulletins_paie": [],  # bulletins detectes
+    "documents_comptables": [],  # ecritures/factures detectees
+    "taux_verifies": {},   # {code_cotisation: {taux_attendu, taux_constate, conforme}}
+    "periodes_couvertes": [],  # ["2025-01", "2025-02", ...]
+    "anomalies_detectees": [],
+    "pieces_justificatives": {},  # {type_piece: [doc_ids]}
+    "contrats_detectes": [],  # contrats extraits des documents
+    "masse_salariale": {},  # {periode: montant}
+    "effectifs": {},        # {periode: nb}
+    "conventions_collectives": [],  # CCN detectees
+    "exonerations_detectees": [],  # exonerations apprentis, ZRR, etc.
+    "derniere_maj": None,
+}
 _invitations: list[dict] = []
 _facture_statuses: dict[str, dict] = {}
 _audit_log: list[dict] = []
@@ -147,6 +165,172 @@ async def auth_register(
 
 
 # ==============================
+# BIBLIOTHEQUE DE CONNAISSANCES
+# ==============================
+
+def _alimenter_knowledge(result):
+    """Alimente la base de connaissances a partir d'un resultat d'analyse."""
+    kb = _biblio_knowledge
+    kb["derniere_maj"] = datetime.now().isoformat()
+
+    for decl in result.declarations:
+        # --- Employeur ---
+        if decl.employeur:
+            siret = decl.employeur.siret or ""
+            if siret:
+                kb["employeurs"][siret] = {
+                    "siren": decl.employeur.siren,
+                    "siret": siret,
+                    "raison_sociale": decl.employeur.raison_sociale,
+                    "effectif": decl.employeur.effectif,
+                    "code_naf": decl.employeur.code_naf,
+                    "derniere_maj": datetime.now().isoformat(),
+                }
+                # Effectif par periode
+                periode = ""
+                if decl.periode and decl.periode.debut:
+                    periode = decl.periode.debut.strftime("%Y-%m")
+                if periode and decl.employeur.effectif:
+                    kb["effectifs"][periode] = decl.employeur.effectif
+
+        # --- Periode ---
+        if decl.periode and decl.periode.debut:
+            per = decl.periode.debut.strftime("%Y-%m")
+            if per not in kb["periodes_couvertes"]:
+                kb["periodes_couvertes"].append(per)
+                kb["periodes_couvertes"].sort()
+
+        # --- Type de document ---
+        fmt = (decl.type_declaration or "").upper()
+        if fmt in ("DSN", "DSN/XML"):
+            kb["declarations_dsn"].append({
+                "reference": decl.reference,
+                "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+                "nb_salaries": len(decl.employes),
+                "nb_cotisations": len(decl.cotisations),
+                "masse_salariale": float(decl.masse_salariale_brute),
+                "date_import": datetime.now().isoformat(),
+            })
+            if "dsn" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["dsn"] = []
+            kb["pieces_justificatives"]["dsn"].append(decl.reference)
+        elif len(decl.cotisations) > 0:
+            kb["bulletins_paie"].append({
+                "reference": decl.reference,
+                "nb_salaries": len(decl.employes),
+                "nb_cotisations": len(decl.cotisations),
+                "masse_salariale": float(decl.masse_salariale_brute),
+                "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+                "date_import": datetime.now().isoformat(),
+            })
+            if "bulletins" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["bulletins"] = []
+            kb["pieces_justificatives"]["bulletins"].append(decl.reference)
+
+        # --- Salaries ---
+        for emp in decl.employes:
+            nir = emp.nir or f"unknown_{emp.id}"
+            existing = kb["salaries"].get(nir, {})
+            cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+            brut = float(sum(c.base_brute for c in cots)) if cots else 0
+            statut = "cadre" if emp.statut and "cadre" in emp.statut.lower() else "non-cadre"
+            kb["salaries"][nir] = {
+                "nir": nir,
+                "nom": emp.nom or existing.get("nom", ""),
+                "prenom": emp.prenom or existing.get("prenom", ""),
+                "date_naissance": emp.date_naissance.isoformat() if emp.date_naissance else existing.get("date_naissance", ""),
+                "statut": statut,
+                "dernier_brut": brut if brut > 0 else existing.get("dernier_brut", 0),
+                "periodes_presentes": list(set(existing.get("periodes_presentes", []) + ([decl.periode.debut.strftime("%Y-%m")] if decl.periode and decl.periode.debut else []))),
+                "derniere_maj": datetime.now().isoformat(),
+            }
+
+        # --- Cotisations et taux ---
+        for cot in decl.cotisations:
+            kb["cotisations"].append({
+                "code": cot.code_cotisation,
+                "libelle": cot.libelle,
+                "base": float(cot.base_brute),
+                "taux_salarial": float(cot.taux_salarial) if cot.taux_salarial else 0,
+                "taux_patronal": float(cot.taux_patronal) if cot.taux_patronal else 0,
+                "montant_salarial": float(cot.montant_salarial) if cot.montant_salarial else 0,
+                "montant_patronal": float(cot.montant_patronal) if cot.montant_patronal else 0,
+                "employe_nir": cot.employe_id,
+                "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+            })
+            # Verification des taux
+            code = cot.code_cotisation or ""
+            if code and cot.taux_salarial:
+                kb["taux_verifies"][code] = {
+                    "taux_constate": float(cot.taux_salarial),
+                    "base": float(cot.base_brute),
+                    "conforme": None,  # sera evalue par l'audit
+                }
+
+        # --- Masse salariale ---
+        if decl.periode and decl.periode.debut and float(decl.masse_salariale_brute) > 0:
+            per = decl.periode.debut.strftime("%Y-%m")
+            kb["masse_salariale"][per] = kb["masse_salariale"].get(per, 0) + float(decl.masse_salariale_brute)
+
+    # --- Anomalies ---
+    for f in result.findings:
+        kb["anomalies_detectees"].append({
+            "id": f.id,
+            "categorie": f.categorie.value,
+            "severite": f.severite.value,
+            "titre": f.titre,
+            "reference_legale": f.reference_legale,
+        })
+
+
+def _get_knowledge_summary() -> dict:
+    """Resume l'etat de la base de connaissances pour l'audit."""
+    kb = _biblio_knowledge
+    nb_sal = len(kb["salaries"])
+    nb_cadres = sum(1 for s in kb["salaries"].values() if s.get("statut") == "cadre")
+    has_dsn = len(kb["declarations_dsn"]) > 0
+    has_bulletins = len(kb["bulletins_paie"]) > 0
+    has_multi_docs = len(kb["pieces_justificatives"]) > 1
+    nb_periodes = len(kb["periodes_couvertes"])
+    nb_cotisations = len(kb["cotisations"])
+    total_masse = sum(kb["masse_salariale"].values())
+    nb_anomalies = len(kb["anomalies_detectees"])
+    nb_employeurs = len(kb["employeurs"])
+    # Pieces disponibles
+    pieces = list(kb["pieces_justificatives"].keys())
+    # Contrats RH enregistres
+    nb_contrats = len(_rh_contrats)
+    nb_contrats_actifs = sum(1 for c in _rh_contrats if c.get("statut") == "actif")
+    # Visites medicales
+    nb_visites = len(_rh_visites_med)
+    # Entretiens
+    nb_entretiens = len(_rh_entretiens)
+
+    return {
+        "nb_salaries_connus": nb_sal,
+        "nb_cadres": nb_cadres,
+        "nb_employeurs": nb_employeurs,
+        "has_dsn": has_dsn,
+        "has_bulletins": has_bulletins,
+        "has_multi_docs": has_multi_docs,
+        "nb_periodes": nb_periodes,
+        "periodes": kb["periodes_couvertes"],
+        "nb_cotisations_analysees": nb_cotisations,
+        "total_masse_salariale": total_masse,
+        "nb_anomalies": nb_anomalies,
+        "pieces_disponibles": pieces,
+        "nb_contrats_rh": nb_contrats,
+        "nb_contrats_actifs": nb_contrats_actifs,
+        "nb_visites_medicales": nb_visites,
+        "nb_entretiens": nb_entretiens,
+        "taux_verifies": kb["taux_verifies"],
+        "exonerations": kb["exonerations_detectees"],
+        "conventions": kb["conventions_collectives"],
+        "derniere_maj": kb["derniere_maj"],
+    }
+
+
+# ==============================
 # ANALYSE
 # ==============================
 
@@ -184,11 +368,28 @@ async def analyser_documents(
 
         result = orchestrator.result
 
+        # --- Alimenter la bibliotheque de connaissances ---
+        _alimenter_knowledge(result)
+
         if integrer:
-            for f in fichiers:
+            for idx_f, f in enumerate(fichiers):
                 await f.seek(0)
                 raw = await f.read()
                 sha = hashlib.sha256(raw).hexdigest()[:16]
+                # Extraire les donnees du document correspondant
+                doc_data = {}
+                if idx_f < len(result.declarations):
+                    decl = result.declarations[idx_f]
+                    doc_data = {
+                        "nb_salaries": len(decl.employes),
+                        "nb_cotisations": len(decl.cotisations),
+                        "masse_salariale": float(decl.masse_salariale_brute),
+                        "type_declaration": decl.type_declaration,
+                        "employeur_siret": decl.employeur.siret if decl.employeur else "",
+                        "employeur_nom": decl.employeur.raison_sociale if decl.employeur else "",
+                        "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+                        "salaries_noms": [f"{e.prenom} {e.nom}" for e in decl.employes],
+                    }
                 _doc_library.append({
                     "id": str(uuid.uuid4())[:8],
                     "nom": f.filename,
@@ -196,6 +397,7 @@ async def analyser_documents(
                     "sha256": sha,
                     "date_import": datetime.now().isoformat(),
                     "statut": "analyse",
+                    "donnees_extraites": doc_data,
                     "actions": [{"action": "import+analyse", "par": "utilisateur", "date": datetime.now().isoformat()}],
                     "erreurs_corrigees": [],
                 })
@@ -343,6 +545,7 @@ async def analyser_documents(
             "fichiers_info": fichiers_info,
             "mode_analyse": mode_analyse,
             "html_report": html_report,
+            "knowledge_summary": _get_knowledge_summary(),
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
 
 
@@ -806,6 +1009,347 @@ async def declarations_entreprise(
 @app.get("/api/documents/bibliotheque")
 async def bibliotheque():
     return _doc_library
+
+
+@app.get("/api/bibliotheque/knowledge")
+async def knowledge_base():
+    """Retourne l'etat complet de la base de connaissances accumulee."""
+    return {
+        "summary": _get_knowledge_summary(),
+        "salaries": _biblio_knowledge["salaries"],
+        "employeurs": _biblio_knowledge["employeurs"],
+        "periodes_couvertes": _biblio_knowledge["periodes_couvertes"],
+        "pieces_justificatives": _biblio_knowledge["pieces_justificatives"],
+        "masse_salariale": _biblio_knowledge["masse_salariale"],
+        "taux_verifies": _biblio_knowledge["taux_verifies"],
+        "nb_cotisations": len(_biblio_knowledge["cotisations"]),
+        "nb_dsn": len(_biblio_knowledge["declarations_dsn"]),
+        "nb_bulletins": len(_biblio_knowledge["bulletins_paie"]),
+        "anomalies": _biblio_knowledge["anomalies_detectees"][-20:],
+    }
+
+
+@app.get("/api/bibliotheque/knowledge/audit")
+async def knowledge_audit():
+    """Genere un rapport d'audit complet base sur la base de connaissances."""
+    ks = _get_knowledge_summary()
+    kb = _biblio_knowledge
+
+    # --- AUDIT SOCIAL (CSS + CT) ---
+    social_checks = []
+
+    # 1. DPAE (L.1221-10 CT)
+    social_checks.append(_audit_check(
+        "DPAE (Declaration prealable a l embauche)",
+        "Art. L.1221-10 CT",
+        ks["nb_contrats_rh"] > 0,
+        "Contrats RH enregistres avec DPAE generees automatiquement" if ks["nb_contrats_rh"] > 0 else "Aucun contrat enregistre dans le module RH",
+        "Registre des DPAE, accuses de reception URSSAF",
+    ))
+
+    # 2. Contrats de travail (L.1221-1 CT)
+    social_checks.append(_audit_check(
+        "Contrats de travail complets et signes",
+        "Art. L.1221-1 CT",
+        ks["nb_contrats_rh"] > 0 and ks["nb_contrats_rh"] >= ks["nb_salaries_connus"],
+        f"{ks['nb_contrats_rh']} contrat(s) pour {ks['nb_salaries_connus']} salarie(s) detecte(s)" if ks["nb_contrats_rh"] > 0 else "Aucun contrat enregistre",
+        "Contrats de travail signes pour chaque salarie",
+    ))
+
+    # 3. DSN / Bulletins rapprochement (R.133-14 CSS)
+    social_checks.append(_audit_check(
+        "Rapprochement DSN / Bulletins de paie",
+        "Art. R.133-14 CSS",
+        ks["has_dsn"] and ks["has_bulletins"],
+        f"{len(kb['declarations_dsn'])} DSN + {len(kb['bulletins_paie'])} bulletins importes" if ks["has_dsn"] and ks["has_bulletins"] else "DSN et/ou bulletins manquants pour rapprochement",
+        "DSN mensuelle + bulletins de paie de la meme periode",
+    ))
+
+    # 4. Taux URSSAF (L.242-1 CSS)
+    nb_taux = len(ks["taux_verifies"])
+    social_checks.append(_audit_check(
+        "Verification des taux URSSAF 2025-2026",
+        "Art. L.242-1 CSS",
+        ks["has_bulletins"] and nb_taux > 0,
+        f"{nb_taux} taux de cotisation verifies" if nb_taux > 0 else "Aucun taux verifie - importer des bulletins de paie",
+        "Bulletins de paie avec detail des cotisations",
+    ))
+
+    # 5. Coherence masse salariale / effectif (L.242-1 CSS)
+    social_checks.append(_audit_check(
+        "Coherence masse salariale / effectif declare",
+        "Art. L.242-1 CSS",
+        ks["total_masse_salariale"] > 0 and ks["nb_salaries_connus"] > 0,
+        f"Masse salariale: {ks['total_masse_salariale']:.2f} EUR pour {ks['nb_salaries_connus']} salarie(s)" if ks["total_masse_salariale"] > 0 else "Pas assez de donnees",
+        "Bulletins de paie, DADS ou DSN annuelle",
+    ))
+
+    # 6. Plafonnement PASS (L.241-3 CSS)
+    social_checks.append(_audit_check(
+        "Plafonnement PASS (vieillesse plafonnee, FNAL)",
+        "Art. L.241-3 CSS - PASS 2026: 47 100 EUR",
+        ks["has_bulletins"] and ks["nb_cotisations_analysees"] > 0,
+        f"{ks['nb_cotisations_analysees']} lignes de cotisations analysees" if ks["nb_cotisations_analysees"] > 0 else "Aucune cotisation analysee",
+        "Bulletins avec lignes vieillesse plafonnee",
+    ))
+
+    # 7. Detection apprentis (L.6243-2 CT)
+    social_checks.append(_audit_check(
+        "Detection apprentis et exonerations specifiques",
+        "Art. L.6243-2 CT",
+        len(ks["exonerations"]) > 0 or ks["has_bulletins"],
+        f"{len(ks['exonerations'])} exoneration(s) detectee(s)" if ks["exonerations"] else "Verifiable si bulletins d apprentis importes",
+        "Contrats d apprentissage, bulletins specifiques",
+    ))
+
+    # 8. NIR / identite (R.114-7 CSS)
+    nirs_valides = sum(1 for s in kb["salaries"].values() if s.get("nir") and not s["nir"].startswith("unknown"))
+    social_checks.append(_audit_check(
+        "Controle NIR / identite des salaries",
+        "Art. R.114-7 CSS",
+        nirs_valides > 0 and ks["has_multi_docs"],
+        f"{nirs_valides} NIR verifies sur {ks['nb_salaries_connus']} salarie(s)" if nirs_valides > 0 else "NIR non disponibles dans les documents importes",
+        "Bulletins + DSN avec NIR concordants",
+    ))
+
+    # 9. SMIC et minima (L.3231-2 CT)
+    salaires_analyses = [s["dernier_brut"] for s in kb["salaries"].values() if s.get("dernier_brut", 0) > 0]
+    smic_mensuel = 1801.80  # SMIC 2025/2026 approximatif
+    sous_smic = [b for b in salaires_analyses if b < smic_mensuel and b > 0]
+    social_checks.append(_audit_check(
+        "Verification SMIC et minima conventionnels",
+        "Art. L.3231-2 CT - Art. L.2253-1 CT",
+        len(salaires_analyses) > 0,
+        (f"{len(salaires_analyses)} salaire(s) analyse(s), {len(sous_smic)} sous le SMIC mensuel ({smic_mensuel} EUR)" if sous_smic else f"{len(salaires_analyses)} salaire(s) conforme(s) au SMIC") if salaires_analyses else "Aucun salaire disponible",
+        "Bulletins de paie, grille de la convention collective",
+        alerte=len(sous_smic) > 0,
+    ))
+
+    # 10. Blocs DSN (Cahier technique)
+    social_checks.append(_audit_check(
+        "Blocs obligatoires DSN (S21.G00.06, S21.G00.40, etc.)",
+        "Cahier technique DSN - Norme NEODeS",
+        ks["has_dsn"],
+        f"{len(kb['declarations_dsn'])} DSN importee(s) et analysee(s)" if ks["has_dsn"] else "Aucune DSN importee",
+        "Fichier DSN au format NEODeS",
+    ))
+
+    # 11. Prevoyance cadres (ANI 17/11/2017)
+    social_checks.append(_audit_check(
+        "Prevoyance obligatoire cadres (1.50% TA)",
+        "ANI 17/11/2017 - Art. 7 CCN Cadres 1947",
+        "prevoyance" in kb["pieces_justificatives"],
+        "Contrat de prevoyance importe" if "prevoyance" in kb["pieces_justificatives"] else f"{ks['nb_cadres']} cadre(s) detecte(s) - document de prevoyance non importe",
+        "Contrat de prevoyance collective, DUE ou accord collectif",
+        incidence="Redressement URSSAF : reintegration dans l assiette de cotisations des contributions patronales",
+    ))
+
+    # 12. Mutuelle obligatoire (L.911-7 CSS)
+    social_checks.append(_audit_check(
+        "Complementaire sante obligatoire (mutuelle ANI)",
+        "Art. L.911-7 CSS - ANI 11/01/2013 - Loi 2016",
+        "mutuelle" in kb["pieces_justificatives"],
+        "Justificatif mutuelle importe" if "mutuelle" in kb["pieces_justificatives"] else "Aucun justificatif de complementaire sante importe",
+        "Contrat de complementaire sante, DUE ou accord, attestation mutuelle",
+        incidence="Amende + redressement URSSAF sur contributions patronales",
+    ))
+
+    # 13. DUERP (R.4121-1 CT)
+    social_checks.append(_audit_check(
+        "Document unique d evaluation des risques (DUERP)",
+        "Art. R.4121-1 a R.4121-4 CT",
+        "duerp" in kb["pieces_justificatives"],
+        "DUERP importe" if "duerp" in kb["pieces_justificatives"] else "DUERP non importe - obligatoire des le 1er salarie",
+        "Document unique d evaluation des risques professionnels",
+        incidence="Contravention 5eme classe (1500 EUR). Responsabilite penale en cas AT.",
+    ))
+
+    # 14. Registre personnel (L.1221-13 CT)
+    social_checks.append(_audit_check(
+        "Registre unique du personnel",
+        "Art. L.1221-13 CT",
+        ks["nb_contrats_rh"] > 0 and ks["nb_contrats_rh"] >= ks["nb_salaries_connus"],
+        f"Registre reconstitue via {ks['nb_contrats_rh']} contrat(s) RH" if ks["nb_contrats_rh"] > 0 else "Aucun contrat enregistre - registre non verifiable",
+        "Registre avec entrees/sorties de tous les salaries",
+        incidence="Contravention 4eme classe (750 EUR par salarie concerne)",
+    ))
+
+    # 15. Medecine du travail (R.4624-10 CT)
+    social_checks.append(_audit_check(
+        "Suivi individuel de sante (medecine du travail)",
+        "Art. R.4624-10 CT",
+        ks["nb_visites_medicales"] > 0,
+        f"{ks['nb_visites_medicales']} visite(s) medicale(s) enregistree(s)" if ks["nb_visites_medicales"] > 0 else "Aucune visite medicale enregistree",
+        "Fiches d aptitude, convocations, attestations de suivi",
+        incidence="Mise en cause de la responsabilite de l employeur en cas de dommage",
+    ))
+
+    # 16. Duree du travail (L.3121-1 CT)
+    nb_planning = len(_rh_planning)
+    social_checks.append(_audit_check(
+        "Duree du travail et repos obligatoires",
+        "Art. L.3121-1 CT - Art. L.3131-1 CT (11h repos)",
+        nb_planning > 0,
+        f"{nb_planning} creneau(x) planning enregistre(s)" if nb_planning > 0 else "Aucun planning enregistre - impossible de verifier les durees",
+        "Planning, registre des horaires, accords temps de travail",
+    ))
+
+    # 17. Egalite professionnelle (L.1142-8 CT)
+    nb_actifs = ks["nb_contrats_actifs"]
+    social_checks.append(_audit_check(
+        "Index egalite professionnelle (si >= 50 salaries)",
+        "Art. L.1142-8 CT",
+        nb_actifs < 50 or "index_egalite" in kb["pieces_justificatives"],
+        "Non applicable (effectif < 50)" if nb_actifs < 50 else ("Index importe" if "index_egalite" in kb["pieces_justificatives"] else "Index non importe - obligatoire >= 50 salaries"),
+        "Index egalite, accord egalite professionnelle",
+        incidence="Penalite financiere pouvant atteindre 1% de la masse salariale" if nb_actifs >= 50 else "",
+    ))
+
+    # 18. CSE (L.2311-2 CT)
+    social_checks.append(_audit_check(
+        "Comite social et economique (CSE)",
+        "Art. L.2311-2 CT",
+        nb_actifs < 11 or "pv_cse" in kb["pieces_justificatives"],
+        "Non applicable (effectif < 11)" if nb_actifs < 11 else ("PV CSE importe" if "pv_cse" in kb["pieces_justificatives"] else "CSE obligatoire >= 11 salaries - aucun PV importe"),
+        "PV elections CSE, registre des PV de reunions",
+        incidence="Delit d entrave (L.2317-1 CT): 1 an emprisonnement + 7500 EUR amende" if nb_actifs >= 11 else "",
+    ))
+
+    # 19. Formation professionnelle (L.6321-1 CT)
+    social_checks.append(_audit_check(
+        "Plan de developpement des competences",
+        "Art. L.6321-1 CT",
+        ks["nb_entretiens"] > 0,
+        f"{ks['nb_entretiens']} entretien(s) professionnel(s) enregistre(s)" if ks["nb_entretiens"] > 0 else "Aucun entretien professionnel enregistre",
+        "Plan de formation, bilans, entretiens professionnels",
+    ))
+
+    # 20. Conges payes (L.3141-1 CT)
+    nb_conges = len(_rh_conges)
+    social_checks.append(_audit_check(
+        "Suivi des conges payes",
+        "Art. L.3141-1 CT - 2.5 jours ouvrables / mois",
+        nb_conges > 0 or ks["nb_contrats_rh"] == 0,
+        f"{nb_conges} conge(s) enregistre(s)" if nb_conges > 0 else "Aucun conge enregistre" if ks["nb_contrats_rh"] > 0 else "Non applicable (aucun salarie)",
+        "Registre des conges, compteurs individuels",
+    ))
+
+    # 21. Heures supplementaires (L.3121-33 CT)
+    social_checks.append(_audit_check(
+        "Heures supplementaires - Contingent annuel (220h)",
+        "Art. L.3121-33 CT - Art. D.3121-24 CT",
+        nb_planning > 0 or ks["has_bulletins"],
+        f"Verifiable via {nb_planning} creneau(x) planning" if nb_planning > 0 else "Verifiable si bulletins avec HS importes" if ks["has_bulletins"] else "Aucune donnee disponible",
+        "Registre heures sup, bulletins detailles, accords",
+    ))
+
+    # --- AUDIT FISCAL (CGI) ---
+    fiscal_checks = []
+
+    fiscal_checks.append(_audit_check("Declarations TVA (CA3/CA12)", "Art. 287 CGI",
+        "declarations_tva" in kb["pieces_justificatives"],
+        "Declarations TVA importees" if "declarations_tva" in kb["pieces_justificatives"] else "Aucune declaration TVA importee",
+        "Declarations de TVA, livre des achats/ventes"))
+
+    fiscal_checks.append(_audit_check("Coherence CA declare / comptabilise", "Art. 38 CGI",
+        "comptabilite" in kb["pieces_justificatives"] or len(_biblio_knowledge["documents_comptables"]) > 0,
+        "Documents comptables disponibles" if "comptabilite" in kb["pieces_justificatives"] else "Aucun document comptable importe",
+        "Grand livre, balance, declarations fiscales"))
+
+    fiscal_checks.append(_audit_check("IS/IR - Resultat fiscal", "Art. 209 CGI",
+        "liasse_fiscale" in kb["pieces_justificatives"],
+        "Liasse fiscale importee" if "liasse_fiscale" in kb["pieces_justificatives"] else "Liasse fiscale non importee",
+        "Liasse fiscale (2065/2031), comptes annuels"))
+
+    fiscal_checks.append(_audit_check("CET (CFE + CVAE)", "Art. 1447-0 CGI",
+        "cet" in kb["pieces_justificatives"],
+        "Documents CET importes" if "cet" in kb["pieces_justificatives"] else "Declarations CFE/CVAE non importees",
+        "Declarations 1447-C, 1330-CVAE"))
+
+    fiscal_checks.append(_audit_check("Charges deductibles", "Art. 39 CGI",
+        ks["has_bulletins"] or "comptabilite" in kb["pieces_justificatives"],
+        "Charges verifiables via les documents importes" if ks["has_bulletins"] else "Aucun justificatif de charges importe",
+        "Justificatifs de charges, factures fournisseurs"))
+
+    fiscal_checks.append(_audit_check("Amortissements", "Art. 39B CGI",
+        "immobilisations" in kb["pieces_justificatives"],
+        "Tableau des immobilisations importe" if "immobilisations" in kb["pieces_justificatives"] else "Tableau des immobilisations non importe",
+        "Tableau des immobilisations et amortissements"))
+
+    fiscal_checks.append(_audit_check("Provisions", "Art. 39-1-5 CGI",
+        "provisions" in kb["pieces_justificatives"],
+        "Releve des provisions importe" if "provisions" in kb["pieces_justificatives"] else "Non verifiable - aucun releve de provisions",
+        "Releve des provisions, justificatifs"))
+
+    fiscal_checks.append(_audit_check("TVA intracommunautaire", "Art. 262 ter CGI",
+        "deb_des" in kb["pieces_justificatives"],
+        "DEB/DES importees" if "deb_des" in kb["pieces_justificatives"] else "Pas de DEB/DES importees",
+        "DEB/DES, factures intracommunautaires"))
+
+    fiscal_checks.append(_audit_check("Taxe sur les salaires (si non assujetti TVA)", "Art. 231 CGI",
+        ks["has_bulletins"],
+        "Verifiable via les bulletins importes" if ks["has_bulletins"] else "Non verifiable sans bulletin",
+        "Declaration annuelle taxe sur salaires 2502"))
+
+    # --- COUR DES COMPTES ---
+    cdc_checks = []
+    cdc_checks.append(_audit_check("Regularite des comptes", "Normes NEP - ISA",
+        "comptes_annuels" in kb["pieces_justificatives"],
+        "Comptes annuels importes" if "comptes_annuels" in kb["pieces_justificatives"] else "Comptes annuels non importes",
+        "Comptes annuels certifies par CAC"))
+
+    cdc_checks.append(_audit_check("Sincerite des ecritures", "Art. L.123-14 Code de commerce",
+        len(_biblio_knowledge["documents_comptables"]) > 0 or ks["has_bulletins"],
+        "Ecritures verifiables" if len(_biblio_knowledge["documents_comptables"]) > 0 else "Pas de pieces comptables detaillees",
+        "Grand livre, pieces justificatives"))
+
+    cdc_checks.append(_audit_check("Image fidele du patrimoine", "Art. L.123-14 Code de commerce",
+        "bilan" in kb["pieces_justificatives"],
+        "Bilan importe" if "bilan" in kb["pieces_justificatives"] else "Bilan non importe",
+        "Bilan, annexe, rapport de gestion"))
+
+    cdc_checks.append(_audit_check("Continuite d exploitation", "NEP 570",
+        "previsionnel" in kb["pieces_justificatives"],
+        "Previsionnel importe" if "previsionnel" in kb["pieces_justificatives"] else "Previsionnel non disponible",
+        "Previsionnels, plan de tresorerie"))
+
+    return {
+        "social": social_checks,
+        "fiscal": fiscal_checks,
+        "cour_des_comptes": cdc_checks,
+        "knowledge_summary": ks,
+        "score_audit": _calculer_score_audit(social_checks, fiscal_checks, cdc_checks),
+    }
+
+
+def _audit_check(nom: str, ref: str, present: bool, detail: str, docs: str, incidence: str = "", alerte: bool = False) -> dict:
+    return {
+        "nom": nom,
+        "reference": ref,
+        "present": present,
+        "detail": detail,
+        "documents_requis": docs,
+        "incidence_legale": incidence,
+        "alerte": alerte,
+    }
+
+
+def _calculer_score_audit(social, fiscal, cdc) -> dict:
+    total = len(social) + len(fiscal) + len(cdc)
+    verifies = sum(1 for c in social + fiscal + cdc if c["present"])
+    pct = round(verifies / total * 100) if total > 0 else 0
+    return {
+        "total_checks": total,
+        "verifies": verifies,
+        "non_verifies": total - verifies,
+        "pourcentage": pct,
+        "social_verifies": sum(1 for c in social if c["present"]),
+        "social_total": len(social),
+        "fiscal_verifies": sum(1 for c in fiscal if c["present"]),
+        "fiscal_total": len(fiscal),
+        "cdc_verifies": sum(1 for c in cdc if c["present"]),
+        "cdc_total": len(cdc),
+    }
 
 
 @app.post("/api/documents/bibliotheque/{doc_id}/corriger")
@@ -3671,9 +4215,13 @@ APP_HTML += """
 <!-- ===== BIBLIOTHEQUE ===== -->
 <div class="sec" id="s-biblio">
 <div class="card">
-<h2>Bibliotheque de documents</h2>
-<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Documents importes avec historique des actions et possibilite de corriger les erreurs d'analyse.</p>
-<div class="btn-group"><button class="btn btn-blue btn-sm" onclick="loadBiblio()">&#8635; Actualiser</button><button class="btn btn-s btn-sm" onclick="exportSection('biblio')">&#128190; Exporter</button></div>
+<h2>Base de connaissances</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Toutes les informations extraites des documents importes, utilisees comme base d interpretation pour l audit et les controles.</p>
+<div class="btn-group"><button class="btn btn-blue btn-sm" onclick="loadBiblio();loadKnowledge()">&#8635; Actualiser</button><button class="btn btn-s btn-sm" onclick="exportSection('biblio')">&#128190; Exporter</button></div>
+<div id="biblio-knowledge" style="margin-top:12px"></div>
+</div>
+<div class="card">
+<h2>Documents importes</h2>
 <div id="biblio-list"></div>
 </div>
 </div>
@@ -4138,7 +4686,7 @@ var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
 if(el)el.classList.add("active");
 document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
-if(n==="biblio")loadBiblio();if(n==="equipe")loadEquipe();
+if(n==="biblio"){loadBiblio();loadKnowledge();}if(n==="equipe")loadEquipe();
 if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
 if(n==="rh")loadRHAlertes();if(n==="config"){loadEntete();loadAlertConfigs();}
 }
@@ -4229,15 +4777,50 @@ document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
 function resetAz(){fichiers=[];renderF();document.getElementById("res-analyse").style.display="none";}
 
 /* === BIBLIOTHEQUE === */
+function loadKnowledge(){
+fetch("/api/bibliotheque/knowledge").then(function(r){return r.json();}).then(function(kb){
+var el=document.getElementById("biblio-knowledge");if(!el)return;
+var s=kb.summary||{};
+if(!s.derniere_maj){el.innerHTML="<div class='al info'><span class='ai'>&#128218;</span><span>Aucune donnee. Importez des documents via Import / Analyse pour alimenter la base.</span></div>";return;}
+var h="<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px'>";
+h+="<div class='sc blue'><div class='val'>"+s.nb_salaries_connus+"</div><div class='lab'>Salaries connus</div></div>";
+h+="<div class='sc green'><div class='val'>"+s.nb_employeurs+"</div><div class='lab'>Employeurs</div></div>";
+h+="<div class='sc'><div class='val'>"+s.nb_periodes+"</div><div class='lab'>Periodes</div></div>";
+h+="<div class='sc amber'><div class='val'>"+s.nb_cotisations_analysees+"</div><div class='lab'>Cotisations</div></div>";
+h+="<div class='sc'><div class='val'>"+s.total_masse_salariale.toFixed(0)+" EUR</div><div class='lab'>Masse salariale</div></div>";
+h+="<div class='sc "+(s.nb_anomalies>0?"red":"green")+"'><div class='val'>"+s.nb_anomalies+"</div><div class='lab'>Anomalies</div></div></div>";
+if(s.periodes&&s.periodes.length){h+="<p style='font-size:.84em;color:var(--tx2)'>Periodes couvertes : <strong>"+s.periodes.join(", ")+"</strong></p>";}
+if(s.pieces_disponibles&&s.pieces_disponibles.length){h+="<p style='font-size:.84em;color:var(--tx2)'>Pieces disponibles : ";for(var i=0;i<s.pieces_disponibles.length;i++){h+="<span class='badge badge-blue' style='margin:2px'>"+s.pieces_disponibles[i]+"</span>";}h+="</p>";}
+var sals=kb.salaries||{};var salKeys=Object.keys(sals);
+if(salKeys.length){h+="<h3 style='margin-top:16px'>Salaries identifies ("+salKeys.length+")</h3><table><tr><th>NIR</th><th>Nom</th><th>Prenom</th><th>Statut</th><th class='num'>Dernier brut</th><th>Periodes</th></tr>";
+for(var i=0;i<salKeys.length;i++){var sal=sals[salKeys[i]];h+="<tr><td style='font-size:.78em'>"+sal.nir+"</td><td>"+sal.nom+"</td><td>"+sal.prenom+"</td><td><span class='badge "+(sal.statut==="cadre"?"badge-purple":"badge-blue")+"'>"+sal.statut+"</span></td><td class='num'>"+(sal.dernier_brut||0).toFixed(2)+"</td><td style='font-size:.78em'>"+(sal.periodes_presentes||[]).join(", ")+"</td></tr>";}
+h+="</table>";}
+var emps=kb.employeurs||{};var empKeys=Object.keys(emps);
+if(empKeys.length){h+="<h3 style='margin-top:16px'>Employeurs identifies ("+empKeys.length+")</h3><table><tr><th>SIRET</th><th>Raison sociale</th><th>NAF</th><th class='num'>Effectif</th></tr>";
+for(var i=0;i<empKeys.length;i++){var emp=emps[empKeys[i]];h+="<tr><td>"+emp.siret+"</td><td>"+emp.raison_sociale+"</td><td>"+(emp.code_naf||"-")+"</td><td class='num'>"+(emp.effectif||"-")+"</td></tr>";}
+h+="</table>";}
+h+="<p style='font-size:.78em;color:var(--tx2);margin-top:12px'>Derniere mise a jour : "+s.derniere_maj+"</p>";
+el.innerHTML=h;}).catch(function(){});}
 function loadBiblio(){
 fetch("/api/documents/bibliotheque").then(function(r){return r.json();}).then(function(docs){
 var el=document.getElementById("biblio-list");
 if(!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
-var h="";for(var i=0;i<docs.length;i++){var d=docs[i];
+var h="";for(var i=0;i<docs.length;i++){var d=docs[i];var de=d.donnees_extraites||{};
 h+="<div class='doc-item'><div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px'>";
-h+="<div><strong>"+d.nom+"</strong> <span class='badge badge-blue'>"+d.statut+"</span></div>";
+h+="<div><strong>"+d.nom+"</strong> <span class='badge badge-blue'>"+d.statut+"</span>";
+if(de.type_declaration)h+=" <span class='badge badge-purple'>"+de.type_declaration+"</span>";
+h+="</div>";
 h+="<span style='font-size:.8em;color:var(--tx2)'>"+d.date_import.substring(0,10)+" | "+(d.taille/1024).toFixed(1)+" Ko</span></div>";
-var acts=d.actions||[];if(acts.length){h+="<div style='margin-top:8px;font-size:.82em'><strong>Historique :</strong>";
+if(de.nb_salaries||de.masse_salariale||de.employeur_nom){h+="<div style='margin-top:6px;font-size:.84em;display:flex;gap:12px;flex-wrap:wrap'>";
+if(de.employeur_nom)h+="<span><strong>Employeur:</strong> "+de.employeur_nom+"</span>";
+if(de.employeur_siret)h+="<span>SIRET: "+de.employeur_siret+"</span>";
+if(de.periode)h+="<span><strong>Periode:</strong> "+de.periode+"</span>";
+if(de.nb_salaries)h+="<span><strong>"+de.nb_salaries+"</strong> salarie(s)</span>";
+if(de.nb_cotisations)h+="<span><strong>"+de.nb_cotisations+"</strong> cotisation(s)</span>";
+if(de.masse_salariale)h+="<span><strong>Masse salariale:</strong> "+de.masse_salariale.toFixed(2)+" EUR</span>";
+h+="</div>";}
+if(de.salaries_noms&&de.salaries_noms.length){h+="<div style='margin-top:4px;font-size:.8em;color:var(--tx2)'>Salaries: "+de.salaries_noms.join(", ")+"</div>";}
+var acts=d.actions||[];if(acts.length){h+="<div style='margin-top:6px;font-size:.82em'><strong>Historique :</strong>";
 for(var j=0;j<acts.length;j++){h+=" <span class='badge badge-blue' style='margin:2px'>"+acts[j].action+" ("+acts[j].par+")</span>";}h+="</div>";}
 var errs=d.erreurs_corrigees||[];if(errs.length){h+="<div style='margin-top:6px;font-size:.82em;color:var(--r)'><strong>Corrections :</strong>";
 for(var k=0;k<errs.length;k++){h+=" "+errs[k].champ+": "+errs[k].ancienne_valeur+" -> "+errs[k].nouvelle_valeur;}h+="</div>";}
@@ -4598,63 +5181,33 @@ var mode=data.mode_analyse||document.getElementById("mode-analyse").value;
 var card=document.getElementById("az-audit-card");var el=document.getElementById("az-audit-checks");
 if(mode==="simple"){card.style.display="none";return;}
 card.style.display="block";
-var hasDSN=data.declarations&&data.declarations.some(function(d){return(d.type||"").toUpperCase().indexOf("DSN")>=0;});
-var hasBulletins=data.declarations&&data.declarations.some(function(d){return(d.nature||"").indexOf("Bulletin")>=0||(d.nb_cotisations||0)>0;});
-var multiDocs=data.declarations&&data.declarations.length>1;
-var socialChecks=[
-{nom:"DPAE (Declaration prealable a l embauche)",present:true,docs:"Registre des DPAE, accuses de reception URSSAF",ref:"Art. L.1221-10 CT"},
-{nom:"Contrats de travail complets",present:true,docs:"Contrats de travail signes pour chaque salarie",ref:"Art. L.1221-1 CT"},
-{nom:"Rapprochement DSN / Bulletins de paie",present:hasDSN&&hasBulletins,docs:"DSN mensuelle + bulletins de paie de la meme periode",ref:"Art. R.133-14 CSS"},
-{nom:"Verification taux URSSAF 2026",present:hasBulletins,docs:"Bulletins de paie avec detail des cotisations",ref:"Art. L.242-1 CSS"},
-{nom:"Coherence masse salariale / effectif",present:hasBulletins,docs:"Bulletins de paie, DADS ou DSN annuelle",ref:"Art. L.242-1 CSS"},
-{nom:"Plafonnement PASS (vieillesse plafonnee)",present:hasBulletins,docs:"Bulletins avec lignes vieillesse plafonnee",ref:"Art. L.241-3 CSS - PASS 2026"},
-{nom:"Detection apprentis et exonerations",present:hasBulletins,docs:"Contrats d apprentissage, bulletins",ref:"Art. L.6243-2 CT"},
-{nom:"Controle NIR / identite salaries",present:multiDocs,docs:"Bulletins + DSN avec NIR concordants",ref:"Art. R.114-7 CSS"},
-{nom:"Verification SMIC et minima conventionnels",present:hasBulletins,docs:"Bulletins de paie, grille de la convention collective",ref:"Art. L.3231-2 CT - Art. L.2253-1 CT"},
-{nom:"Blocs obligatoires DSN",present:hasDSN,docs:"Fichier DSN au format NEODeS",ref:"Cahier technique DSN"},
-{nom:"Prevoyance obligatoire cadres",present:false,docs:"Contrat de prevoyance collective, DUE ou accord collectif",ref:"ANI 17/11/2017 - Art. 7 CCN Cadres"},
-{nom:"Mutuelle obligatoire ANI",present:false,docs:"Contrat de complementaire sante, DUE ou accord",ref:"Art. L.911-7 CSS - ANI 11/01/2013"},
-{nom:"DUERP (Document unique)",present:false,docs:"Document unique d evaluation des risques professionnels",ref:"Art. R.4121-1 CT"},
-{nom:"Registre unique du personnel",present:false,docs:"Registre avec entrees/sorties de tous salaries",ref:"Art. L.1221-13 CT"},
-{nom:"Medecine du travail - Suivi individuel",present:false,docs:"Fiches d aptitude, convocations visites medicales",ref:"Art. R.4624-10 CT"},
-{nom:"Duree du travail et repos",present:false,docs:"Registre des horaires, accords temps de travail",ref:"Art. L.3121-1 CT"},
-{nom:"Egalite professionnelle",present:false,docs:"Index egalite, accord egalite pro",ref:"Art. L.1142-8 CT"},
-{nom:"Representants du personnel / CSE",present:false,docs:"PV elections CSE, registre des PV",ref:"Art. L.2311-2 CT"},
-{nom:"Formation professionnelle",present:false,docs:"Plan de developpement des competences, bilans formation",ref:"Art. L.6321-1 CT"},
-{nom:"Conges payes - Suivi",present:false,docs:"Registre des conges, soldes de tout compte",ref:"Art. L.3141-1 CT"},
-{nom:"Heures supplementaires - Contingent",present:false,docs:"Registre heures sup, accords temps de travail",ref:"Art. L.3121-33 CT"}
-];
-var fiscalChecks=[
-{nom:"Declarations TVA (CA3/CA12)",present:false,docs:"Declarations de TVA, livre des achats/ventes",ref:"Art. 287 CGI"},
-{nom:"Coherence CA declare / comptabilise",present:false,docs:"Grand livre, balance, declarations fiscales",ref:"Art. 38 CGI"},
-{nom:"IS/IR - Resultat fiscal",present:false,docs:"Liasse fiscale (2065/2031), comptes annuels",ref:"Art. 209 CGI"},
-{nom:"CET (CFE + CVAE)",present:false,docs:"Declarations 1447-C, 1330-CVAE",ref:"Art. 1447-0 CGI"},
-{nom:"Charges deductibles",present:false,docs:"Justificatifs de charges, factures fournisseurs",ref:"Art. 39 CGI"},
-{nom:"Amortissements",present:false,docs:"Tableau des immobilisations et amortissements",ref:"Art. 39B CGI"},
-{nom:"Provisions",present:false,docs:"Releve des provisions, justificatifs",ref:"Art. 39-1-5 CGI"},
-{nom:"TVA intracommunautaire",present:false,docs:"DEB/DES, factures intracommunautaires",ref:"Art. 262 ter CGI"},
-{nom:"Taxe sur les salaires (si applicable)",present:false,docs:"Declaration annuelle taxe sur salaires",ref:"Art. 231 CGI"}
-];
-var courDesComptesChecks=[
-{nom:"Regularite des comptes",present:false,docs:"Comptes annuels certifies par CAC",ref:"Normes NEP"},
-{nom:"Sincerite des ecritures",present:false,docs:"Grand livre, pieces justificatives",ref:"Art. L.123-14 Code de commerce"},
-{nom:"Image fidele du patrimoine",present:false,docs:"Bilan, annexe, rapport de gestion",ref:"Art. L.123-14 Code de commerce"},
-{nom:"Continuite d exploitation",present:false,docs:"Previsionnels, plan de tresorerie",ref:"NEP 570"}
-];
-var h="";
-if(mode==="social"||mode==="complet"){
-h+="<h3 style='color:var(--p);margin:12px 0 8px'>Audit social - Points de controle URSSAF</h3>";
-for(var i=0;i<socialChecks.length;i++){var c=socialChecks[i];
-h+="<div class='al "+(c.present?"ok":"warn")+"' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?"Verifie":"Documents insuffisants")+"<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'>"+(c.present?"Point de controle verifie avec les documents fournis.":"<strong>Documents necessaires :</strong> "+c.docs)+"<br><em>Ref: "+c.ref+"</em></div></span></div>";}}
-if(mode==="fiscal"||mode==="complet"){
-h+="<h3 style='color:var(--p);margin:16px 0 8px'>Audit fiscal - Points de controle DGFIP</h3>";
-for(var i=0;i<fiscalChecks.length;i++){var c=fiscalChecks[i];
-h+="<div class='al "+(c.present?"ok":"warn")+"' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?"Verifie":"Documents insuffisants")+"<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'><strong>Documents necessaires :</strong> "+c.docs+"<br><em>Ref: "+c.ref+"</em></div></span></div>";}}
-if(mode==="complet"){
-h+="<h3 style='color:var(--p);margin:16px 0 8px'>Controle Cour des comptes</h3>";
-for(var i=0;i<courDesComptesChecks.length;i++){var c=courDesComptesChecks[i];
-h+="<div class='al warn' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>&#9888;</span><span><strong>"+c.nom+"</strong> - Documents insuffisants<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'><strong>Documents necessaires :</strong> "+c.docs+"<br><em>Ref: "+c.ref+"</em></div></span></div>";}}
-el.innerHTML=h;}
+el.innerHTML="<p style='color:var(--tx2)'>Chargement de l audit depuis la base de connaissances...</p>";
+fetch("/api/bibliotheque/knowledge/audit").then(function(r){return r.json();}).then(function(audit){
+var h="";var sc=audit.score_audit||{};
+h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px'>";
+h+="<div class='sc blue'><div class='val'>"+sc.total_checks+"</div><div class='lab'>Points de controle</div></div>";
+h+="<div class='sc green'><div class='val'>"+sc.verifies+"</div><div class='lab'>Verifies</div></div>";
+h+="<div class='sc "+(sc.pourcentage>=60?"green":"red")+"'><div class='val'>"+sc.pourcentage+"%</div><div class='lab'>Couverture</div></div>";
+h+="</div>";
+var ks=audit.knowledge_summary||{};
+if(ks.nb_salaries_connus>0||ks.nb_contrats_rh>0){
+h+="<div class='al info' style='margin-bottom:12px'><span class='ai'>&#128218;</span><span><strong>Base de connaissances :</strong> "+ks.nb_salaries_connus+" salarie(s), "+ks.nb_contrats_rh+" contrat(s), "+(ks.periodes||[]).length+" periode(s), "+(ks.pieces_disponibles||[]).join(", ")+"</span></div>";}
+function renderChecks(checks,titre,prefix){
+if(!checks||!checks.length)return"";
+var nb_ok=0;for(var i=0;i<checks.length;i++){if(checks[i].present)nb_ok++;}
+var out="<h3 style='color:var(--p);margin:16px 0 8px'>"+titre+" <span class='badge "+(nb_ok===checks.length?"badge-green":"badge-amber")+"'>"+nb_ok+"/"+checks.length+"</span></h3>";
+for(var i=0;i<checks.length;i++){var c=checks[i];var cls=c.present?(c.alerte?"warn":"ok"):"warn";
+out+="<div class='al "+cls+"' style='cursor:pointer' onclick='this.querySelector(\".aud-detail\").style.display=this.querySelector(\".aud-detail\").style.display===\"none\"?\"block\":\"none\"'><span class='ai'>"+(c.present?"&#9989;":"&#9888;")+"</span><span><strong>"+c.nom+"</strong> - "+(c.present?c.detail:"Documents insuffisants");
+out+="<div class='aud-detail' style='display:none;margin-top:8px;font-size:.9em;padding-top:8px;border-top:1px solid rgba(0,0,0,.1)'>";
+out+="<p><strong>Etat :</strong> "+c.detail+"</p>";
+if(!c.present)out+="<p style='margin-top:4px'><strong>Documents necessaires :</strong> "+c.documents_requis+"</p>";
+if(c.incidence_legale)out+="<p style='margin-top:4px;color:var(--r);font-weight:600'>Consequence : "+c.incidence_legale+"</p>";
+out+="<p style='margin-top:4px;color:var(--tx2)'><em>Ref: "+c.reference+"</em></p>";
+out+="</div></span></div>";}return out;}
+if(mode==="social"||mode==="complet"){h+=renderChecks(audit.social,"Audit social - Code de la securite sociale + Code du travail ("+sc.social_verifies+"/"+sc.social_total+")","social");}
+if(mode==="fiscal"||mode==="complet"){h+=renderChecks(audit.fiscal,"Audit fiscal - Code general des impots ("+sc.fiscal_verifies+"/"+sc.fiscal_total+")","fiscal");}
+if(mode==="complet"){h+=renderChecks(audit.cour_des_comptes,"Controle Cour des comptes ("+sc.cdc_verifies+"/"+sc.cdc_total+")","cdc");}
+el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur chargement audit: "+e.message+"</div>";});}
 
 /* === CONFORMITY SCORE === */
 function calculateConformityScore(data){
