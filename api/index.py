@@ -201,12 +201,14 @@ def _alimenter_knowledge(result):
                 kb["periodes_couvertes"].sort()
 
         # --- Type de document ---
-        fmt = (decl.type_declaration or "").upper()
-        if fmt in ("DSN", "DSN/XML"):
-            meta = getattr(decl, "metadata", {}) or {}
+        fmt = (decl.type_declaration or "").lower()
+        meta = getattr(decl, "metadata", {}) or {}
+        doc_type = meta.get("type_document", "")
+        per_kb = decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else ""
+        if fmt in ("dsn", "dsn/xml"):
             kb["declarations_dsn"].append({
                 "reference": decl.reference,
-                "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+                "periode": per_kb,
                 "nb_salaries": len(decl.employes),
                 "nb_cotisations": len(decl.cotisations),
                 "masse_salariale": float(decl.masse_salariale_brute),
@@ -217,18 +219,53 @@ def _alimenter_knowledge(result):
             if "dsn" not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"]["dsn"] = []
             kb["pieces_justificatives"]["dsn"].append(decl.reference)
-        elif len(decl.cotisations) > 0:
+        elif fmt == "bulletin" or doc_type == "bulletin_de_paie" or (len(decl.cotisations) > 0 and len(decl.employes) <= 1):
             kb["bulletins_paie"].append({
                 "reference": decl.reference,
                 "nb_salaries": len(decl.employes),
                 "nb_cotisations": len(decl.cotisations),
                 "masse_salariale": float(decl.masse_salariale_brute),
-                "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+                "net_a_payer": meta.get("net_a_payer", 0),
+                "total_patronal": meta.get("total_patronal", 0),
+                "total_salarial": meta.get("total_salarial", 0),
+                "periode": per_kb,
                 "date_import": datetime.now().isoformat(),
             })
             if "bulletins" not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"]["bulletins"] = []
             kb["pieces_justificatives"]["bulletins"].append(decl.reference)
+        elif fmt == "livre_de_paie" or doc_type == "livre_de_paie":
+            kb["bulletins_paie"].append({
+                "reference": decl.reference,
+                "nb_salaries": len(decl.employes),
+                "nb_cotisations": len(decl.cotisations),
+                "masse_salariale": float(decl.masse_salariale_brute),
+                "periode": per_kb,
+                "date_import": datetime.now().isoformat(),
+            })
+            if "livre_de_paie" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["livre_de_paie"] = []
+            kb["pieces_justificatives"]["livre_de_paie"].append(decl.reference)
+        elif fmt == "facture" or doc_type in ("facture_achat", "facture_vente"):
+            if "factures" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["factures"] = []
+            kb["pieces_justificatives"]["factures"].append(decl.reference)
+        elif fmt == "contrat" or doc_type == "contrat_de_travail":
+            if "contrats" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["contrats"] = []
+            kb["pieces_justificatives"]["contrats"].append(decl.reference)
+        elif len(decl.cotisations) > 0 or float(decl.masse_salariale_brute) > 0:
+            kb["bulletins_paie"].append({
+                "reference": decl.reference,
+                "nb_salaries": len(decl.employes),
+                "nb_cotisations": len(decl.cotisations),
+                "masse_salariale": float(decl.masse_salariale_brute),
+                "periode": per_kb,
+                "date_import": datetime.now().isoformat(),
+            })
+            if "autres" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["autres"] = []
+            kb["pieces_justificatives"]["autres"].append(decl.reference)
 
         # --- Salaries ---
         for emp in decl.employes:
@@ -236,6 +273,8 @@ def _alimenter_knowledge(result):
             existing = kb["salaries"].get(nir, {})
             cots = [c for c in decl.cotisations if c.employe_id == emp.id]
             brut = float(sum(c.base_brute for c in cots)) if cots else 0
+            if brut <= 0 and float(decl.masse_salariale_brute) > 0:
+                brut = float(decl.masse_salariale_brute) / max(len(decl.employes), 1)
             statut = "cadre" if emp.statut and "cadre" in emp.statut.lower() else "non-cadre"
             kb["salaries"][nir] = {
                 "nir": nir,
@@ -249,20 +288,22 @@ def _alimenter_knowledge(result):
             }
 
         # --- Cotisations et taux ---
+        per_str = decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else ""
         for cot in decl.cotisations:
+            code = cot.type_cotisation.value if cot.type_cotisation else ""
+            libelle = code.replace("_", " ").title()
             kb["cotisations"].append({
-                "code": cot.code_cotisation,
-                "libelle": cot.libelle,
+                "code": code,
+                "libelle": libelle,
                 "base": float(cot.base_brute),
                 "taux_salarial": float(cot.taux_salarial) if cot.taux_salarial else 0,
                 "taux_patronal": float(cot.taux_patronal) if cot.taux_patronal else 0,
                 "montant_salarial": float(cot.montant_salarial) if cot.montant_salarial else 0,
                 "montant_patronal": float(cot.montant_patronal) if cot.montant_patronal else 0,
                 "employe_nir": cot.employe_id,
-                "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
+                "periode": per_str,
             })
             # Verification des taux
-            code = cot.code_cotisation or ""
             if code and cot.taux_salarial:
                 kb["taux_verifies"][code] = {
                     "taux_constate": float(cot.taux_salarial),
@@ -1892,13 +1933,91 @@ async def knowledge_audit():
         "Contrats de travail signes pour chaque salarie",
     ))
 
-    # 3. DSN / Bulletins rapprochement (R.133-14 CSS)
+    # 3. DSN / Bulletins rapprochement (R.133-14 CSS) - Rapprochement des masses
+    # Calculer le rapprochement reel des masses salariales BS vs DSN vs LDP
+    masses_bs = {}  # periode -> {"brut": x, "refs": [...]}
+    masses_dsn = {}
+    masses_ldp = {}
+    for bp in kb["bulletins_paie"]:
+        per = bp.get("periode", "")
+        if per:
+            if per not in masses_bs:
+                masses_bs[per] = {"brut": 0, "refs": [], "patronal": 0, "salarial": 0}
+            masses_bs[per]["brut"] += bp.get("masse_salariale", 0)
+            masses_bs[per]["patronal"] += float(bp.get("total_patronal", 0))
+            masses_bs[per]["salarial"] += float(bp.get("total_salarial", 0))
+            masses_bs[per]["refs"].append(bp.get("reference", ""))
+    for d in kb["declarations_dsn"]:
+        per = d.get("periode", "")
+        if per:
+            if per not in masses_dsn:
+                masses_dsn[per] = {"brut": 0, "refs": [], "s89_brut": 0, "s89_cot": 0}
+            masses_dsn[per]["brut"] += d.get("masse_salariale", 0)
+            masses_dsn[per]["s89_brut"] += float(d.get("s89_total_brut", 0))
+            masses_dsn[per]["s89_cot"] += float(d.get("s89_total_cotisations", 0))
+            masses_dsn[per]["refs"].append(d.get("reference", ""))
+    # Livre de paie stored separately in pieces_justificatives
+    for bp in kb["bulletins_paie"]:
+        ref = bp.get("reference", "")
+        if ref in (kb["pieces_justificatives"].get("livre_de_paie") or []):
+            per = bp.get("periode", "")
+            if per:
+                if per not in masses_ldp:
+                    masses_ldp[per] = {"brut": 0, "refs": []}
+                masses_ldp[per]["brut"] += bp.get("masse_salariale", 0)
+                masses_ldp[per]["refs"].append(ref)
+
+    # Comparer les masses par periode
+    toutes_periodes = sorted(set(list(masses_bs.keys()) + list(masses_dsn.keys()) + list(masses_ldp.keys())))
+    ecarts = []
+    seuil_ecart = 0.01  # 1% de tolerance
+    for per in toutes_periodes:
+        bs = masses_bs.get(per)
+        dsn = masses_dsn.get(per)
+        ldp = masses_ldp.get(per)
+        sources = {}
+        if bs:
+            sources["BS"] = bs["brut"]
+        if dsn:
+            sources["DSN"] = dsn["brut"]
+        if ldp:
+            sources["LDP"] = ldp["brut"]
+        if len(sources) >= 2:
+            vals = list(sources.values())
+            ref_val = max(vals)
+            if ref_val > 0:
+                for s1, v1 in sources.items():
+                    for s2, v2 in sources.items():
+                        if s1 < s2:
+                            ecart_pct = abs(v1 - v2) / ref_val
+                            if ecart_pct > seuil_ecart:
+                                ecarts.append({
+                                    "periode": per,
+                                    "source1": s1, "montant1": round(v1, 2),
+                                    "source2": s2, "montant2": round(v2, 2),
+                                    "ecart": round(abs(v1 - v2), 2),
+                                    "ecart_pct": round(ecart_pct * 100, 2),
+                                })
+
+    has_rapprochement = ks["has_dsn"] and ks["has_bulletins"]
+    rapprochement_ok = has_rapprochement and len(ecarts) == 0
+    if ecarts:
+        detail_rappr = f"ECARTS DETECTES sur {len(ecarts)} periode(s): "
+        for e in ecarts[:3]:
+            detail_rappr += f"[{e['periode']}: {e['source1']}={e['montant1']:.2f} vs {e['source2']}={e['montant2']:.2f}, ecart={e['ecart']:.2f} EUR ({e['ecart_pct']:.1f}%)] "
+    elif has_rapprochement:
+        nb_per_commun = len([p for p in toutes_periodes if p in masses_bs and p in masses_dsn])
+        detail_rappr = f"Masses concordantes: {len(kb['declarations_dsn'])} DSN + {len(kb['bulletins_paie'])} BS sur {nb_per_commun} periode(s) commune(s)"
+    else:
+        detail_rappr = "DSN et/ou bulletins manquants pour rapprochement des masses"
     social_checks.append(_audit_check(
-        "Rapprochement DSN / Bulletins de paie",
-        "Art. R.133-14 CSS",
-        ks["has_dsn"] and ks["has_bulletins"],
-        f"{len(kb['declarations_dsn'])} DSN + {len(kb['bulletins_paie'])} bulletins importes" if ks["has_dsn"] and ks["has_bulletins"] else "DSN et/ou bulletins manquants pour rapprochement",
-        "DSN mensuelle + bulletins de paie de la meme periode",
+        "Rapprochement des masses BS / DSN / LDP",
+        "Art. R.133-14 CSS - Art. L.242-1 CSS",
+        rapprochement_ok,
+        detail_rappr,
+        "DSN mensuelle + bulletins de paie + livre de paie de la meme periode",
+        incidence="Redressement URSSAF en cas d ecart significatif entre masse declaree (DSN) et masse versee (bulletins)" if ecarts else "",
+        alerte=len(ecarts) > 0,
     ))
 
     # 4. Taux URSSAF (L.242-1 CSS)
@@ -2149,12 +2268,23 @@ async def knowledge_audit():
         "Previsionnel importe" if "previsionnel" in kb["pieces_justificatives"] else "Previsionnel non disponible",
         "Previsionnels, plan de tresorerie"))
 
+    # Rapprochement detaille des masses (donnees supplementaires pour affichage)
+    rapprochement_detail = {
+        "periodes": toutes_periodes,
+        "masses_bs": {p: {"brut": v["brut"], "patronal": v["patronal"], "salarial": v["salarial"]} for p, v in masses_bs.items()},
+        "masses_dsn": {p: {"brut": v["brut"], "s89_brut": v["s89_brut"], "s89_cot": v["s89_cot"]} for p, v in masses_dsn.items()},
+        "masses_ldp": {p: {"brut": v["brut"]} for p, v in masses_ldp.items()},
+        "ecarts": ecarts,
+        "seuil_tolerance_pct": seuil_ecart * 100,
+    }
+
     return {
         "social": social_checks,
         "fiscal": fiscal_checks,
         "cour_des_comptes": cdc_checks,
         "knowledge_summary": ks,
         "score_audit": _calculer_score_audit(social_checks, fiscal_checks, cdc_checks),
+        "rapprochement_masses": rapprochement_detail,
     }
 
 
@@ -6124,6 +6254,29 @@ out+="</div></span></div>";}return out;}
 if(mode==="social"||mode==="complet"){h+=renderChecks(audit.social,"Audit social - Code de la securite sociale + Code du travail ("+sc.social_verifies+"/"+sc.social_total+")","social");}
 if(mode==="fiscal"||mode==="complet"){h+=renderChecks(audit.fiscal,"Audit fiscal - Code general des impots ("+sc.fiscal_verifies+"/"+sc.fiscal_total+")","fiscal");}
 if(mode==="complet"){h+=renderChecks(audit.cour_des_comptes,"Controle Cour des comptes ("+sc.cdc_verifies+"/"+sc.cdc_total+")","cdc");}
+var rm=audit.rapprochement_masses;
+if(rm&&rm.periodes&&rm.periodes.length>0&&(mode==="social"||mode==="complet")){
+h+="<h3 style='color:var(--p);margin:20px 0 8px'>Rapprochement des masses salariales par periode</h3>";
+h+="<div style='overflow-x:auto'><table class='tb'><thead><tr><th>Periode</th><th>BS (Brut)</th><th>DSN (Brut)</th><th>LDP (Brut)</th><th>Ecart BS/DSN</th><th>Statut</th></tr></thead><tbody>";
+for(var pi=0;pi<rm.periodes.length;pi++){var pp=rm.periodes[pi];
+var bsv=rm.masses_bs[pp];var dsnv=rm.masses_dsn[pp];var ldpv=rm.masses_ldp[pp];
+var bsb=bsv?bsv.brut:0;var dsnb=dsnv?dsnv.brut:0;var ldpb=ldpv?ldpv.brut:0;
+var ecart=0;var statut="";var cls="";
+if(bsb>0&&dsnb>0){ecart=Math.abs(bsb-dsnb);var ref2=Math.max(bsb,dsnb);var pct=ref2>0?(ecart/ref2*100):0;
+if(pct<=1){statut="Conforme";cls="color:var(--g)";}else{statut="Ecart "+pct.toFixed(1)+"%";cls="color:var(--r);font-weight:600";}}
+else if(bsb>0||dsnb>0){statut="Source unique";cls="color:var(--tx2)";}
+else{statut="-";cls="color:var(--tx2)";}
+h+="<tr><td><strong>"+pp+"</strong></td>";
+h+="<td>"+(bsb>0?bsb.toFixed(2)+" EUR":"-")+"</td>";
+h+="<td>"+(dsnb>0?dsnb.toFixed(2)+" EUR":"-")+"</td>";
+h+="<td>"+(ldpb>0?ldpb.toFixed(2)+" EUR":"-")+"</td>";
+h+="<td>"+(ecart>0?ecart.toFixed(2)+" EUR":"-")+"</td>";
+h+="<td style='"+cls+"'>"+statut+"</td></tr>";}
+h+="</tbody></table></div>";
+if(rm.ecarts&&rm.ecarts.length>0){
+h+="<div class='al err' style='margin-top:8px'><span class='ai'>&#9888;</span><span><strong>"+rm.ecarts.length+" ecart(s) significatif(s) detecte(s)</strong> (seuil: "+rm.seuil_tolerance_pct+"%) - Un rapprochement detaille est necessaire. Verifier les elements de paie et declarations pour identifier l origine des ecarts.</span></div>";}
+else if(Object.keys(rm.masses_bs).length>0&&Object.keys(rm.masses_dsn).length>0){
+h+="<div class='al ok' style='margin-top:8px'><span class='ai'>&#9989;</span><span><strong>Masses concordantes</strong> - Les montants declares (DSN) correspondent aux montants verses (bulletins).</span></div>";}}
 el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur chargement audit: "+e.message+"</div>";});}
 
 /* === CONFORMITY SCORE === */
