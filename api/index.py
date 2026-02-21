@@ -69,10 +69,24 @@ _biblio_knowledge: dict = {
     "pieces_justificatives": {},  # {type_piece: [doc_ids]}
     "contrats_detectes": [],  # contrats extraits des documents
     "masse_salariale": {},  # {periode: montant}
+    "masse_salariale_totale": 0,  # cumul toutes periodes
     "effectifs": {},        # {periode: nb}
     "conventions_collectives": [],  # CCN detectees
     "exonerations_detectees": [],  # exonerations apprentis, ZRR, etc.
     "derniere_maj": None,
+    "contexte_entreprise": {
+        "secteur_activite": "",
+        "code_naf": "",
+        "convention_collective": "",
+        "code_idcc": "",
+        "lieu_implantation": "",
+        "forme_juridique": "",
+        "effectif_moyen": 0,
+        "accords_entreprise": [],
+        "regime_fiscal": "",
+    },
+    "documents_par_type": {},  # {type: [references]}
+    "alertes_contextuelles": [],  # alertes generees a partir du contexte
 }
 _invitations: list[dict] = []
 _facture_statuses: dict[str, dict] = {}
@@ -255,6 +269,33 @@ def _alimenter_knowledge(result):
             if "contrats" not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"]["contrats"] = []
             kb["pieces_justificatives"]["contrats"].append(decl.reference)
+        elif fmt == "accord" or doc_type.startswith("accord_"):
+            if "accords" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["accords"] = []
+            kb["pieces_justificatives"]["accords"].append(decl.reference)
+            # Store accord details in enterprise context
+            ctx = kb.get("contexte_entreprise", {})
+            accords = ctx.get("accords_entreprise", [])
+            accords.append({
+                "reference": decl.reference,
+                "type": doc_type,
+                "date": meta.get("date_accord", ""),
+                "signataires": meta.get("signataires", []),
+            })
+            ctx["accords_entreprise"] = accords
+            # CCN from accord
+            ccn_accord = meta.get("convention_collective", "")
+            if ccn_accord and not ctx.get("convention_collective"):
+                ctx["convention_collective"] = ccn_accord
+            kb["contexte_entreprise"] = ctx
+        elif fmt == "pv_ag" or doc_type.startswith("pv_ag"):
+            if "pv_ag" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["pv_ag"] = []
+            kb["pieces_justificatives"]["pv_ag"].append(decl.reference)
+        elif fmt == "contrat_service" or doc_type == "contrat_service":
+            if "contrats_service" not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"]["contrats_service"] = []
+            kb["pieces_justificatives"]["contrats_service"].append(decl.reference)
         elif len(decl.cotisations) > 0 or float(decl.masse_salariale_brute) > 0:
             kb["bulletins_paie"].append({
                 "reference": decl.reference,
@@ -313,9 +354,42 @@ def _alimenter_knowledge(result):
                 }
 
         # --- Masse salariale ---
-        if decl.periode and decl.periode.debut and float(decl.masse_salariale_brute) > 0:
-            per = decl.periode.debut.strftime("%Y-%m")
+        if float(decl.masse_salariale_brute) > 0:
+            per = decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "sans_periode"
             kb["masse_salariale"][per] = kb["masse_salariale"].get(per, 0) + float(decl.masse_salariale_brute)
+            kb["masse_salariale_totale"] = kb.get("masse_salariale_totale", 0) + float(decl.masse_salariale_brute)
+
+        # --- Contexte entreprise ---
+        meta = getattr(decl, "metadata", {}) or {}
+        if decl.employeur:
+            ctx = kb.get("contexte_entreprise", {})
+            if decl.employeur.code_naf and not ctx.get("code_naf"):
+                ctx["code_naf"] = decl.employeur.code_naf
+            if decl.employeur.raison_sociale and not ctx.get("raison_sociale"):
+                ctx["raison_sociale"] = decl.employeur.raison_sociale
+            if decl.employeur.effectif and decl.employeur.effectif > ctx.get("effectif_moyen", 0):
+                ctx["effectif_moyen"] = decl.employeur.effectif
+            kb["contexte_entreprise"] = ctx
+
+        # Convention collective detection from employee data
+        for emp in decl.employes:
+            if emp.convention_collective and emp.convention_collective not in ("Employe", "Cadre", "non-cadre"):
+                ctx = kb.get("contexte_entreprise", {})
+                if emp.convention_collective not in (ctx.get("convention_collective", ""), ""):
+                    if not ctx.get("convention_collective"):
+                        ctx["convention_collective"] = emp.convention_collective
+                kb["contexte_entreprise"] = ctx
+
+        # CCN from metadata
+        ccn_from_meta = meta.get("convention_collective", "")
+        if ccn_from_meta and ccn_from_meta not in kb.get("conventions_collectives", []):
+            kb["conventions_collectives"].append(ccn_from_meta)
+
+        # Document type tracking
+        doc_type_key = meta.get("type_document", "") or fmt or "inconnu"
+        if doc_type_key not in kb.get("documents_par_type", {}):
+            kb["documents_par_type"][doc_type_key] = []
+        kb["documents_par_type"][doc_type_key].append(decl.reference)
 
     # --- Anomalies ---
     for f in result.findings:
@@ -338,7 +412,7 @@ def _get_knowledge_summary() -> dict:
     has_multi_docs = len(kb["pieces_justificatives"]) > 1
     nb_periodes = len(kb["periodes_couvertes"])
     nb_cotisations = len(kb["cotisations"])
-    total_masse = sum(kb["masse_salariale"].values())
+    total_masse = kb.get("masse_salariale_totale", 0) or sum(kb["masse_salariale"].values())
     nb_anomalies = len(kb["anomalies_detectees"])
     nb_employeurs = len(kb["employeurs"])
     # Pieces disponibles
@@ -362,6 +436,9 @@ def _get_knowledge_summary() -> dict:
             types_cot[code]["total_patronal"] += cot.get("montant_patronal", 0)
             types_cot[code]["total_salarial"] += cot.get("montant_salarial", 0)
 
+    ctx = kb.get("contexte_entreprise", {})
+    docs_par_type = kb.get("documents_par_type", {})
+
     return {
         "nb_salaries_connus": nb_sal,
         "nb_cadres": nb_cadres,
@@ -384,6 +461,8 @@ def _get_knowledge_summary() -> dict:
         "conventions": kb["conventions_collectives"],
         "derniere_maj": kb["derniere_maj"],
         "types_cotisations": types_cot,
+        "contexte_entreprise": ctx,
+        "documents_par_type": docs_par_type,
     }
 
 
@@ -539,6 +618,16 @@ async def analyser_documents(
                 "accord_interessement": "Accord d interessement",
                 "accord_participation": "Accord de participation",
                 "attestation": "Attestation employeur",
+                "accord_entreprise": "Accord d entreprise",
+                "accord_nao": "Accord NAO (Negociation annuelle obligatoire)",
+                "accord_gpec": "Accord GPEC",
+                "accord_teletravail": "Accord teletravail",
+                "accord_egalite": "Accord egalite professionnelle",
+                "accord_temps_travail": "Accord temps de travail",
+                "pv_ag": "Proces-verbal d assemblee generale",
+                "pv_ago": "PV d assemblee generale ordinaire",
+                "pv_age": "PV d assemblee generale extraordinaire",
+                "contrat_service": "Contrat de prestation de services",
             }
             nature = nature_map.get(doc_type, "")
 
@@ -558,6 +647,12 @@ async def analyser_documents(
                     nature = "Accord d " + fmt
                 elif fmt == "attestation":
                     nature = "Attestation employeur"
+                elif fmt == "accord":
+                    nature = "Accord d entreprise"
+                elif fmt == "pv_ag":
+                    nature = "Proces-verbal d assemblee generale"
+                elif fmt == "contrat_service":
+                    nature = "Contrat de prestation de services"
                 elif fmt == "xml/bordereau":
                     nature = "Bordereau recapitulatif de cotisations (BRC)"
                 elif nb_cots > 0 and nb_sal == 1:
@@ -605,6 +700,25 @@ async def analyser_documents(
                 decl_out["type_contrat"] = decl_meta["type_contrat"]
             if decl_meta.get("remuneration_brute"):
                 decl_out["remuneration_brute"] = decl_meta["remuneration_brute"]
+            # Accord specifics
+            if decl_meta.get("date_accord"):
+                decl_out["date_accord"] = decl_meta["date_accord"]
+            if decl_meta.get("signataires"):
+                decl_out["signataires"] = decl_meta["signataires"]
+            if decl_meta.get("convention_collective"):
+                decl_out["convention_collective"] = decl_meta["convention_collective"]
+            # PV AG specifics
+            if decl_meta.get("date_ag"):
+                decl_out["date_ag"] = decl_meta["date_ag"]
+            if decl_meta.get("nb_resolutions"):
+                decl_out["nb_resolutions"] = decl_meta["nb_resolutions"]
+            if decl_meta.get("resultat_exercice"):
+                decl_out["resultat_exercice"] = decl_meta["resultat_exercice"]
+            # Contrat service specifics
+            if decl_meta.get("prestataire"):
+                decl_out["prestataire"] = decl_meta["prestataire"]
+            if decl_meta.get("objet"):
+                decl_out["objet"] = decl_meta["objet"]
             declarations_out.append(decl_out)
 
         # Auto-generer les ecritures comptables a partir des declarations
@@ -650,8 +764,8 @@ async def analyser_documents(
                         _integration_log.append(f"  -> Facture ignoree: HT={ht} TTC={ttc} (montants nuls)")
                     continue
 
-                if d_type in ("contrat_de_travail", "accord_interessement", "accord_participation", "attestation"):
-                    _integration_log.append(f"  -> Skip (type {d_type}, pas d ecriture)")
+                if d_type in ("contrat_de_travail", "accord_interessement", "accord_participation", "attestation") or d_type.startswith("accord_") or d_type.startswith("pv_ag") or d_type == "contrat_service":
+                    _integration_log.append(f"  -> Skip ecriture (type {d_type})")
                     continue  # pas d ecriture comptable
 
                 # Ecritures de paie
@@ -737,10 +851,13 @@ async def analyser_documents(
             for decl in result.declarations:
                 d_meta = getattr(decl, "metadata", {}) or {}
                 d_type = d_meta.get("type_document", "")
+                _skip_rh_types = ("facture_achat", "facture_vente", "contrat_de_travail", "contrat_service")
+                _skip_rh_prefixes = ("accord_", "pv_ag")
+                _is_rh_skip = d_type in _skip_rh_types or any(d_type.startswith(p) for p in _skip_rh_prefixes)
                 if not decl.employes:
                     # Pas d employe dans la declaration : tenter de creer un salarie generique
                     # si on a la masse salariale (LDP sans detail employe par ex.)
-                    if decl.masse_salariale_brute > 0 and d_type not in ("facture_achat", "facture_vente", "contrat_de_travail"):
+                    if decl.masse_salariale_brute > 0 and not _is_rh_skip:
                         emp_nom = "Salarie"
                         if decl.employeur and decl.employeur.raison_sociale:
                             emp_nom = f"Salarie ({decl.employeur.raison_sociale})"
@@ -946,6 +1063,16 @@ async def analyser_documents(
                     "accord_interessement": "Accord d interessement",
                     "accord_participation": "Accord de participation",
                     "attestation": "Attestation employeur",
+                    "accord_entreprise": "Accord d entreprise",
+                    "accord_nao": "Accord NAO",
+                    "accord_gpec": "Accord GPEC",
+                    "accord_teletravail": "Accord teletravail",
+                    "accord_egalite": "Accord egalite pro",
+                    "accord_temps_travail": "Accord temps de travail",
+                    "pv_ag": "PV assemblee generale",
+                    "pv_ago": "PV AG ordinaire",
+                    "pv_age": "PV AG extraordinaire",
+                    "contrat_service": "Contrat de prestation",
                 }
                 if doc_type == "inconnu" or not doc_type:
                     finfo["statut"] = "non_reconnu"
@@ -2224,6 +2351,8 @@ async def knowledge_base():
         "nb_dsn": len(_biblio_knowledge["declarations_dsn"]),
         "nb_bulletins": len(_biblio_knowledge["bulletins_paie"]),
         "anomalies": _biblio_knowledge["anomalies_detectees"][-20:],
+        "contexte_entreprise": _biblio_knowledge.get("contexte_entreprise", {}),
+        "documents_par_type": _biblio_knowledge.get("documents_par_type", {}),
     }
 
 
@@ -6259,6 +6388,22 @@ var emps=kb.employeurs||{};var empKeys=Object.keys(emps);
 if(empKeys.length){h+="<h3 style='margin-top:16px'>Employeurs identifies ("+empKeys.length+")</h3><table><tr><th>SIRET</th><th>Raison sociale</th><th>NAF</th><th class='num'>Effectif</th></tr>";
 for(var i=0;i<empKeys.length;i++){var emp=emps[empKeys[i]];h+="<tr><td>"+emp.siret+"</td><td>"+emp.raison_sociale+"</td><td>"+(emp.code_naf||"-")+"</td><td class='num'>"+(emp.effectif||"-")+"</td></tr>";}
 h+="</table>";}
+var ctx=kb.contexte_entreprise||{};
+if(ctx.convention_collective||ctx.code_naf||ctx.raison_sociale||ctx.effectif_moyen){
+h+="<h3 style='margin-top:16px'>Contexte entreprise</h3><div style='display:flex;gap:12px;flex-wrap:wrap'>";
+if(ctx.raison_sociale)h+="<span class='badge badge-blue'>"+ctx.raison_sociale+"</span>";
+if(ctx.code_naf)h+="<span class='badge badge-purple'>NAF: "+ctx.code_naf+"</span>";
+if(ctx.convention_collective)h+="<span class='badge badge-teal'>CCN: "+ctx.convention_collective+"</span>";
+if(ctx.effectif_moyen>0)h+="<span class='badge badge-green'>Effectif: "+ctx.effectif_moyen+"</span>";
+h+="</div>";}
+var accords=ctx.accords_entreprise||[];if(accords.length){
+h+="<h3 style='margin-top:16px'>Accords entreprise ("+accords.length+")</h3><table><tr><th>Accord</th><th>Type</th><th>Date</th></tr>";
+for(var ai=0;ai<accords.length;ai++){var ac=accords[ai];h+="<tr><td>"+ac.reference+"</td><td><span class='badge badge-teal'>"+ac.type.replace(/_/g," ")+"</span></td><td>"+(ac.date||"-")+"</td></tr>";}
+h+="</table>";}
+var dpt=kb.documents_par_type||{};var dptKeys=Object.keys(dpt);
+if(dptKeys.length){h+="<h3 style='margin-top:16px'>Documents par type</h3><div style='display:flex;gap:8px;flex-wrap:wrap'>";
+for(var di=0;di<dptKeys.length;di++){h+="<span class='badge badge-blue'>"+dptKeys[di].replace(/_/g," ")+" ("+dpt[dptKeys[di]].length+")</span>";}
+h+="</div>";}
 h+="<p style='font-size:.78em;color:var(--tx2);margin-top:12px'>Derniere mise a jour : "+s.derniere_maj+"</p>";
 el.innerHTML=h;}).catch(function(){});}
 function loadBiblio(){
@@ -6661,6 +6806,9 @@ else if(nature.indexOf("Facture")>=0)badgeCls="badge-blue";
 else if(nature.indexOf("Contrat")>=0)badgeCls="badge-purple";
 else if(nature.indexOf("Attestation")>=0)badgeCls="badge-amber";
 else if(nature.indexOf("interessement")>=0||nature.indexOf("participation")>=0)badgeCls="badge-teal";
+else if(nature.indexOf("Accord")>=0||nature.indexOf("NAO")>=0||nature.indexOf("GPEC")>=0)badgeCls="badge-teal";
+else if(nature.indexOf("assemblee")>=0||nature.indexOf("PV")>=0)badgeCls="badge-purple";
+else if(nature.indexOf("prestation")>=0)badgeCls="badge-amber";
 var masse=(d.masse_salariale_brute||0);
 var extraInfo="";
 if(d.net_a_payer)extraInfo+=" | Net: "+d.net_a_payer.toFixed(2)+" EUR";
@@ -6671,6 +6819,14 @@ if(d.montant_ht)extraInfo=" | HT: "+d.montant_ht.toFixed(2)+" | TVA: "+(d.montan
 if(d.tiers)extraInfo+=" | Tiers: "+d.tiers;
 if(d.type_contrat)extraInfo=" | Type: "+d.type_contrat;
 if(d.remuneration_brute)extraInfo+=" | Remun: "+d.remuneration_brute.toFixed(2)+" EUR";
+if(d.convention_collective)extraInfo+=" | CCN: "+d.convention_collective;
+if(d.date_accord)extraInfo+=" | Date: "+d.date_accord;
+if(d.signataires&&d.signataires.length)extraInfo+=" | Signataires: "+d.signataires.join(", ");
+if(d.date_ag)extraInfo+=" | AG du: "+d.date_ag;
+if(d.nb_resolutions)extraInfo+=" | "+d.nb_resolutions+" resolution(s)";
+if(d.resultat_exercice)extraInfo+=" | Resultat: "+d.resultat_exercice.toFixed(2)+" EUR";
+if(d.prestataire)extraInfo+=" | Prestataire: "+d.prestataire;
+if(d.objet)extraInfo+=" | Objet: "+d.objet;
 h+="<tr><td style='font-size:.84em'>"+fname+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td><td class='num'>"+(masse>0?masse.toFixed(2)+" EUR":"-")+"</td></tr>";
 if(fstat==="non_reconnu"){extraInfo+=" | <span style='color:var(--r)'>Type de document non identifie. Extraction en mode generique.</span>";}
 if(extraInfo){h+="<tr><td colspan='7' style='font-size:.82em;color:var(--tx2);padding:2px 8px;border-top:none'>"+extraInfo+"</td></tr>";}
@@ -6679,7 +6835,9 @@ if(data.declarations.length>1){var totMasse=0;var totSal=0;for(var j=0;j<data.de
 h+="<tr style='font-weight:bold;background:var(--pl)'><td colspan='4'>TOTAL</td><td class='num'>"+totSal+"</td><td></td><td class='num'>"+totMasse.toFixed(2)+" EUR</td></tr>";}
 h+="</table>";
 for(var k=0;k<data.declarations.length;k++){var dk=data.declarations[k];if(dk.s89_total_brut&&dk.masse_salariale_brute){var ecS89=Math.abs(dk.s89_total_brut-dk.masse_salariale_brute);if(ecS89>10){h+="<div class='al warn' style='margin-top:6px'><span class='ai'>&#9888;</span><span><strong>Ecart S89 :</strong> Total brut declare (S89) = "+dk.s89_total_brut.toFixed(2)+" EUR vs masse salariale calculee = "+dk.masse_salariale_brute.toFixed(2)+" EUR (ecart: "+ecS89.toFixed(2)+" EUR)</span></div>";}}}
-if(data.knowledge_summary){var ks=data.knowledge_summary;h+="<div class='al info' style='margin-top:10px'><span class='ai'>&#128218;</span><span><strong>Donnees integrees :</strong> "+ks.nb_salaries_connus+" salarie(s), "+ks.nb_cotisations_analysees+" cotisation(s), masse salariale "+ks.total_masse_salariale.toFixed(2)+" EUR"+(ks.nb_contrats_rh>0?" | "+ks.nb_contrats_rh+" contrat(s) RH cree(s)":"")+"</span></div>";}
+if(data.knowledge_summary){var ks=data.knowledge_summary;h+="<div class='al info' style='margin-top:10px'><span class='ai'>&#128218;</span><span><strong>Donnees integrees :</strong> "+ks.nb_salaries_connus+" salarie(s), "+ks.nb_cotisations_analysees+" cotisation(s), masse salariale "+ks.total_masse_salariale.toFixed(2)+" EUR"+(ks.nb_contrats_rh>0?" | "+ks.nb_contrats_rh+" contrat(s) RH cree(s)":"")+"</span></div>";
+var kctx=ks.contexte_entreprise||{};if(kctx.convention_collective||kctx.code_naf){h+="<div class='al info' style='margin-top:6px'><span class='ai'>&#127970;</span><span><strong>Contexte :</strong>"+(kctx.convention_collective?" CCN: "+kctx.convention_collective:"")+(kctx.code_naf?" | NAF: "+kctx.code_naf:"")+(kctx.effectif_moyen>0?" | Effectif: "+kctx.effectif_moyen:"")+"</span></div>";}
+var kaccords=(kctx.accords_entreprise||[]);if(kaccords.length>0){h+="<div class='al info' style='margin-top:6px'><span class='ai'>&#128220;</span><span><strong>"+kaccords.length+" accord(s) entreprise</strong> detecte(s) et integre(s) a la base de connaissances.</span></div>";}}
 fl.innerHTML=h;}
 
 function showIntegrationResults(data){

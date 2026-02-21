@@ -99,6 +99,50 @@ _KW_ATTESTATION = [
     "recu pour solde", "reçu pour solde",
 ]
 
+_KW_ACCORD = [
+    "accord d entreprise", "accord d'entreprise",
+    "accord collectif", "accord de branche",
+    "negociation annuelle", "négociation annuelle",
+    "nao", "accord salarial",
+    "accord de methode", "accord de méthode",
+    "accord egalite", "accord égalité",
+    "accord temps de travail", "amenagement du temps",
+    "accord teletravail", "accord télétravail",
+    "accord seniors", "accord gpec", "gpec",
+    "qualite de vie au travail", "qvt", "qvct",
+    "droit a la deconnexion", "penibilite", "pénibilité",
+    "protocole d accord", "protocole d'accord",
+    "avenant a l accord", "avenant à l'accord",
+]
+
+_KW_PV_AG = [
+    "proces verbal", "procès verbal", "procès-verbal",
+    "assemblee generale", "assemblée générale",
+    "assemblee extraordinaire", "assemblée extraordinaire",
+    "assemblee ordinaire", "assemblée ordinaire",
+    "deliberation", "délibération",
+    "resolution", "résolution",
+    "quorum", "vote", "unanimite", "unanimité",
+    "ordre du jour", "convocation",
+    "approbation des comptes", "affectation du resultat",
+    "nomination", "revocation", "révocation",
+    "commissaire aux comptes",
+]
+
+_KW_CONTRAT_SERVICE = [
+    "contrat de prestation", "contrat de service",
+    "prestation de services", "prestataire",
+    "cahier des charges", "bon de commande",
+    "sous-traitance", "sous traitance",
+    "obligation de resultat", "obligation de résultat",
+    "obligation de moyens",
+    "penalites de retard", "pénalités de retard",
+    "clause de confidentialite", "clause de confidentialité",
+    "clause de non-concurrence",
+    "conditions generales", "conditions générales",
+    "cgv", "cgu",
+]
+
 
 # ============================================================
 # EXTRACTION REGEX PATTERNS
@@ -317,8 +361,13 @@ class PDFParser(BaseParser):
             return self._parser_interessement(texte_complet, document)
         elif doc_type == "attestation":
             return self._parser_attestation(texte_complet, document)
+        elif doc_type == "accord":
+            return self._parser_accord(texte_complet, document)
+        elif doc_type == "pv_ag":
+            return self._parser_pv_ag(texte_complet, document)
+        elif doc_type == "contrat_service":
+            return self._parser_contrat_service(texte_complet, document)
         else:
-            # Fallback: try bulletin-style extraction
             return self._parser_generique(texte_complet, tableaux, document)
 
     def _detecter_type_document(self, texte: str, filename: str = "") -> str:
@@ -333,6 +382,9 @@ class PDFParser(BaseParser):
             "livre_de_paie": 0,
             "interessement": 0,
             "attestation": 0,
+            "accord": 0,
+            "pv_ag": 0,
+            "contrat_service": 0,
         }
 
         # Content-based scoring
@@ -342,15 +394,21 @@ class PDFParser(BaseParser):
         scores["livre_de_paie"] = _count_keywords(texte_lower, _KW_LDP)
         scores["interessement"] = _count_keywords(texte_lower, _KW_INTERESSEMENT)
         scores["attestation"] = _count_keywords(texte_lower, _KW_ATTESTATION)
+        scores["accord"] = _count_keywords(texte_lower, _KW_ACCORD)
+        scores["pv_ag"] = _count_keywords(texte_lower, _KW_PV_AG)
+        scores["contrat_service"] = _count_keywords(texte_lower, _KW_CONTRAT_SERVICE)
 
         # Filename hints (strong boost)
         fname_hints = {
             "bulletin": ["bulletin", "paie", "salaire", "fiche_paie", "bp_", "bul_"],
             "facture": ["facture", "invoice", "fac_", "fact_"],
-            "contrat": ["contrat", "cdi", "cdd", "embauche", "avenant"],
+            "contrat": ["contrat_travail", "cdi", "cdd", "embauche"],
             "livre_de_paie": ["livre_de_paie", "ldp", "recapitulatif", "recap"],
             "interessement": ["interessement", "participation", "epargne", "pee"],
             "attestation": ["attestation", "certificat", "solde"],
+            "accord": ["accord", "nao", "gpec", "qvt", "negociation"],
+            "pv_ag": ["pv_ag", "proces_verbal", "assemblee", "ag_"],
+            "contrat_service": ["prestation", "sous_traitance", "cgv"],
         }
         for doc_type, hints in fname_hints.items():
             if any(h in fname_lower for h in hints):
@@ -816,6 +874,177 @@ class PDFParser(BaseParser):
             effectif_declare=len(employes),
             source_document_id=doc_id,
             metadata={"type_document": "inconnu"},
+        )
+        return [decl]
+
+    # ============================================================
+    # ACCORD D'ENTREPRISE
+    # ============================================================
+
+    def _parser_accord(self, texte: str, document: Document) -> list[Declaration]:
+        """Parse un accord d'entreprise (NAO, GPEC, QVT, teletravail, etc.)."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        # Extract accord specifics
+        texte_lower = texte.lower()
+        accord_type = "accord_entreprise"
+        if "nao" in texte_lower or "negociation annuelle" in texte_lower:
+            accord_type = "accord_nao"
+        elif "gpec" in texte_lower or "gestion previsionnelle" in texte_lower:
+            accord_type = "accord_gpec"
+        elif "teletravail" in texte_lower or "télétravail" in texte_lower:
+            accord_type = "accord_teletravail"
+        elif "egalite" in texte_lower or "égalité" in texte_lower:
+            accord_type = "accord_egalite"
+        elif "temps de travail" in texte_lower or "amenagement" in texte_lower:
+            accord_type = "accord_temps_travail"
+        elif "interessement" in texte_lower or "intéressement" in texte_lower:
+            accord_type = "accord_interessement"
+        elif "participation" in texte_lower:
+            accord_type = "accord_participation"
+
+        # Extract convention collective reference
+        ccn = ""
+        m = re.search(r"(?:convention collective|ccn|idcc)\s*[:\s]*([^\n,;]+)", texte, re.IGNORECASE)
+        if m:
+            ccn = m.group(1).strip()[:100]
+
+        # Extract date
+        date_accord = ""
+        m = re.search(r"(?:fait le|signe le|en date du|le)\s+(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+        if m:
+            date_accord = m.group(1)
+
+        # Extract signataires
+        signataires = []
+        for m in re.finditer(r"(?:pour|signe par|represente par)\s+([A-Z\u00C0-\u00FF][A-Za-z\u00C0-\u00FF\s-]+)", texte):
+            sig = m.group(1).strip()[:60]
+            if sig and sig not in signataires:
+                signataires.append(sig)
+
+        metadata = {
+            "type_document": accord_type,
+            "convention_collective": ccn,
+            "date_accord": date_accord,
+            "signataires": signataires,
+        }
+
+        decl = Declaration(
+            type_declaration="accord",
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # PV D'ASSEMBLEE GENERALE
+    # ============================================================
+
+    def _parser_pv_ag(self, texte: str, document: Document) -> list[Declaration]:
+        """Parse un proces-verbal d'assemblee generale."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        texte_lower = texte.lower()
+        ag_type = "pv_ag"
+        if "extraordinaire" in texte_lower:
+            ag_type = "pv_age"
+        elif "ordinaire" in texte_lower:
+            ag_type = "pv_ago"
+
+        # Extract date
+        date_ag = ""
+        m = re.search(r"(?:tenue le|en date du|du)\s+(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+        if m:
+            date_ag = m.group(1)
+
+        # Extract resolutions
+        resolutions = []
+        for m in re.finditer(r"(?:resolution|résolution)\s*(?:n[°o]?\s*)?(\d+)", texte, re.IGNORECASE):
+            resolutions.append(int(m.group(1)))
+
+        # Extract key financial info
+        resultat = Decimal("0")
+        m = re.search(r"(?:resultat|résultat|benefice|bénéfice|perte)\s*(?:de l exercice|net)?\s*[:\s]*(-?[\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+        if m:
+            resultat = _parse_montant_local(m.group(1))
+
+        dividendes = Decimal("0")
+        m = re.search(r"(?:dividende|distribution)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+        if m:
+            dividendes = _parse_montant_local(m.group(1))
+
+        metadata = {
+            "type_document": ag_type,
+            "date_ag": date_ag,
+            "nb_resolutions": len(resolutions),
+            "resolutions": resolutions[:20],
+            "resultat_exercice": float(resultat),
+            "dividendes": float(dividendes),
+        }
+
+        decl = Declaration(
+            type_declaration="pv_ag",
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # CONTRAT DE PRESTATION / SERVICE
+    # ============================================================
+
+    def _parser_contrat_service(self, texte: str, document: Document) -> list[Declaration]:
+        """Parse un contrat de prestation de services."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        # Extract prestataire info
+        prestataire = ""
+        m = re.search(r"(?:prestataire|fournisseur|sous.?traitant)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+        if m:
+            prestataire = m.group(1).strip()[:100]
+
+        # Extract montant
+        montant = Decimal("0")
+        m = re.search(r"(?:montant|prix|forfait|cout|coût)\s*(?:global|total|ht)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+        if m:
+            montant = _parse_montant_local(m.group(1))
+
+        # Extract duree
+        duree = ""
+        m = re.search(r"(?:duree|durée|pour une duree|pour une durée)\s*(?:de|d)?\s*([^\n,;.]+)", texte, re.IGNORECASE)
+        if m:
+            duree = m.group(1).strip()[:60]
+
+        # Extract objet
+        objet = ""
+        m = re.search(r"(?:objet|a pour objet)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+        if m:
+            objet = m.group(1).strip()[:200]
+
+        metadata = {
+            "type_document": "contrat_service",
+            "prestataire": prestataire,
+            "montant_ht": float(montant),
+            "duree": duree,
+            "objet": objet,
+        }
+
+        decl = Declaration(
+            type_declaration="contrat_service",
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
         )
         return [decl]
 
