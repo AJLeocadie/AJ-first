@@ -147,6 +147,14 @@ class DSNParser(BaseParser):
                     total += c.base_brute
             declaration.masse_salariale_brute = total
 
+        # S89 - Total versement OPS (totaux declares)
+        s89_totaux = self._extraire_totaux_s89(donnees)
+        if s89_totaux:
+            declaration.reference = declaration.reference or ""
+            declaration.metadata = getattr(declaration, "metadata", {}) or {}
+            declaration.metadata["s89_total_cotisations"] = float(s89_totaux.get("total_cotisations", 0))
+            declaration.metadata["s89_total_brut"] = float(s89_totaux.get("total_brut", 0))
+
         return [declaration]
 
     def _extraire_employeur_texte(self, donnees: dict, doc_id: str) -> Employeur | None:
@@ -233,6 +241,19 @@ class DSNParser(BaseParser):
                     cotisations.append(c)
 
         return cotisations
+
+    def _extraire_totaux_s89(self, donnees: dict) -> dict | None:
+        """Extrait les totaux declares dans le bloc S89 (Total versement OPS)."""
+        # S89.G00.89.001 = Montant total des cotisations
+        # S89.G00.89.002 = Montant total du brut
+        total_cot_str = self._get_val(donnees, "S89.G00.89.001")
+        total_brut_str = self._get_val(donnees, "S89.G00.89.002")
+        if total_cot_str or total_brut_str:
+            return {
+                "total_cotisations": float(parser_montant(total_cot_str)) if total_cot_str else 0,
+                "total_brut": float(parser_montant(total_brut_str)) if total_brut_str else 0,
+            }
+        return None
 
     def _extraire_periode_texte(self, donnees: dict) -> DateRange | None:
         """Extrait la periode de la declaration."""

@@ -937,6 +937,71 @@ class ConsistencyChecker(BaseAnalyzer):
                             ))
                             break  # one finding per type
 
+        # -- Verification S89 : totaux declares vs totaux calcules --
+        meta = getattr(decl, "metadata", {}) or {}
+        s89_cot = meta.get("s89_total_cotisations")
+        s89_brut = meta.get("s89_total_brut")
+
+        if s89_cot is not None and total_patronal_global > 0:
+            s89_cot_dec = Decimal(str(s89_cot))
+            ecart_cot = abs(s89_cot_dec - total_patronal_global)
+            if ecart_cot > Decimal("1.00"):
+                ecart_pct = ecart_relatif(s89_cot_dec, total_patronal_global)
+                findings.append(Finding(
+                    categorie=FindingCategory.INCOHERENCE,
+                    severite=Severity.HAUTE if ecart_pct > Decimal("0.05") else Severity.MOYENNE,
+                    titre=f"Ecart total S89 cotisations vs somme individuelle ({doc_label})",
+                    description=(
+                        f"Total cotisations declare (S89) : {formater_montant(s89_cot_dec)}. "
+                        f"Somme des cotisations individuelles (S81) : {formater_montant(total_patronal_global)}. "
+                        f"Ecart : {formater_montant(ecart_cot)} ({ecart_pct:.2%})."
+                    ),
+                    valeur_constatee=str(s89_cot_dec),
+                    valeur_attendue=str(total_patronal_global),
+                    montant_impact=ecart_cot,
+                    score_risque=70,
+                    recommandation=(
+                        "Verifier la coherence entre le total de cotisations "
+                        "du bloc S89 et la somme des cotisations individuelles S81."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[decl.source_document_id],
+                    details_technique=_details_technique(
+                        annee=annee, periode=per, document=doc_label,
+                        rubrique="S89 vs S81 totaux cotisations",
+                    ),
+                ))
+
+        if s89_brut is not None and decl.masse_salariale_brute > 0:
+            s89_brut_dec = Decimal(str(s89_brut))
+            ecart_brut = abs(s89_brut_dec - decl.masse_salariale_brute)
+            if ecart_brut > Decimal("10.00"):
+                ecart_pct = ecart_relatif(s89_brut_dec, decl.masse_salariale_brute)
+                findings.append(Finding(
+                    categorie=FindingCategory.INCOHERENCE,
+                    severite=Severity.HAUTE if ecart_pct > Decimal("0.05") else Severity.MOYENNE,
+                    titre=f"Ecart total S89 brut vs masse salariale ({doc_label})",
+                    description=(
+                        f"Total brut declare (S89) : {formater_montant(s89_brut_dec)}. "
+                        f"Masse salariale calculee : {formater_montant(decl.masse_salariale_brute)}. "
+                        f"Ecart : {formater_montant(ecart_brut)} ({ecart_pct:.2%})."
+                    ),
+                    valeur_constatee=str(s89_brut_dec),
+                    valeur_attendue=str(decl.masse_salariale_brute),
+                    montant_impact=ecart_brut,
+                    score_risque=70,
+                    recommandation=(
+                        "Verifier la coherence entre le total brut declare "
+                        "dans le bloc S89 et la masse salariale calculee."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[decl.source_document_id],
+                    details_technique=_details_technique(
+                        annee=annee, periode=per, document=doc_label,
+                        rubrique="S89 vs masse salariale brute",
+                    ),
+                ))
+
         return findings
 
     # =================================================================

@@ -203,12 +203,15 @@ def _alimenter_knowledge(result):
         # --- Type de document ---
         fmt = (decl.type_declaration or "").upper()
         if fmt in ("DSN", "DSN/XML"):
+            meta = getattr(decl, "metadata", {}) or {}
             kb["declarations_dsn"].append({
                 "reference": decl.reference,
                 "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
                 "nb_salaries": len(decl.employes),
                 "nb_cotisations": len(decl.cotisations),
                 "masse_salariale": float(decl.masse_salariale_brute),
+                "s89_total_cotisations": meta.get("s89_total_cotisations", 0),
+                "s89_total_brut": meta.get("s89_total_brut", 0),
                 "date_import": datetime.now().isoformat(),
             })
             if "dsn" not in kb["pieces_justificatives"]:
@@ -460,21 +463,37 @@ async def analyser_documents(
             fmt = (decl.type_declaration or "").upper()
             nb_cots = len(decl.cotisations)
             nb_sal = len(decl.employes)
+            # Use filename hint for better detection
+            fname = ""
+            if idx_f < len(fichiers):
+                fname = (fichiers[idx_f].filename or "").lower()
+            fname_hint_bulletin = any(kw in fname for kw in ["bulletin", "paie", "salaire", "fiche_paie", "bp_", "bul_"])
+            fname_hint_dsn = any(kw in fname for kw in ["dsn", "declaration_sociale"])
+            fname_hint_ldp = any(kw in fname for kw in ["livre_de_paie", "ldp", "recapitulatif", "recap"])
             nature = "Document"
-            if fmt in ("DSN", "DSN/XML"):
+            if fmt in ("DSN", "DSN/XML") or fname_hint_dsn:
                 nature = "Declaration sociale nominative (DSN)"
-            elif nb_cots > 0 and nb_sal == 1:
+            elif (nb_cots > 0 and nb_sal == 1) or (fname_hint_bulletin and nb_sal <= 1):
                 nature = "Bulletin de paie"
             elif nb_cots > 0 and nb_sal > 1:
+                nature = "Livre de paie / Recapitulatif cotisations"
+            elif fname_hint_ldp:
                 nature = "Livre de paie / Recapitulatif cotisations"
             elif nb_sal > 0 and nb_cots == 0:
                 nature = "Liste du personnel / Registre"
             elif float(decl.masse_salariale_brute) > 0:
-                nature = "Recapitulatif de paie"
+                if nb_sal == 1 or fname_hint_bulletin:
+                    nature = "Bulletin de paie"
+                else:
+                    nature = "Recapitulatif de paie"
             elif fmt == "XML/BORDEREAU":
                 nature = "Bordereau recapitulatif de cotisations (BRC)"
             elif fmt in ("PDF", "CSV", "EXCEL", "XML"):
-                nature = "Document comptable / social"
+                if fname_hint_bulletin:
+                    nature = "Bulletin de paie"
+                else:
+                    nature = "Document comptable / social"
+            decl_meta = getattr(decl, "metadata", {}) or {}
             declarations_out.append({
                 "type": decl.type_declaration,
                 "reference": decl.reference,
@@ -485,6 +504,8 @@ async def analyser_documents(
                 "effectif_declare": decl.effectif_declare,
                 "nature": nature,
                 "nb_cotisations": nb_cots,
+                "s89_total_cotisations": decl_meta.get("s89_total_cotisations"),
+                "s89_total_brut": decl_meta.get("s89_total_brut"),
                 "nb_salaries": nb_sal,
             })
 
@@ -520,6 +541,42 @@ async def analyser_documents(
                         )
                     except Exception:
                         pass
+        except Exception:
+            pass
+
+        # Auto-integrer les salaries dans le module RH
+        try:
+            for decl in result.declarations:
+                for emp in decl.employes:
+                    # Verifier si le salarie existe deja dans RH
+                    existing = [c for c in _rh_contrats if
+                                c.get("nom_salarie", "").lower() == (emp.nom or "").lower() and
+                                c.get("prenom_salarie", "").lower() == (emp.prenom or "").lower()]
+                    if not existing and emp.nom:
+                        cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                        brut = float(sum(c.base_brute for c in cots)) if cots else 0
+                        is_cadre = emp.statut and "cadre" in emp.statut.lower()
+                        date_debut_str = decl.periode.debut.strftime("%Y-%m-%d") if decl.periode and decl.periode.debut else date.today().strftime("%Y-%m-%d")
+                        contrat = {
+                            "id": str(uuid.uuid4())[:8],
+                            "type_contrat": "CDI",
+                            "nom_salarie": emp.nom,
+                            "prenom_salarie": emp.prenom,
+                            "poste": "Cadre" if is_cadre else "Employe",
+                            "date_debut": date_debut_str,
+                            "date_fin": "",
+                            "salaire_brut": str(round(brut, 2)) if brut > 0 else "0",
+                            "temps_travail": "temps_complet",
+                            "duree_hebdo": "35",
+                            "convention_collective": "",
+                            "periode_essai_jours": "0",
+                            "motif_cdd": "",
+                            "statut": "actif",
+                            "nir": emp.nir or "",
+                            "source": "analyse_automatique",
+                            "date_creation": datetime.now().isoformat(),
+                        }
+                        _rh_contrats.append(contrat)
         except Exception:
             pass
 
@@ -4671,6 +4728,7 @@ APP_HTML += """
 <script>
 /* === INIT === */
 var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration"};
+function safeJson(r){if(!r.ok)throw new Error("Erreur serveur ("+r.status+")");return r.json();}
 document.getElementById("topbar-date").textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
 
 /* === MOBILE SIDEBAR === */
@@ -4774,11 +4832,11 @@ document.getElementById("az-reco").innerHTML=rh||"<p style='color:var(--tx2)'>Au
 if(data.html_report){document.getElementById("az-html-card").style.display="block";document.getElementById("az-html-frame").srcdoc=data.html_report;}else{document.getElementById("az-html-card").style.display="none";}
 showFileInterpretation(data);showAuditChecks(data);
 document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
-function resetAz(){fichiers=[];renderF();document.getElementById("res-analyse").style.display="none";}
+function resetAz(){fichiers=[];analysisData=null;renderF();document.getElementById("res-analyse").style.display="none";document.getElementById("az-audit-card").style.display="none";document.getElementById("btn-az").disabled=false;toast("Pret pour une nouvelle analyse.","ok");}
 
 /* === BIBLIOTHEQUE === */
 function loadKnowledge(){
-fetch("/api/bibliotheque/knowledge").then(function(r){return r.json();}).then(function(kb){
+fetch("/api/bibliotheque/knowledge").then(safeJson).then(function(kb){
 var el=document.getElementById("biblio-knowledge");if(!el)return;
 var s=kb.summary||{};
 if(!s.derniere_maj){el.innerHTML="<div class='al info'><span class='ai'>&#128218;</span><span>Aucune donnee. Importez des documents via Import / Analyse pour alimenter la base.</span></div>";return;}
@@ -4802,7 +4860,7 @@ h+="</table>";}
 h+="<p style='font-size:.78em;color:var(--tx2);margin-top:12px'>Derniere mise a jour : "+s.derniere_maj+"</p>";
 el.innerHTML=h;}).catch(function(){});}
 function loadBiblio(){
-fetch("/api/documents/bibliotheque").then(function(r){return r.json();}).then(function(docs){
+fetch("/api/documents/bibliotheque").then(safeJson).then(function(docs){
 var el=document.getElementById("biblio-list");
 if(!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
 var h="";for(var i=0;i<docs.length;i++){var d=docs[i];var de=d.donnees_extraites||{};
@@ -4875,7 +4933,7 @@ if(statut==="partiellement_paye"){fd.append("montant_paye",document.getElementBy
 fetch("/api/factures/statut",{method:"POST",body:fd}).then(function(r){if(!r.ok)throw new Error("Erreur");return r.json();}).then(function(){toast("Statut mis a jour.","ok");loadPayStatuses();}).catch(function(e){toast(e.message);});}
 
 function loadPayStatuses(){
-fetch("/api/factures/statuts").then(function(r){return r.json();}).then(function(list){
+fetch("/api/factures/statuts").then(safeJson).then(function(list){
 var el=document.getElementById("pay-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun statut enregistre.</p>";return;}
 var h="<table><tr><th>Facture</th><th>Statut</th><th>Montant paye</th><th>Date paiement</th><th>Reference</th></tr>";
 for(var i=0;i<list.length;i++){var s=list[i];var cls=s.statut==="paye"?"badge-paye":(s.statut==="en_retard"?"badge-red":(s.statut==="partiellement_paye"?"badge-amber":"badge-impaye"));
@@ -4987,7 +5045,7 @@ toast("Fichier DSN telecharge.","ok");
 }
 
 function loadDSNBrouillons(){
-fetch("/api/dsn/brouillons").then(function(r){return r.json();}).then(function(list){
+fetch("/api/dsn/brouillons").then(safeJson).then(function(list){
 var el=document.getElementById("dsn-brouillons");
 if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun brouillon.</p>";document.getElementById("dsn-brouillons-card").style.display="none";return;}
 document.getElementById("dsn-brouillons-card").style.display="block";
@@ -5007,7 +5065,7 @@ loadCompta();}
 function loadCompta(){
 var dd=document.getElementById("gl-dd").value;var df=document.getElementById("gl-df").value;
 
-fetch("/api/comptabilite/journal").then(function(r){return r.json();}).then(function(j){
+fetch("/api/comptabilite/journal").then(safeJson).then(function(j){
 var h="";if(!j.length)h="<p style='color:var(--tx2)'>Aucune ecriture.</p>";
 for(var i=0;i<j.length;i++){var e=j[i];
 h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'>";
@@ -5017,28 +5075,28 @@ h+="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th clas
 for(var k=0;k<e.lignes.length;k++){var l=e.lignes[k];var sj=l.libelle.indexOf("[SANS JUSTIFICATIF]")>=0;h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td>"+l.libelle+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}
 h+="</table></div>";}document.getElementById("ct-journal-c").innerHTML=h;}).catch(function(){});
 
-fetch("/api/comptabilite/balance").then(function(r){return r.json();}).then(function(b){
+fetch("/api/comptabilite/balance").then(safeJson).then(function(b){
 var h="";if(!b.length)h="<p style='color:var(--tx2)'>Aucune donnee.</p>";
 else{h="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th class='num'>Credit</th><th class='num'>Solde D</th><th class='num'>Solde C</th></tr>";
 for(var i=0;i<b.length;i++){var r2=b[i];h+="<tr><td>"+r2.compte+"</td><td>"+r2.libelle+"</td><td class='num'>"+r2.total_debit.toFixed(2)+"</td><td class='num'>"+r2.total_credit.toFixed(2)+"</td><td class='num'>"+r2.solde_debiteur.toFixed(2)+"</td><td class='num'>"+r2.solde_crediteur.toFixed(2)+"</td></tr>";}h+="</table>";}
 document.getElementById("ct-balance-c").innerHTML=h;}).catch(function(){});
 
 var glUrl="/api/comptabilite/grand-livre-detail";if(dd)glUrl+="?date_debut="+dd+(df?"&date_fin="+df:"");
-fetch(glUrl).then(function(r){return r.json();}).then(function(gl){
+fetch(glUrl).then(safeJson).then(function(gl){
 var h="";if(!gl.length)h="<p style='color:var(--tx2)'>Aucune donnee.</p>";
 for(var i=0;i<gl.length;i++){var c=gl[i];h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'><strong>"+c.compte+" - "+(c.libelle||"")+"</strong>";
 var mvts=c.mouvements||[];if(mvts.length){h+="<table style='margin-top:6px'><tr><th>Date</th><th>Libelle</th><th class='num'>Debit</th><th class='num'>Credit</th></tr>";
 for(var k=0;k<mvts.length;k++){var m=mvts[k];var sj=m.sans_justificatif;h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+(m.date||"")+"</td><td>"+(m.libelle||"")+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+(m.debit||0).toFixed(2)+"</td><td class='num'>"+(m.credit||0).toFixed(2)+"</td></tr>";}
 h+="</table>";}h+="</div>";}document.getElementById("ct-grandlivre-c").innerHTML=h;}).catch(function(){});
 
-fetch("/api/comptabilite/compte-resultat").then(function(r){return r.json();}).then(function(cr){
+fetch("/api/comptabilite/compte-resultat").then(safeJson).then(function(cr){
 var clr=cr.resultat_net>=0?"var(--g)":"var(--r)";var bg=cr.resultat_net>=0?"var(--gl)":"var(--rl)";
 var h="<div class='g2'><div class='card' style='text-align:center'><h2>Charges</h2><div style='font-size:1.4em;font-weight:800;color:var(--r)'>"+cr.charges.total.toFixed(2)+" EUR</div></div>";
 h+="<div class='card' style='text-align:center'><h2>Produits</h2><div style='font-size:1.4em;font-weight:800;color:var(--g)'>"+cr.produits.total.toFixed(2)+" EUR</div></div></div>";
 h+="<div class='sc' style='margin-top:14px;background:"+bg+"'><div class='val' style='color:"+clr+"'>"+cr.resultat_net.toFixed(2)+" EUR</div><div class='lab'>Resultat net</div></div>";
 document.getElementById("ct-resultat-c").innerHTML=h;}).catch(function(){});
 
-fetch("/api/comptabilite/bilan").then(function(r){return r.json();}).then(function(bi){
+fetch("/api/comptabilite/bilan").then(safeJson).then(function(bi){
 var a=bi.actif,p=bi.passif;
 var h="<div class='g2'><div><h3 style='margin-bottom:8px;color:var(--p)'>Actif</h3><table><tr><th>Poste</th><th class='num'>Montant</th></tr>";
 h+="<tr><td>Immobilisations</td><td class='num'>"+a.immobilisations.toFixed(2)+"</td></tr><tr><td>Stocks</td><td class='num'>"+a.stocks.toFixed(2)+"</td></tr>";
@@ -5050,13 +5108,13 @@ h+="<tr><td>Dettes exploitation</td><td class='num'>"+p.dettes_exploitation.toFi
 h+="<tr style='font-weight:bold;background:var(--pl)'><td>TOTAL PASSIF</td><td class='num'>"+p.total.toFixed(2)+"</td></tr></table></div></div>";
 document.getElementById("ct-bilan-c").innerHTML=h;}).catch(function(){});
 
-(function(){var now=new Date();fetch("/api/comptabilite/declaration-tva?mois="+(now.getMonth()+1)+"&annee="+now.getFullYear()).then(function(r){return r.json();}).then(function(t){
+(function(){var now=new Date();fetch("/api/comptabilite/declaration-tva?mois="+(now.getMonth()+1)+"&annee="+now.getFullYear()).then(safeJson).then(function(t){
 var h="<div class='g3'><div class='sc'><div class='val'>"+t.chiffre_affaires_ht.toFixed(2)+"</div><div class='lab'>CA HT</div></div><div class='sc'><div class='val'>"+t.tva_collectee.toFixed(2)+"</div><div class='lab'>TVA collectee</div></div><div class='sc'><div class='val'>"+t.tva_deductible_totale.toFixed(2)+"</div><div class='lab'>TVA deductible</div></div></div>";
 var net=t.tva_nette_a_payer>0?t.tva_nette_a_payer.toFixed(2)+" EUR a payer":t.credit_tva.toFixed(2)+" EUR credit";
 h+="<div class='sc' style='margin-top:12px'><div class='val'>"+net+"</div><div class='lab'>TVA nette</div></div>";
 document.getElementById("ct-tva-c").innerHTML=h;}).catch(function(){});})();
 
-fetch("/api/comptabilite/charges-sociales-detail").then(function(r){return r.json();}).then(function(soc){
+fetch("/api/comptabilite/charges-sociales-detail").then(safeJson).then(function(soc){
 var h="<div class='g4'>";var ds=soc.destinataires||[];var cls=["blue","amber","green","purple"];
 for(var i=0;i<ds.length;i++){var d=ds[i];h+="<div class='sc "+cls[i%4]+"'><div class='val'>"+(d.montant||0).toFixed(2)+"</div><div class='lab'>"+d.nom+"</div><div style='font-size:.7em;color:var(--tx2);margin-top:3px'>"+d.postes.join(", ")+"</div></div>";}h+="</div>";
 h+="<div class='g3' style='margin-top:12px'><div class='sc'><div class='val'>"+(soc.brut||0).toFixed(2)+"</div><div class='lab'>Bruts</div></div>";
@@ -5064,19 +5122,19 @@ h+="<div class='sc amber'><div class='val'>"+(soc.total||0).toFixed(2)+"</div><d
 h+="<div class='sc blue'><div class='val'>"+(soc.cout_employeur||0).toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div>";
 document.getElementById("ct-social-c").innerHTML=h;}).catch(function(){});
 
-fetch("/api/comptabilite/plan-comptable").then(function(r){return r.json();}).then(function(pc){
+fetch("/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){
 var h="<input placeholder='Rechercher...' oninput='rechPC(this.value)' style='margin-bottom:10px'><table id='pc-t'><tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";
 for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}h+="</table>";
 document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(){});
 }
 
-function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(function(r){return r.json();}).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(){});}
-function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(function(r){return r.json();}).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
+function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(){});}
+function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(safeJson).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
 var _sugTimer=null;
 function suggestCompte(inputId,sugId,counterpartId){
 clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
 var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
-fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)).then(function(r){return r.json();}).then(function(d){
+fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)).then(safeJson).then(function(d){
 var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
 var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";h+="<div class='sug-item' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>";}
 h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(){});},250);}
@@ -5096,24 +5154,24 @@ document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class
 
 /* === SIMULATION === */
 function showSimTab(n,el){document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}
-function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(function(r){return r.json();}).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(function(r){return r.json();}).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(function(r){return r.json();}).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(function(r){return r.json();}).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(function(r){return r.json();}).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 
 /* === VEILLE === */
 function loadVeille(){var a=document.getElementById("v-annee").value;document.getElementById("v-res").style.display="block";
-fetch("/api/veille/baremes/"+a).then(function(r){return r.json();}).then(function(b){var h="<table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>";for(var k in b){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+b[k]+"</td></tr>";}h+="</table>";document.getElementById("v-baremes").innerHTML=h;}).catch(function(){});
-fetch("/api/veille/legislation/"+a).then(function(r){return r.json();}).then(function(l){var h="<p style='margin-bottom:10px'><strong>"+l.description+"</strong></p>";var tx=l.textes_cles||[];for(var i=0;i<tx.length;i++){h+="<div class='al info' style='margin:4px 0'><span class='ai'>&#9878;</span><span><strong>"+tx[i].reference+"</strong> - "+tx[i].titre+"<br><small>"+tx[i].resume+"</small></span></div>";}document.getElementById("v-legis").innerHTML=h;}).catch(function(){});}
-function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),a1=a2-1;fetch("/api/veille/baremes/comparer/"+a1+"/"+a2).then(function(r){return r.json();}).then(function(d){if(!d.length){toast("Pas de differences.","info");return;}var h="<table><tr><th>Parametre</th><th class='num'>"+a1+"</th><th class='num'>"+a2+"</th><th>Evolution</th></tr>";for(var i=0;i<d.length;i++){h+="<tr><td>"+d[i].parametre+"</td><td class='num'>"+(d[i]["valeur_"+a1]||"-")+"</td><td class='num'>"+(d[i]["valeur_"+a2]||"-")+"</td><td>"+d[i].evolution+"</td></tr>";}h+="</table>";document.getElementById("v-comp").innerHTML=h;document.getElementById("v-comp-card").style.display="block";}).catch(function(e){toast(e.message);});}
+fetch("/api/veille/baremes/"+a).then(safeJson).then(function(b){var h="<table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>";for(var k in b){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+b[k]+"</td></tr>";}h+="</table>";document.getElementById("v-baremes").innerHTML=h;}).catch(function(){});
+fetch("/api/veille/legislation/"+a).then(safeJson).then(function(l){var h="<p style='margin-bottom:10px'><strong>"+l.description+"</strong></p>";var tx=l.textes_cles||[];for(var i=0;i<tx.length;i++){h+="<div class='al info' style='margin:4px 0'><span class='ai'>&#9878;</span><span><strong>"+tx[i].reference+"</strong> - "+tx[i].titre+"<br><small>"+tx[i].resume+"</small></span></div>";}document.getElementById("v-legis").innerHTML=h;}).catch(function(){});}
+function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),a1=a2-1;fetch("/api/veille/baremes/comparer/"+a1+"/"+a2).then(safeJson).then(function(d){if(!d.length){toast("Pas de differences.","info");return;}var h="<table><tr><th>Parametre</th><th class='num'>"+a1+"</th><th class='num'>"+a2+"</th><th>Evolution</th></tr>";for(var i=0;i<d.length;i++){h+="<tr><td>"+d[i].parametre+"</td><td class='num'>"+(d[i]["valeur_"+a1]||"-")+"</td><td class='num'>"+(d[i]["valeur_"+a2]||"-")+"</td><td>"+d[i].evolution+"</td></tr>";}h+="</table>";document.getElementById("v-comp").innerHTML=h;document.getElementById("v-comp-card").style.display="block";}).catch(function(e){toast(e.message);});}
 
 /* === PORTEFEUILLE === */
 function ajouterEnt(){var fd=new FormData();fd.append("siret",document.getElementById("ent-siret").value);fd.append("raison_sociale",document.getElementById("ent-raison").value);fd.append("forme_juridique",document.getElementById("ent-forme").value);fd.append("code_naf",document.getElementById("ent-naf").value);fd.append("effectif",document.getElementById("ent-eff").value||"0");fd.append("ville",document.getElementById("ent-ville").value);
 fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();}).catch(function(e){toast(e.message);});}
 
 function rechEnt(){var q=(document.getElementById("ent-search")||{}).value||"";
-fetch("/api/entreprises?q="+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
+fetch("/api/entreprises?q="+encodeURIComponent(q)).then(safeJson).then(function(d){
 var el=document.getElementById("ent-list");if(!d.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune entreprise.</p>";return;}
 var h="";for(var i=0;i<d.length;i++){var e=d[i];
 h+="<div class='ent-item'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px'><strong>"+e.raison_sociale+"</strong>";
@@ -5131,7 +5189,7 @@ document.getElementById("inv-res").innerHTML="<div class='al ok'><span class='ai
 loadEquipe();}).catch(function(e){toast(e.message);});}
 
 function loadEquipe(){
-fetch("/api/collaboration/equipe").then(function(r){return r.json();}).then(function(data){
+fetch("/api/collaboration/equipe").then(safeJson).then(function(data){
 var invs=data.invitations||[];var el=document.getElementById("equipe-list");
 if(!invs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun collaborateur invite.</p>";}else{
 var h="<table><tr><th>Email</th><th>Role</th><th>Statut</th><th>Date</th><th>Invite par</th></tr>";
@@ -5164,17 +5222,25 @@ document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span
 function showFileInterpretation(data){
 var fl=document.getElementById("az-fichiers-list");
 if(!data||!data.declarations||!data.declarations.length){fl.innerHTML="<p style='color:var(--tx2)'>Aucun fichier interprete.</p>";return;}
-var h="<table><tr><th>Fichier</th><th>Nature detectee</th><th>Employeur</th><th>Periode</th><th class='num'>Salaries</th><th class='num'>Cotisations</th></tr>";
+var fi=data.fichiers_info||[];
+var h="<table><tr><th>Fichier</th><th>Nature detectee</th><th>Employeur</th><th>Periode</th><th class='num'>Salaries</th><th class='num'>Cotisations</th><th class='num'>Masse sal.</th></tr>";
 for(var i=0;i<data.declarations.length;i++){var d=data.declarations[i];
 var nature=d.nature||"Document";
+var fname=(i<fi.length?fi[i].nom:"")||(d.reference||"fichier "+(i+1));
 var empName=d.employeur?(d.employeur.raison_sociale||d.employeur.siret||"-"):"-";
 var badgeCls="badge-blue";
 if(nature.indexOf("Bulletin")>=0)badgeCls="badge-green";
 else if(nature.indexOf("DSN")>=0)badgeCls="badge-purple";
 else if(nature.indexOf("Livre")>=0||nature.indexOf("Recapitulatif")>=0)badgeCls="badge-amber";
 else if(nature.indexOf("Bordereau")>=0)badgeCls="badge-teal";
-h+="<tr><td>"+(d.reference||"fichier "+(i+1))+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td></tr>";}
-h+="</table>";fl.innerHTML=h;}
+var masse=(d.masse_salariale_brute||0);
+h+="<tr><td style='font-size:.84em'>"+fname+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td><td class='num'>"+(masse>0?masse.toFixed(2)+" EUR":"-")+"</td></tr>";}
+if(data.declarations.length>1){var totMasse=0;var totSal=0;for(var j=0;j<data.declarations.length;j++){totMasse+=(data.declarations[j].masse_salariale_brute||0);totSal+=(data.declarations[j].nb_salaries||0);}
+h+="<tr style='font-weight:bold;background:var(--pl)'><td colspan='4'>TOTAL</td><td class='num'>"+totSal+"</td><td></td><td class='num'>"+totMasse.toFixed(2)+" EUR</td></tr>";}
+h+="</table>";
+for(var k=0;k<data.declarations.length;k++){var dk=data.declarations[k];if(dk.s89_total_brut&&dk.masse_salariale_brute){var ecS89=Math.abs(dk.s89_total_brut-dk.masse_salariale_brute);if(ecS89>10){h+="<div class='al warn' style='margin-top:6px'><span class='ai'>&#9888;</span><span><strong>Ecart S89 :</strong> Total brut declare (S89) = "+dk.s89_total_brut.toFixed(2)+" EUR vs masse salariale calculee = "+dk.masse_salariale_brute.toFixed(2)+" EUR (ecart: "+ecS89.toFixed(2)+" EUR)</span></div>";}}}
+if(data.knowledge_summary){var ks=data.knowledge_summary;h+="<div class='al info' style='margin-top:10px'><span class='ai'>&#128218;</span><span><strong>Donnees integrees :</strong> "+ks.nb_salaries_connus+" salarie(s), "+ks.nb_cotisations_analysees+" cotisation(s), masse salariale "+ks.total_masse_salariale.toFixed(2)+" EUR"+(ks.nb_contrats_rh>0?" | "+ks.nb_contrats_rh+" contrat(s) RH cree(s)":"")+"</span></div>";}
+fl.innerHTML=h;}
 
 function showAuditChecks(data){
 var mode=data.mode_analyse||document.getElementById("mode-analyse").value;
@@ -5182,7 +5248,7 @@ var card=document.getElementById("az-audit-card");var el=document.getElementById
 if(mode==="simple"){card.style.display="none";return;}
 card.style.display="block";
 el.innerHTML="<p style='color:var(--tx2)'>Chargement de l audit depuis la base de connaissances...</p>";
-fetch("/api/bibliotheque/knowledge/audit").then(function(r){return r.json();}).then(function(audit){
+fetch("/api/bibliotheque/knowledge/audit").then(function(r){if(!r.ok)throw new Error("Erreur serveur ("+r.status+")");return r.json();}).then(function(audit){
 var h="";var sc=audit.score_audit||{};
 h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px'>";
 h+="<div class='sc blue'><div class='val'>"+sc.total_checks+"</div><div class='lab'>Points de controle</div></div>";
@@ -5266,7 +5332,7 @@ function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(func
 if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
-function rhGet(url,cb){fetch(url).then(function(r){return r.json();}).then(cb).catch(function(){});}
+function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(){});}
 
 function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
