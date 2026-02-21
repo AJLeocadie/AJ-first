@@ -609,6 +609,13 @@ async def analyser_documents(
                 d_meta = getattr(decl, "metadata", {}) or {}
                 d_type = d_meta.get("type_document", "")
                 _integration_log.append(f"Decl: type={decl.type_declaration}, meta_type={d_type}, emps={len(decl.employes)}, cots={len(decl.cotisations)}, masse={float(decl.masse_salariale_brute)}")
+                # Ajouter les logs du parser Excel si presents
+                parse_log = d_meta.get("parse_log", [])
+                for pl in parse_log:
+                    _integration_log.append(f"  [PARSER] {pl}")
+                # Lister les employes detectes
+                for _emp in decl.employes:
+                    _integration_log.append(f"  Employe detecte: {_emp.nom} {_emp.prenom} NIR={_emp.nir} id={_emp.id}")
 
                 # --- Ecritures de paie (bulletins, DSN, livres de paie) ---
                 if d_type in ("facture_achat", "facture_vente"):
@@ -804,24 +811,24 @@ async def analyser_documents(
                             _rh_contrats.append(contrat)
                             nb_rh_new += 1
                             _integration_log.append(f"  -> RH nouveau (fallback): {nom_fb} brut={brut_emp:.2f}")
-                            # Auto-creer planning pour le salarie fallback
+                            # Auto-creer planning pour le salarie fallback (lun-ven semaine courante)
                             try:
                                 from datetime import timedelta
-                                d0 = date.today()
+                                today = date.today()
+                                lundi = today - timedelta(days=today.weekday())
                                 for j in range(5):
-                                    d_pl = d0 + timedelta(days=j)
-                                    if d_pl.weekday() < 5:
-                                        _rh_planning.append({
-                                            "id": str(uuid.uuid4())[:8],
-                                            "salarie_id": contrat["id"],
-                                            "salarie_nom": nom_fb,
-                                            "date": d_pl.strftime("%Y-%m-%d"),
-                                            "heure_debut": "09:00",
-                                            "heure_fin": "17:00",
-                                            "type_poste": "normal",
-                                            "note": "Planning auto (analyse)",
-                                        })
-                                        nb_planning_new += 1
+                                    d_pl = lundi + timedelta(days=j)
+                                    _rh_planning.append({
+                                        "id": str(uuid.uuid4())[:8],
+                                        "salarie_id": contrat["id"],
+                                        "salarie_nom": nom_fb,
+                                        "date": d_pl.strftime("%Y-%m-%d"),
+                                        "heure_debut": "09:00",
+                                        "heure_fin": "17:00",
+                                        "type_poste": "normal",
+                                        "note": "Planning auto (analyse)",
+                                    })
+                                    nb_planning_new += 1
                             except Exception as e:
                                 _integration_log.append(f"  -> ERREUR planning fallback: {e}")
                     continue
@@ -874,25 +881,25 @@ async def analyser_documents(
                         _rh_contrats.append(contrat)
                         nb_rh_new += 1
                         _integration_log.append(f"  -> RH nouveau: {emp.prenom} {emp.nom} brut={brut:.2f}")
-                        # Auto-creer un planning pour le salarie
+                        # Auto-creer un planning pour le salarie (lun-ven semaine courante)
                         try:
-                            if date_debut_str:
-                                from datetime import timedelta
-                                d0 = date.fromisoformat(date_debut_str)
-                                for j in range(5):
-                                    d_planning = d0 + timedelta(days=j)
-                                    if d_planning.weekday() < 5:
-                                        _rh_planning.append({
-                                            "id": str(uuid.uuid4())[:8],
-                                            "salarie_id": contrat["id"],
-                                            "salarie_nom": f"{emp.prenom} {emp.nom}".strip(),
-                                            "date": d_planning.strftime("%Y-%m-%d"),
-                                            "heure_debut": "09:00",
-                                            "heure_fin": "17:00",
-                                            "type_poste": "normal",
-                                            "note": "Planning auto (analyse)",
-                                        })
-                                        nb_planning_new += 1
+                            from datetime import timedelta
+                            today = date.today()
+                            lundi = today - timedelta(days=today.weekday())
+                            nom_planning = f"{emp.prenom} {emp.nom}".strip() or contrat["nom_salarie"]
+                            for j in range(5):
+                                d_planning = lundi + timedelta(days=j)
+                                _rh_planning.append({
+                                    "id": str(uuid.uuid4())[:8],
+                                    "salarie_id": contrat["id"],
+                                    "salarie_nom": nom_planning,
+                                    "date": d_planning.strftime("%Y-%m-%d"),
+                                    "heure_debut": "09:00",
+                                    "heure_fin": "17:00",
+                                    "type_poste": "normal",
+                                    "note": "Planning auto (analyse)",
+                                })
+                                nb_planning_new += 1
                         except Exception as e:
                             _integration_log.append(f"  -> ERREUR planning: {e}")
                     else:
@@ -1120,7 +1127,36 @@ async def compte_resultat():
 async def bilan():
     moteur = get_moteur()
     gen = GenerateurRapports(moteur)
-    return gen.bilan_simplifie()
+    raw = gen.bilan_simplifie()
+    # Transformer en format attendu par le JS (nombres plats, pas dicts)
+    a = raw.get("actif", {})
+    p = raw.get("passif", {})
+    immo = sum(v["montant"] for v in a.get("immobilisations", {}).values())
+    stocks = sum(v["montant"] for v in a.get("actif_circulant", {}).values()
+                 if v.get("libelle", "").lower().startswith("stock"))
+    creances = sum(v["montant"] for v in a.get("actif_circulant", {}).values()
+                   if not v.get("libelle", "").lower().startswith("stock"))
+    treso = sum(v["montant"] for v in a.get("tresorerie", {}).values())
+    cap_propres = sum(v["montant"] for v in p.get("capitaux_propres", {}).values())
+    dettes_fin = sum(v["montant"] for k, v in p.get("dettes", {}).items() if k.startswith("5"))
+    dettes_expl = sum(v["montant"] for k, v in p.get("dettes", {}).items() if not k.startswith("5"))
+    total_a = immo + stocks + creances + treso
+    total_p = cap_propres + dettes_fin + dettes_expl
+    return {
+        "actif": {
+            "immobilisations": round(immo, 2),
+            "stocks": round(stocks, 2),
+            "creances": round(creances, 2),
+            "tresorerie": round(treso, 2),
+            "total": round(total_a, 2),
+        },
+        "passif": {
+            "capitaux_propres": round(cap_propres, 2),
+            "dettes_financieres": round(dettes_fin, 2),
+            "dettes_exploitation": round(dettes_expl, 2),
+            "total": round(total_p, 2),
+        },
+    }
 
 
 @app.get("/api/comptabilite/declaration-tva")
@@ -1134,7 +1170,26 @@ async def declaration_tva(mois: int = Query(1), annee: int = Query(2026)):
 async def charges_sociales_detail():
     moteur = get_moteur()
     gen = GenerateurRapports(moteur)
-    return gen.recapitulatif_charges_sociales()
+    raw = gen.recapitulatif_charges_sociales()
+    # Transformer en format attendu par le JS (destinataires, brut, total, cout_employeur)
+    destinataires = []
+    if raw.get("cotisations_urssaf", 0) > 0:
+        destinataires.append({"nom": "URSSAF", "montant": raw["cotisations_urssaf"], "postes": ["Maladie", "Vieillesse", "Allocations familiales", "CSG/CRDS"]})
+    if raw.get("cotisations_retraite", 0) > 0:
+        destinataires.append({"nom": "Retraite compl.", "montant": raw["cotisations_retraite"], "postes": ["AGIRC-ARRCO"]})
+    if raw.get("mutuelle_prevoyance", 0) > 0:
+        destinataires.append({"nom": "Mutuelle/Prevoyance", "montant": raw["mutuelle_prevoyance"], "postes": ["Sante", "Prevoyance"]})
+    if raw.get("france_travail", 0) > 0:
+        destinataires.append({"nom": "France Travail", "montant": raw["france_travail"], "postes": ["Chomage"]})
+    if raw.get("autres_charges_sociales", 0) > 0:
+        destinataires.append({"nom": "Autres", "montant": raw["autres_charges_sociales"], "postes": ["Autres charges"]})
+    return {
+        "destinataires": destinataires,
+        "brut": raw.get("salaires_bruts", 0),
+        "total": raw.get("total_charges_sociales", 0),
+        "cout_employeur": raw.get("cout_total_employeur", 0),
+        "taux_charges": raw.get("taux_charges_global", 0),
+    }
 
 
 @app.get("/api/comptabilite/plan-comptable")
@@ -6413,7 +6468,7 @@ document.getElementById("ct-bilan-c").innerHTML=h;}).catch(function(e){document.
 var h="<div class='g3'><div class='sc'><div class='val'>"+t.chiffre_affaires_ht.toFixed(2)+"</div><div class='lab'>CA HT</div></div><div class='sc'><div class='val'>"+t.tva_collectee.toFixed(2)+"</div><div class='lab'>TVA collectee</div></div><div class='sc'><div class='val'>"+t.tva_deductible_totale.toFixed(2)+"</div><div class='lab'>TVA deductible</div></div></div>";
 var net=t.tva_nette_a_payer>0?t.tva_nette_a_payer.toFixed(2)+" EUR a payer":t.credit_tva.toFixed(2)+" EUR credit";
 h+="<div class='sc' style='margin-top:12px'><div class='val'>"+net+"</div><div class='lab'>TVA nette</div></div>";
-document.getElementById("ct-tva-c").innerHTML=h;}).catch(function(){});})();
+document.getElementById("ct-tva-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-tva-c").innerHTML="<p style='color:var(--r)'>Erreur TVA: "+e.message+"</p>";});})();
 
 fetch("/api/comptabilite/charges-sociales-detail").then(safeJson).then(function(soc){
 var h="<div class='g4'>";var ds=soc.destinataires||[];var cls=["blue","amber","green","purple"];
@@ -6421,15 +6476,15 @@ for(var i=0;i<ds.length;i++){var d=ds[i];h+="<div class='sc "+cls[i%4]+"'><div c
 h+="<div class='g3' style='margin-top:12px'><div class='sc'><div class='val'>"+(soc.brut||0).toFixed(2)+"</div><div class='lab'>Bruts</div></div>";
 h+="<div class='sc amber'><div class='val'>"+(soc.total||0).toFixed(2)+"</div><div class='lab'>Total charges</div></div>";
 h+="<div class='sc blue'><div class='val'>"+(soc.cout_employeur||0).toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div>";
-document.getElementById("ct-social-c").innerHTML=h;}).catch(function(){});
+document.getElementById("ct-social-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-social-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 fetch("/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){
 var h="<input placeholder='Rechercher...' oninput='rechPC(this.value)' style='margin-bottom:10px'><table id='pc-t'><tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";
 for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}h+="</table>";
-document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(){});
+document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-plan-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 }
 
-function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(){});}
+function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(e){console.error("Plan comptable",e);});}
 function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(safeJson).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
 function editLibelle(ecrId,spanId,ligneIdx){var sp=document.getElementById(spanId);if(!sp)return;var old=sp.textContent;var inp=document.createElement("input");inp.type="text";inp.value=old;inp.style.cssText="font-size:.86em;padding:4px 8px;border:1px solid var(--p);border-radius:6px;width:100%;min-width:200px";sp.parentNode.replaceChild(inp,sp);inp.focus();inp.select();function save(){var nv=inp.value.trim();if(!nv||nv===old){var ns=document.createElement("span");ns.id=spanId;ns.textContent=old;inp.parentNode.replaceChild(ns,inp);return;}var body={};if(ligneIdx===null)body.libelle=nv;else{body.lignes={};body.lignes[ligneIdx]=nv;}fetch("/api/comptabilite/ecriture/"+ecrId+"/libelle",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(safeJson).then(function(){var ns=document.createElement("span");ns.id=spanId;ns.textContent=nv;if(inp.parentNode)inp.parentNode.replaceChild(ns,inp);toast("Libelle modifie","ok");}).catch(function(e){toast(e.message||"Erreur");var ns=document.createElement("span");ns.id=spanId;ns.textContent=old;if(inp.parentNode)inp.parentNode.replaceChild(ns,inp);});}inp.addEventListener("keydown",function(ev){if(ev.key==="Enter")save();if(ev.key==="Escape"){var ns=document.createElement("span");ns.id=spanId;ns.textContent=old;inp.parentNode.replaceChild(ns,inp);}});inp.addEventListener("blur",save);}
 document.addEventListener("click",function(ev){var btn=ev.target.closest(".edl-btn");if(!btn)return;var ecrId=btn.getAttribute("data-ecr");var spanId=btn.getAttribute("data-span");var ligStr=btn.getAttribute("data-lig");var ligneIdx=(ligStr==="")?null:parseInt(ligStr,10);editLibelle(ecrId,spanId,ligneIdx);});

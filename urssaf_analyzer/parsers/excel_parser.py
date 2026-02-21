@@ -1,5 +1,6 @@
 """Parseur pour les fichiers Excel (bulletins de paie, exports comptables)."""
 
+import re as _re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ try:
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
+
+# Mots indiquant une ligne de total/sous-total a ignorer
+_TOTAL_KEYWORDS = {
+    "total", "sous-total", "sous_total", "sous total",
+    "totaux", "cumul", "cumuls", "recap", "recapitulatif",
+    "general", "general", "s/total", "net a payer global",
+}
 
 
 class ExcelParser(BaseParser):
@@ -71,19 +79,29 @@ class ExcelParser(BaseParser):
         if len(rows) < 2:
             return None
 
-        # Premiere ligne = en-tetes (normaliser)
-        header = [self._normaliser_entete(c) for c in rows[0]]
-        col_map = self._mapper_colonnes(header)
+        # Detecter la ligne d en-tete (peut ne pas etre la premiere)
+        header_idx, header = self._trouver_entete(rows)
+        if header_idx is None:
+            return None
 
+        col_map = self._mapper_colonnes(header)
         if not col_map:
             return None
 
         cotisations = []
-        employes_vus = {}  # cle = nir ou "nom|prenom"
-        employe_ids = {}   # cle de dedup -> employe.id
+        employes_vus = {}   # cle = nir ou "nom|prenom"
+        employe_ids = {}    # cle de dedup -> employe.id
+        parse_log = []
 
-        for row_data in rows[1:]:
+        parse_log.append(f"Feuille: {nom_feuille}, en-tetes ligne {header_idx+1}: {header}")
+        parse_log.append(f"Colonnes mappees: {col_map}")
+
+        for row_data in rows[header_idx + 1:]:
             if not row_data or all(c is None for c in row_data):
+                continue
+
+            # Ignorer les lignes de total/sous-total
+            if self._est_ligne_total(row_data):
                 continue
 
             row_dict = {}
@@ -102,6 +120,10 @@ class ExcelParser(BaseParser):
                 if emp_key and emp_key not in employes_vus:
                     employes_vus[emp_key] = employe
                     employe_ids[emp_key] = employe.id
+                    parse_log.append(f"  Employe: {employe.nom} {employe.prenom} (NIR={employe.nir}, key={emp_key})")
+                elif emp_key and emp_key in employe_ids:
+                    # Meme employe, ligne supplementaire (cotisation)
+                    pass
 
             cotisation = self._extraire_cotisation(row_dict, col_map, document.id)
             if cotisation:
@@ -114,6 +136,22 @@ class ExcelParser(BaseParser):
         is_livre_paie = len(employes_vus) > 1
         type_decl = "livre_de_paie" if is_livre_paie else "EXCEL"
 
+        parse_log.append(f"Resultat: {len(employes_vus)} employes, {len(cotisations)} cotisations, type={type_decl}")
+
+        # Calculer masse salariale par employe (max brut par employe, pas le cumul de toutes les lignes)
+        masse = Decimal("0")
+        if employes_vus and cotisations:
+            # Brut par employe (on prend le max des bases brutes par employe, pas la somme
+            # car plusieurs cotisations peuvent avoir la meme base)
+            bruts_par_emp = {}
+            for c in cotisations:
+                eid = c.employe_id or "_global"
+                if eid not in bruts_par_emp or c.base_brute > bruts_par_emp[eid]:
+                    bruts_par_emp[eid] = c.base_brute
+            masse = sum(bruts_par_emp.values())
+        elif cotisations:
+            masse = sum(c.base_brute for c in cotisations)
+
         declaration = Declaration(
             type_declaration=type_decl,
             reference=document.nom_fichier or nom_feuille,
@@ -121,12 +159,45 @@ class ExcelParser(BaseParser):
             employes=list(employes_vus.values()),
             effectif_declare=len(employes_vus),
             source_document_id=document.id,
-            metadata={"type_document": "livre_de_paie" if is_livre_paie else "bulletin_de_paie"},
+            metadata={
+                "type_document": "livre_de_paie" if is_livre_paie else "bulletin_de_paie",
+                "parse_log": parse_log,
+            },
         )
-        if cotisations:
-            declaration.masse_salariale_brute = sum(c.base_brute for c in cotisations)
+        declaration.masse_salariale_brute = masse
 
         return declaration
+
+    def _trouver_entete(self, rows: list) -> tuple:
+        """Cherche la ligne d en-tete dans les premieres lignes."""
+        # Essayer les 5 premieres lignes
+        for idx in range(min(5, len(rows))):
+            row = rows[idx]
+            if not row:
+                continue
+            header = [self._normaliser_entete(c) for c in row]
+            # Verifier qu on a au moins 2 colonnes utiles
+            col_map = self._mapper_colonnes(header)
+            if len(col_map) >= 2:
+                return idx, header
+        # Fallback: premiere ligne
+        if rows:
+            header = [self._normaliser_entete(c) for c in rows[0]]
+            col_map = self._mapper_colonnes(header)
+            if col_map:
+                return 0, header
+        return None, None
+
+    @staticmethod
+    def _est_ligne_total(row_data: tuple) -> bool:
+        """Detecte si une ligne est un total/sous-total a ignorer."""
+        for cell in row_data:
+            if cell is None:
+                continue
+            s = str(cell).strip().lower()
+            if any(kw in s for kw in _TOTAL_KEYWORDS):
+                return True
+        return False
 
     @staticmethod
     def _normaliser_entete(cellule: Any) -> str:
@@ -141,7 +212,7 @@ class ExcelParser(BaseParser):
             s = s.replace(a, b)
         # Normaliser separateurs
         s = s.replace(" ", "_").replace("-", "_").replace(".", "_")
-        s = s.replace("'", "").replace("°", "")
+        s = s.replace("'", "").replace("°", "").replace("n_", "n_")
         # Supprimer underscores multiples
         while "__" in s:
             s = s.replace("__", "_")
@@ -155,11 +226,12 @@ class ExcelParser(BaseParser):
                 "nir", "numero_ss", "securite_sociale", "n_ss", "nss",
                 "numero_securite_sociale", "n_securite_sociale",
                 "matricule", "num_matricule", "numero_matricule",
+                "mat", "n_mat", "id_salarie", "id_employe", "numero",
             ],
             "nom": [
                 "nom", "nom_salarie", "salarie", "nom_du_salarie",
                 "nom_employe", "employe", "nom_de_l_employe",
-                "nom_agent", "agent",
+                "nom_agent", "agent", "nom_famille", "patronyme",
             ],
             "prenom": [
                 "prenom", "prenom_salarie", "prenom_du_salarie",
@@ -167,16 +239,18 @@ class ExcelParser(BaseParser):
             ],
             "nom_prenom": [
                 "nom_prenom", "nom_et_prenom", "prenom_nom",
-                "identite", "salarie_nom_prenom",
+                "identite", "salarie_nom_prenom", "nom_complet",
+                "designation", "intitule_salarie",
             ],
             "base_brute": [
-                "base", "base_brute", "salaire_brut", "brut",
+                "base_brute", "salaire_brut", "brut", "base",
                 "remuneration_brute", "remuneration", "montant_brut",
                 "sal_brut", "total_brut", "brut_mensuel",
+                "brut_total", "salaire", "remuneration_totale",
             ],
             "net": [
                 "net", "net_a_payer", "salaire_net", "montant_net",
-                "net_paye", "net_verse",
+                "net_paye", "net_verse", "net_mensuel", "a_payer",
             ],
             "taux_patronal": [
                 "taux_patronal", "taux_employeur", "tx_patronal",
@@ -190,15 +264,17 @@ class ExcelParser(BaseParser):
                 "montant_patronal", "cotisation_employeur",
                 "part_employeur", "charges_patronales",
                 "cotisations_patronales", "patronal",
+                "total_patronal", "employeur",
             ],
             "montant_salarial": [
                 "montant_salarial", "cotisation_salarie",
                 "part_salarie", "charges_salariales",
                 "cotisations_salariales", "retenues", "salarial",
+                "total_salarial", "part_salariale",
             ],
             "type_cotisation": [
                 "type_cotisation", "code_cotisation", "libelle",
-                "designation", "intitule", "nature",
+                "designation", "intitule", "nature", "code",
             ],
         }
         for i, col in enumerate(header):
@@ -207,25 +283,33 @@ class ExcelParser(BaseParser):
             for field_name, kws in keywords.items():
                 if field_name in mapping:
                     continue
-                # Match exact ou par inclusion
+                # Match exact
                 if col in kws:
                     mapping[field_name] = i
-                elif any(kw in col for kw in kws):
-                    mapping[field_name] = i
+                    break
+                # Match par inclusion (le kw est contenu dans le header)
+                for kw in kws:
+                    if kw in col or col in kw:
+                        mapping[field_name] = i
+                        break
+                if field_name in mapping:
+                    break
         return mapping
 
     def _extraire_cotisation(
         self, row: dict, col_map: dict, doc_id: str
     ) -> Cotisation | None:
         base = self._get_val(row, [
-            "base_brute", "base", "salaire_brut", "brut",
+            "base_brute", "salaire_brut", "brut", "base",
             "remuneration_brute", "remuneration", "montant_brut",
             "sal_brut", "total_brut", "brut_mensuel",
+            "brut_total", "salaire", "remuneration_totale",
         ])
         montant_p = self._get_val(row, [
             "montant_patronal", "cotisation_employeur",
             "part_employeur", "charges_patronales",
             "cotisations_patronales", "patronal",
+            "total_patronal", "employeur",
         ])
 
         if base is None and montant_p is None:
@@ -233,30 +317,41 @@ class ExcelParser(BaseParser):
 
         c = Cotisation(source_document_id=doc_id)
         if base is not None:
-            c.base_brute = Decimal(str(base)) if not isinstance(base, str) else parser_montant(base)
+            c.base_brute = self._to_decimal(base)
             c.assiette = c.base_brute
         if montant_p is not None:
-            c.montant_patronal = Decimal(str(montant_p)) if not isinstance(montant_p, str) else parser_montant(montant_p)
+            c.montant_patronal = self._to_decimal(montant_p)
 
         montant_s = self._get_val(row, [
             "montant_salarial", "cotisation_salarie",
             "part_salarie", "charges_salariales",
             "cotisations_salariales", "retenues", "salarial",
+            "total_salarial", "part_salariale",
         ])
         if montant_s is not None:
-            c.montant_salarial = Decimal(str(montant_s)) if not isinstance(montant_s, str) else parser_montant(montant_s)
+            c.montant_salarial = self._to_decimal(montant_s)
 
         tp = self._get_val(row, ["taux_patronal", "taux_employeur", "tx_patronal", "taux_part_employeur"])
         if tp is not None:
-            c.taux_patronal = Decimal(str(tp)) if not isinstance(tp, str) else parser_montant(tp)
+            c.taux_patronal = self._to_decimal(tp)
             if c.taux_patronal > 1:
                 c.taux_patronal = c.taux_patronal / 100
 
         ts = self._get_val(row, ["taux_salarial", "taux_salarie", "tx_salarial", "taux_part_salarie"])
         if ts is not None:
-            c.taux_salarial = Decimal(str(ts)) if not isinstance(ts, str) else parser_montant(ts)
+            c.taux_salarial = self._to_decimal(ts)
             if c.taux_salarial > 1:
                 c.taux_salarial = c.taux_salarial / 100
+
+        # Stocker le net si present
+        net = self._get_val(row, [
+            "net", "net_a_payer", "salaire_net", "montant_net",
+            "net_paye", "net_verse", "net_mensuel", "a_payer",
+        ])
+        if net is not None:
+            # Stocker dans le montant salarial si pas deja defini
+            # (pour le pipeline d integration qui calcule net)
+            pass
 
         return c
 
@@ -265,11 +360,12 @@ class ExcelParser(BaseParser):
             "nir", "numero_ss", "securite_sociale", "n_ss", "nss",
             "numero_securite_sociale", "n_securite_sociale",
             "matricule", "num_matricule", "numero_matricule",
+            "mat", "n_mat", "id_salarie", "id_employe", "numero",
         ])
         nom = self._get_val(row, [
             "nom", "nom_salarie", "salarie", "nom_du_salarie",
             "nom_employe", "employe", "nom_de_l_employe",
-            "nom_agent", "agent",
+            "nom_agent", "agent", "nom_famille", "patronyme",
         ])
         prenom = self._get_val(row, [
             "prenom", "prenom_salarie", "prenom_du_salarie",
@@ -280,21 +376,35 @@ class ExcelParser(BaseParser):
         if not nom:
             nom_prenom = self._get_val(row, [
                 "nom_prenom", "nom_et_prenom", "prenom_nom",
-                "identite", "salarie_nom_prenom",
+                "identite", "salarie_nom_prenom", "nom_complet",
+                "designation", "intitule_salarie",
             ])
             if nom_prenom and str(nom_prenom).strip():
                 parts = str(nom_prenom).strip().split()
                 if len(parts) >= 2:
-                    nom = parts[0]
-                    prenom = " ".join(parts[1:])
+                    # Heuristique: si le premier mot est en MAJUSCULES = nom de famille
+                    if parts[0] == parts[0].upper() and len(parts[0]) > 1:
+                        nom = parts[0]
+                        prenom = " ".join(parts[1:])
+                    else:
+                        nom = parts[-1]
+                        prenom = " ".join(parts[:-1])
                 else:
                     nom = parts[0]
+
+        # Si NIR est un numero court (matricule), l utiliser comme identifiant
+        if nir:
+            nir_str = str(nir).strip()
+            # Convertir les floats Excel (1.0 -> "1")
+            if nir_str.endswith(".0"):
+                nir_str = nir_str[:-2]
+            nir = nir_str
 
         if not nir and not nom:
             return None
 
         return Employe(
-            nir=str(nir).strip() if nir else "",
+            nir=nir or "",
             nom=str(nom).strip() if nom else "",
             prenom=str(prenom).strip() if prenom else "",
             source_document_id=doc_id,
@@ -308,3 +418,14 @@ class ExcelParser(BaseParser):
             if v is not None and str(v).strip() != "":
                 return v
         return None
+
+    @staticmethod
+    def _to_decimal(val: Any) -> Decimal:
+        """Convertit une valeur en Decimal."""
+        if isinstance(val, Decimal):
+            return val
+        if isinstance(val, (int, float)):
+            return Decimal(str(val))
+        if isinstance(val, str):
+            return parser_montant(val)
+        return Decimal(str(val))
