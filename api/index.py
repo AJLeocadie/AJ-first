@@ -296,6 +296,72 @@ def _alimenter_knowledge(result):
             if "contrats_service" not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"]["contrats_service"] = []
             kb["pieces_justificatives"]["contrats_service"].append(decl.reference)
+        # --- Fiscal documents ---
+        elif fmt in ("liasse_fiscale", "declaration_tva", "declaration_is", "das2",
+                      "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux") or \
+             doc_type in ("liasse_fiscale", "declaration_tva", "declaration_is", "das2",
+                          "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux"):
+            cat = "fiscal"
+            if cat not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"][cat] = []
+            kb["pieces_justificatives"][cat].append(decl.reference)
+            # Extract fiscal data to enterprise context
+            ctx = kb.get("contexte_entreprise", {})
+            if meta.get("resultat"):
+                ctx["resultat_fiscal"] = meta["resultat"]
+            if meta.get("chiffre_affaires"):
+                ctx["chiffre_affaires"] = meta["chiffre_affaires"]
+            if meta.get("regime_fiscal") or doc_type == "declaration_is":
+                ctx["regime_fiscal"] = "IS"
+            kb["contexte_entreprise"] = ctx
+        # --- Comptable documents ---
+        elif fmt in ("bilan", "compte_resultat", "rapport_cac", "rapport_gestion", "budget") or \
+             doc_type in ("bilan", "compte_resultat", "rapport_cac", "rapport_gestion", "budget"):
+            cat = "comptable"
+            if cat not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"][cat] = []
+            kb["pieces_justificatives"][cat].append(decl.reference)
+            ctx = kb.get("contexte_entreprise", {})
+            if meta.get("resultat_net"):
+                ctx["resultat_net"] = meta["resultat_net"]
+            if meta.get("chiffre_affaires"):
+                ctx["chiffre_affaires"] = meta["chiffre_affaires"]
+            if meta.get("capitaux_propres"):
+                ctx["capitaux_propres"] = meta["capitaux_propres"]
+            kb["contexte_entreprise"] = ctx
+        # --- Social/RH documents ---
+        elif fmt in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
+                      "avenant", "bilan_social", "note_frais") or \
+             doc_type in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
+                          "avenant", "bilan_social", "note_frais"):
+            cat = "social_rh"
+            if cat not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"][cat] = []
+            kb["pieces_justificatives"][cat].append(decl.reference)
+        # --- Juridique documents ---
+        elif fmt in ("statuts", "kbis", "bail", "assurance", "lettre_mission") or \
+             doc_type in ("statuts", "kbis", "bail", "assurance", "lettre_mission"):
+            cat = "juridique"
+            if cat not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"][cat] = []
+            kb["pieces_justificatives"][cat].append(decl.reference)
+            ctx = kb.get("contexte_entreprise", {})
+            if meta.get("forme_juridique") and not ctx.get("forme_juridique"):
+                ctx["forme_juridique"] = meta["forme_juridique"]
+            if meta.get("capital_social"):
+                ctx["capital_social"] = meta["capital_social"]
+            if meta.get("siege_social") and not ctx.get("lieu_implantation"):
+                ctx["lieu_implantation"] = meta["siege_social"]
+            if meta.get("denomination") and not ctx.get("raison_sociale"):
+                ctx["raison_sociale"] = meta["denomination"]
+            kb["contexte_entreprise"] = ctx
+        # --- Commercial documents ---
+        elif fmt in ("devis", "avoir", "bon_commande", "releve_bancaire", "cerfa") or \
+             doc_type in ("devis", "avoir", "bon_commande", "releve_bancaire", "cerfa"):
+            cat = "commercial"
+            if cat not in kb["pieces_justificatives"]:
+                kb["pieces_justificatives"][cat] = []
+            kb["pieces_justificatives"][cat].append(decl.reference)
         elif len(decl.cotisations) > 0 or float(decl.masse_salariale_brute) > 0:
             kb["bulletins_paie"].append({
                 "reference": decl.reference,
@@ -609,29 +675,75 @@ async def analyser_documents(
 
             # Map from parser-detected type
             nature_map = {
+                # Paie
                 "bulletin_de_paie": "Bulletin de paie",
                 "bulletin": "Bulletin de paie",
                 "livre_de_paie": "Livre de paie / Recapitulatif cotisations",
+                # Factures
                 "facture_achat": "Facture d achat",
                 "facture_vente": "Facture de vente",
+                # Contrats
                 "contrat_de_travail": "Contrat de travail",
+                "contrat_service": "Contrat de prestation de services",
+                # Accords
                 "accord_interessement": "Accord d interessement",
                 "accord_participation": "Accord de participation",
-                "attestation": "Attestation employeur",
                 "accord_entreprise": "Accord d entreprise",
                 "accord_nao": "Accord NAO (Negociation annuelle obligatoire)",
                 "accord_gpec": "Accord GPEC",
                 "accord_teletravail": "Accord teletravail",
                 "accord_egalite": "Accord egalite professionnelle",
                 "accord_temps_travail": "Accord temps de travail",
+                # Attestations
+                "attestation": "Attestation employeur",
+                # AG
                 "pv_ag": "Proces-verbal d assemblee generale",
                 "pv_ago": "PV d assemblee generale ordinaire",
                 "pv_age": "PV d assemblee generale extraordinaire",
-                "contrat_service": "Contrat de prestation de services",
+                # Fiscal
+                "liasse_fiscale": "Liasse fiscale (2050-2059)",
+                "declaration_tva": "Declaration de TVA (CA3/CA12)",
+                "declaration_is": "Declaration IS",
+                "das2": "DAS2 (honoraires/commissions)",
+                "taxe_salaires": "Taxe sur les salaires",
+                "cfe_cvae": "CFE/CVAE",
+                "fec": "FEC (ecritures comptables)",
+                "releve_frais_generaux": "Releve frais generaux (2067)",
+                # Comptable
+                "bilan": "Bilan / Comptes annuels",
+                "compte_resultat": "Compte de resultat",
+                "rapport_cac": "Rapport commissaire aux comptes",
+                "rapport_gestion": "Rapport de gestion",
+                "budget": "Budget previsionnel",
+                # Social / RH
+                "dpae": "DPAE",
+                "registre_personnel": "Registre du personnel",
+                "duerp": "DUERP",
+                "reglement_interieur": "Reglement interieur",
+                "avenant": "Avenant contrat de travail",
+                "bilan_social": "Bilan social",
+                "note_frais": "Note de frais",
+                # Juridique
+                "statuts": "Statuts de la societe",
+                "kbis": "Extrait Kbis / RCS",
+                "bail": "Bail commercial",
+                "assurance": "Police d assurance",
+                "lettre_mission": "Lettre de mission",
+                # Commercial
+                "devis": "Devis",
+                "avoir": "Avoir / Note de credit",
+                "bon_commande": "Bon de commande",
+                "releve_bancaire": "Releve bancaire",
+                "cerfa": "Formulaire CERFA",
+                # Image
+                "image_non_ocr": "Document image (OCR non disponible)",
             }
             nature = nature_map.get(doc_type, "")
 
-            # Fallback: use type_declaration from parser
+            # Fallback: use type_declaration from parser (also lookup in nature_map)
+            if not nature:
+                # Try type_declaration directly in nature_map
+                nature = nature_map.get(fmt, "")
             if not nature:
                 if fmt in ("dsn", "dsn/xml"):
                     nature = "Declaration sociale nominative (DSN)"
@@ -655,6 +767,8 @@ async def analyser_documents(
                     nature = "Contrat de prestation de services"
                 elif fmt == "xml/bordereau":
                     nature = "Bordereau recapitulatif de cotisations (BRC)"
+                elif fmt == "image":
+                    nature = "Document image"
                 elif nb_cots > 0 and nb_sal == 1:
                     nature = "Bulletin de paie"
                 elif nb_cots > 0 and nb_sal > 1:
@@ -719,6 +833,31 @@ async def analyser_documents(
                 decl_out["prestataire"] = decl_meta["prestataire"]
             if decl_meta.get("objet"):
                 decl_out["objet"] = decl_meta["objet"]
+            # Forward all extra metadata for new document types
+            _extra_keys = [
+                "exercice_debut", "exercice_fin", "cerfa_numero", "resultat",
+                "chiffre_affaires", "total_actif", "total_passif", "benefice",
+                "deficit", "tva_collectee", "tva_deductible", "tva_nette",
+                "credit_tva", "base_imposable", "montant_impot",
+                "nb_beneficiaires", "total_honoraires", "exercice",
+                "capitaux_propres", "resultat_net", "resultat_exploitation",
+                "ebe", "endettement", "tresorerie", "opinion",
+                "date_embauche", "effectif_detecte", "numero_avenant",
+                "nouvelle_remuneration", "nb_unites_travail", "nb_risques_identifies",
+                "effectif_moyen", "taux_absenteisme", "taux_turnover", "nb_at",
+                "denomination", "capital_social", "objet_social", "siege_social",
+                "forme_juridique", "rcs", "date_immatriculation",
+                "loyer", "duree_bail", "depot_garantie", "prime", "franchise",
+                "assureur", "cabinet", "honoraires", "total_frais",
+                "solde_initial", "solde_final", "nb_operations",
+                "numero_devis", "validite", "numero_avoir", "facture_origine",
+                "numero_commande", "annee",
+                "ocr_disponible", "avertissements",
+            ]
+            for ek in _extra_keys:
+                val = decl_meta.get(ek)
+                if val is not None and val != "" and val != 0 and val != []:
+                    decl_out[ek] = val
             declarations_out.append(decl_out)
 
         # Auto-generer les ecritures comptables a partir des declarations
@@ -764,9 +903,19 @@ async def analyser_documents(
                         _integration_log.append(f"  -> Facture ignoree: HT={ht} TTC={ttc} (montants nuls)")
                     continue
 
-                if d_type in ("contrat_de_travail", "accord_interessement", "accord_participation", "attestation") or d_type.startswith("accord_") or d_type.startswith("pv_ag") or d_type == "contrat_service":
+                # Skip types that don't generate accounting entries
+                _skip_compta_types = (
+                    "contrat_de_travail", "accord_interessement", "accord_participation",
+                    "attestation", "contrat_service", "dpae", "registre_personnel",
+                    "duerp", "reglement_interieur", "avenant", "bilan_social",
+                    "statuts", "kbis", "assurance", "lettre_mission",
+                    "bilan", "compte_resultat", "rapport_cac", "rapport_gestion",
+                    "budget", "fec", "cerfa", "image_non_ocr", "releve_bancaire",
+                )
+                _skip_compta_prefixes = ("accord_", "pv_ag", "declaration_", "liasse_")
+                if d_type in _skip_compta_types or any(d_type.startswith(p) for p in _skip_compta_prefixes) or d_type in ("das2", "taxe_salaires", "cfe_cvae", "releve_frais_generaux"):
                     _integration_log.append(f"  -> Skip ecriture (type {d_type})")
-                    continue  # pas d ecriture comptable
+                    continue  # pas d ecriture comptable de paie
 
                 # Ecritures de paie
                 if not decl.employes:
@@ -851,8 +1000,15 @@ async def analyser_documents(
             for decl in result.declarations:
                 d_meta = getattr(decl, "metadata", {}) or {}
                 d_type = d_meta.get("type_document", "")
-                _skip_rh_types = ("facture_achat", "facture_vente", "contrat_de_travail", "contrat_service")
-                _skip_rh_prefixes = ("accord_", "pv_ag")
+                _skip_rh_types = (
+                    "facture_achat", "facture_vente", "contrat_de_travail", "contrat_service",
+                    "statuts", "kbis", "bail", "assurance", "lettre_mission",
+                    "bilan", "compte_resultat", "rapport_cac", "rapport_gestion", "budget",
+                    "fec", "cerfa", "releve_bancaire", "devis", "avoir", "bon_commande",
+                    "image_non_ocr", "duerp", "reglement_interieur", "bilan_social",
+                    "das2", "taxe_salaires", "cfe_cvae", "releve_frais_generaux",
+                )
+                _skip_rh_prefixes = ("accord_", "pv_ag", "declaration_", "liasse_")
                 _is_rh_skip = d_type in _skip_rh_types or any(d_type.startswith(p) for p in _skip_rh_prefixes)
                 if not decl.employes:
                     # Pas d employe dans la declaration : tenter de creer un salarie generique
@@ -1054,30 +1210,44 @@ async def analyser_documents(
                 d_meta = getattr(decl, "metadata", {}) or {}
                 doc_type = d_meta.get("type_document", "")
                 nature_labels = {
-                    "bulletin_de_paie": "Bulletin de paie",
-                    "bulletin": "Bulletin de paie",
+                    "bulletin_de_paie": "Bulletin de paie", "bulletin": "Bulletin de paie",
                     "livre_de_paie": "Livre de paie",
-                    "facture_achat": "Facture d achat",
-                    "facture_vente": "Facture de vente",
-                    "contrat_de_travail": "Contrat de travail",
-                    "accord_interessement": "Accord d interessement",
-                    "accord_participation": "Accord de participation",
+                    "facture_achat": "Facture d achat", "facture_vente": "Facture de vente",
+                    "contrat_de_travail": "Contrat de travail", "contrat_service": "Contrat de prestation",
+                    "accord_interessement": "Accord interessement", "accord_participation": "Accord participation",
                     "attestation": "Attestation employeur",
-                    "accord_entreprise": "Accord d entreprise",
-                    "accord_nao": "Accord NAO",
-                    "accord_gpec": "Accord GPEC",
-                    "accord_teletravail": "Accord teletravail",
-                    "accord_egalite": "Accord egalite pro",
-                    "accord_temps_travail": "Accord temps de travail",
-                    "pv_ag": "PV assemblee generale",
-                    "pv_ago": "PV AG ordinaire",
-                    "pv_age": "PV AG extraordinaire",
-                    "contrat_service": "Contrat de prestation",
+                    "accord_entreprise": "Accord d entreprise", "accord_nao": "Accord NAO",
+                    "accord_gpec": "Accord GPEC", "accord_teletravail": "Accord teletravail",
+                    "accord_egalite": "Accord egalite pro", "accord_temps_travail": "Accord temps de travail",
+                    "pv_ag": "PV assemblee generale", "pv_ago": "PV AG ordinaire", "pv_age": "PV AG extraordinaire",
+                    # Fiscal
+                    "liasse_fiscale": "Liasse fiscale", "declaration_tva": "Declaration TVA",
+                    "declaration_is": "Declaration IS", "das2": "DAS2",
+                    "taxe_salaires": "Taxe salaires", "cfe_cvae": "CFE/CVAE",
+                    "fec": "FEC", "releve_frais_generaux": "Frais generaux (2067)",
+                    # Comptable
+                    "bilan": "Bilan", "compte_resultat": "Compte de resultat",
+                    "rapport_cac": "Rapport CAC", "rapport_gestion": "Rapport de gestion", "budget": "Budget",
+                    # Social/RH
+                    "dpae": "DPAE", "registre_personnel": "Registre du personnel",
+                    "duerp": "DUERP", "reglement_interieur": "Reglement interieur",
+                    "avenant": "Avenant", "bilan_social": "Bilan social", "note_frais": "Note de frais",
+                    # Juridique
+                    "statuts": "Statuts", "kbis": "Kbis", "bail": "Bail",
+                    "assurance": "Assurance", "lettre_mission": "Lettre mission",
+                    # Commercial
+                    "devis": "Devis", "avoir": "Avoir", "bon_commande": "Bon de commande",
+                    "releve_bancaire": "Releve bancaire", "cerfa": "CERFA",
+                    "image_non_ocr": "Image (OCR indisponible)",
                 }
                 if doc_type == "inconnu" or not doc_type:
                     finfo["statut"] = "non_reconnu"
                     finfo["type_document"] = "Document non reconnu"
                     finfo["message"] = "Le type de ce document n a pas pu etre identifie. Les informations detectees ont ete extraites en mode generique."
+                elif doc_type == "image_non_ocr":
+                    finfo["statut"] = "analyse"
+                    finfo["type_document"] = nature_labels.get(doc_type, "Image")
+                    finfo["message"] = "Image classifiee par nom de fichier. L extraction OCR n est pas disponible sur cette plateforme. Renommez vos fichiers de maniere descriptive pour une meilleure classification."
                 else:
                     finfo["statut"] = "analyse"
                     finfo["type_document"] = nature_labels.get(doc_type, doc_type.replace("_", " ").title())

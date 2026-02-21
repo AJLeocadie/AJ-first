@@ -143,6 +143,338 @@ _KW_CONTRAT_SERVICE = [
     "cgv", "cgu",
 ]
 
+# ============================================================
+# COMPREHENSIVE DOCUMENT TYPES - Fiscal / Social / Juridique / Comptable
+# ============================================================
+
+# --- FISCAL ---
+_KW_LIASSE_FISCALE = [
+    "liasse fiscale", "cerfa 2050", "cerfa 2051", "cerfa 2052",
+    "cerfa 2053", "cerfa 2054", "cerfa 2055", "cerfa 2056",
+    "cerfa 2057", "cerfa 2058", "cerfa 2059",
+    "formulaire 2050", "formulaire 2065", "formulaire 2031",
+    "declaration de resultats", "déclaration de résultats",
+    "imprime fiscal", "imprimé fiscal",
+    "regime reel", "régime réel", "regime simplifie", "régime simplifié",
+    "bic", "bnc", "ba ",
+    "annexe 2050", "annexe 2051",
+    "actif immobilise", "actif immobilisé", "amortissements",
+    "provisions", "etat des immobilisations",
+]
+
+_KW_DECLARATION_TVA = [
+    "declaration de tva", "déclaration de tva",
+    "ca3", "ca 3", "ca12", "ca 12",
+    "cerfa 3310", "cerfa 3517",
+    "formulaire ca3", "formulaire ca12",
+    "tva collectee", "tva collectée", "tva deductible", "tva déductible",
+    "credit de tva", "crédit de tva", "tva nette",
+    "tva a reverser", "tva à reverser",
+    "tva intracommunautaire", "autoliquidation",
+    "regime reel normal", "regime simplifie",
+]
+
+_KW_DECLARATION_IS = [
+    "impot sur les societes", "impôt sur les sociétés",
+    "declaration is", "déclaration is",
+    "cerfa 2065", "formulaire 2065",
+    "resultat fiscal", "résultat fiscal",
+    "benefice imposable", "bénéfice imposable",
+    "deficit reportable", "déficit reportable",
+    "acompte is", "solde is",
+    "contribution sociale", "contribution additionnelle",
+    "taux normal", "taux reduit", "taux réduit",
+]
+
+_KW_DAS2 = [
+    "das2", "das 2", "declaration des honoraires",
+    "déclaration des honoraires",
+    "honoraires commissions", "droits auteur",
+    "vacations remuneration", "redevances",
+    "cerfa 10144", "formulaire das2",
+    "honoraires et vacations",
+    "beneficiaire des versements", "bénéficiaire des versements",
+]
+
+_KW_TAXE_SALAIRES = [
+    "taxe sur les salaires", "cerfa 2502",
+    "formulaire 2502", "declaration taxe salaires",
+    "déclaration taxe salaires",
+    "base imposable taxe salaires",
+    "taux majore", "taux majoré",
+    "franchise taxe salaires",
+]
+
+_KW_CFE_CVAE = [
+    "cfe", "cvae", "contribution fonciere",
+    "contribution economique territoriale",
+    "contribution foncière", "contribution économique territoriale",
+    "cotisation fonciere", "cotisation foncière",
+    "valeur ajoutee", "valeur ajoutée",
+    "cerfa 1447", "avis cfe",
+    "avis d imposition cfe", "avis d imposition cvae",
+]
+
+_KW_FEC = [
+    "fichier des ecritures comptables", "fichier des écritures comptables",
+    "fec ", "journal comptable",
+    "article l 47 a", "norme fec",
+    "ecritures comptables", "écritures comptables",
+    "grand livre", "balance generale", "balance générale",
+    "export comptable", "plan comptable",
+]
+
+# --- COMPTABLE ---
+_KW_BILAN = [
+    "bilan", "actif du bilan", "passif du bilan",
+    "comptes annuels", "exercice clos", "exercice clos le",
+    "total actif", "total passif",
+    "capitaux propres", "immobilisations",
+    "dettes", "creances", "créances",
+    "fonds propres", "resultat de l exercice",
+    "total du bilan",
+]
+
+_KW_COMPTE_RESULTAT = [
+    "compte de resultat", "compte de résultat",
+    "produits d exploitation", "charges d exploitation",
+    "produits financiers", "charges financieres", "charges financières",
+    "produits exceptionnels", "charges exceptionnelles",
+    "resultat d exploitation", "résultat d'exploitation",
+    "resultat courant", "résultat courant",
+    "chiffre d affaires", "chiffre d'affaires",
+    "resultat net", "résultat net",
+    "excedent brut", "excédent brut",
+]
+
+_KW_RAPPORT_CAC = [
+    "commissaire aux comptes", "rapport du commissaire",
+    "certification des comptes", "opinion d audit",
+    "rapport general", "rapport général",
+    "rapport special", "rapport spécial",
+    "rapport de gestion", "diligences",
+    "verification", "vérification",
+    "image fidele", "image fidèle",
+    "normes d exercice professionnel",
+    "compagnie nationale",
+]
+
+_KW_RAPPORT_GESTION = [
+    "rapport de gestion", "rapport annuel",
+    "compte rendu de gestion", "rapport du gerant",
+    "rapport du gérant", "rapport du directoire",
+    "rapport du conseil d administration",
+    "activite de l exercice", "activité de l'exercice",
+    "evolution de l activite", "évolution de l'activité",
+    "faits marquants", "evenements posterieurs",
+    "perspectives", "strategie",
+]
+
+_KW_BUDGET = [
+    "budget previsionnel", "budget prévisionnel",
+    "prevision budgetaire", "prévision budgétaire",
+    "plan de tresorerie", "plan de trésorerie",
+    "previsionnel", "prévisionnel",
+    "business plan", "plan d affaires",
+    "compte de resultat previsionnel",
+    "plan de financement",
+    "tableau de bord",
+]
+
+# --- SOCIAL / RH ---
+_KW_DPAE = [
+    "dpae", "declaration prealable", "déclaration préalable",
+    "declaration prealable a l embauche",
+    "déclaration préalable à l'embauche",
+    "cerfa 14738", "due ",
+    "declaration unique d embauche",
+    "déclaration unique d'embauche",
+]
+
+_KW_REGISTRE_PERSONNEL = [
+    "registre unique du personnel", "registre du personnel",
+    "registre des entrees et sorties",
+    "registre des entrées et sorties",
+    "article l1221-13", "l.1221-13",
+    "effectif de l entreprise", "effectif de l'entreprise",
+    "listing du personnel", "liste du personnel",
+    "tableau des effectifs",
+]
+
+_KW_DUERP = [
+    "document unique", "duerp", "duer",
+    "evaluation des risques", "évaluation des risques",
+    "risques professionnels",
+    "unite de travail", "unité de travail",
+    "facteurs de penibilite", "facteurs de pénibilité",
+    "plan de prevention", "plan de prévention",
+    "article r4121", "article l4121",
+]
+
+_KW_REGLEMENT_INTERIEUR = [
+    "reglement interieur", "règlement intérieur",
+    "dispositions generales", "discipline",
+    "sanctions disciplinaires",
+    "hygiene et securite", "hygiène et sécurité",
+    "droit de la defense", "droit de la défense",
+    "article l1321", "l.1321",
+    "entree en vigueur", "entrée en vigueur",
+    "inspection du travail",
+]
+
+_KW_AVENANT = [
+    "avenant au contrat", "avenant n",
+    "modification du contrat", "modification contractuelle",
+    "avenant de travail",
+    "clause modificative",
+    "il est convenu ce qui suit",
+    "les parties conviennent",
+    "en complement", "en complément",
+    "modification de la remuneration",
+    "modification de la rémunération",
+    "changement de poste", "mutation",
+]
+
+_KW_BILAN_SOCIAL = [
+    "bilan social", "indicateurs sociaux",
+    "article l2312-30", "l.2312-30",
+    "emploi et remuneration", "emploi et rémunération",
+    "conditions de travail", "formation professionnelle",
+    "relations professionnelles",
+    "effectif moyen", "repartition par age",
+    "turnover", "absenteisme", "absentéisme",
+    "accidents du travail",
+]
+
+_KW_NOTE_FRAIS = [
+    "note de frais", "etat de frais", "état de frais",
+    "frais de deplacement", "frais de déplacement",
+    "frais de mission", "frais de representation",
+    "frais de représentation",
+    "indemnites kilometriques", "indemnités kilométriques",
+    "frais de repas", "frais d hebergement",
+    "frais d'hébergement",
+    "justificatifs de depenses", "justificatifs de dépenses",
+    "remboursement de frais",
+]
+
+# --- JURIDIQUE ---
+_KW_STATUTS = [
+    "statuts de la societe", "statuts de la société",
+    "statuts constitutifs", "statuts mis a jour",
+    "objet social", "denomination sociale", "dénomination sociale",
+    "siege social", "siège social",
+    "capital social", "parts sociales", "actions",
+    "gerant", "gérant", "president", "président",
+    "associe", "associé", "actionnaire",
+    "duree de la societe", "durée de la société",
+    "exercice social", "repartition des benefices",
+    "cession de parts",
+]
+
+_KW_KBIS = [
+    "k bis", "kbis", "k-bis",
+    "extrait du registre", "registre du commerce",
+    "registre du commerce et des societes",
+    "registre du commerce et des sociétés",
+    "rcs ", "greffe du tribunal",
+    "immatriculation", "numero d identification",
+    "numéro d'identification",
+    "forme juridique", "date d immatriculation",
+]
+
+_KW_BAIL = [
+    "bail commercial", "bail professionnel",
+    "contrat de bail", "contrat de location",
+    "loyer mensuel", "loyer trimestriel",
+    "depot de garantie", "dépôt de garantie",
+    "bailleur", "preneur", "locataire",
+    "clause resolutoire", "clause résolutoire",
+    "etat des lieux", "état des lieux",
+    "revision du loyer", "révision du loyer",
+    "tacite reconduction",
+    "article l145", "code de commerce",
+]
+
+_KW_ASSURANCE = [
+    "police d assurance", "police d'assurance",
+    "contrat d assurance", "contrat d'assurance",
+    "responsabilite civile", "responsabilité civile",
+    "multirisque", "rc professionnelle",
+    "prime d assurance", "prime d'assurance",
+    "cotisation annuelle", "garantie",
+    "franchise", "sinistre", "indemnisation",
+    "assureur", "souscripteur",
+    "conditions particulieres", "conditions particulières",
+]
+
+_KW_RELEVE_BANCAIRE = [
+    "releve de compte", "relevé de compte",
+    "releve bancaire", "relevé bancaire",
+    "solde debiteur", "solde débiteur",
+    "solde crediteur", "solde créditeur",
+    "ancien solde", "nouveau solde",
+    "date de valeur", "libelle de l operation",
+    "virement", "prelevement", "prélèvement",
+    "cheque", "chèque", "carte bancaire",
+    "agios", "frais bancaires",
+]
+
+_KW_DEVIS = [
+    "devis", "proposition commerciale",
+    "offre de prix", "estimation",
+    "devis n", "validite du devis", "validité du devis",
+    "sous reserve", "sous réserve",
+    "bon pour accord",
+    "prix unitaire", "montant total",
+]
+
+_KW_AVOIR = [
+    "avoir", "note de credit", "note de crédit",
+    "facture d avoir", "facture d'avoir",
+    "avoir n", "credit note",
+    "remboursement", "annulation de facture",
+    "ristourne", "retour marchandise",
+]
+
+_KW_BON_COMMANDE = [
+    "bon de commande", "purchase order",
+    "commande n", "reference commande", "référence commande",
+    "date de commande", "date de livraison",
+    "conditions de livraison",
+    "accusé de reception", "accusé de réception",
+]
+
+_KW_CERFA = [
+    "cerfa n", "cerfa no", "formulaire cerfa",
+    "republique francaise", "république française",
+    "ministere", "ministère",
+    "direction generale des finances",
+    "direction générale des finances",
+    "service des impots", "service des impôts",
+    "centre des finances publiques",
+]
+
+_KW_RELEVE_FRAIS_GENERAUX = [
+    "releve de frais generaux", "relevé de frais généraux",
+    "cerfa 2067", "formulaire 2067",
+    "remunerations les plus elevees",
+    "rémunérations les plus élevées",
+    "frais de voyage", "depenses de reception",
+    "dépenses de réception",
+    "cadeaux", "frais generaux", "frais généraux",
+]
+
+_KW_LETTRE_MISSION = [
+    "lettre de mission", "mission d audit",
+    "mission d'audit", "mission de revision",
+    "mission de révision", "expert comptable",
+    "expert-comptable", "ordre des experts",
+    "diligences professionnelles",
+    "normes professionnelles",
+    "honoraires de l expert", "responsabilite de l expert",
+]
+
 
 # ============================================================
 # EXTRACTION REGEX PATTERNS
@@ -367,6 +699,24 @@ class PDFParser(BaseParser):
             return self._parser_pv_ag(texte_complet, document)
         elif doc_type == "contrat_service":
             return self._parser_contrat_service(texte_complet, document)
+        # --- Fiscal ---
+        elif doc_type in ("liasse_fiscale", "declaration_tva", "declaration_is", "das2",
+                          "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux"):
+            return self._parser_fiscal(texte_complet, document, doc_type)
+        # --- Comptable ---
+        elif doc_type in ("bilan", "compte_resultat", "rapport_cac", "rapport_gestion", "budget"):
+            return self._parser_comptable(texte_complet, document, doc_type)
+        # --- Social / RH ---
+        elif doc_type in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
+                          "avenant", "bilan_social"):
+            return self._parser_social_rh(texte_complet, document, doc_type)
+        # --- Juridique ---
+        elif doc_type in ("statuts", "kbis", "bail", "assurance", "lettre_mission"):
+            return self._parser_juridique(texte_complet, document, doc_type)
+        # --- Commercial ---
+        elif doc_type in ("devis", "avoir", "bon_commande", "note_frais",
+                          "releve_bancaire", "cerfa"):
+            return self._parser_commercial(texte_complet, document, doc_type)
         else:
             return self._parser_generique(texte_complet, tableaux, document)
 
@@ -375,28 +725,55 @@ class PDFParser(BaseParser):
         texte_lower = texte.lower()
         fname_lower = filename.lower()
 
-        scores = {
-            "bulletin": 0,
-            "facture": 0,
-            "contrat": 0,
-            "livre_de_paie": 0,
-            "interessement": 0,
-            "attestation": 0,
-            "accord": 0,
-            "pv_ag": 0,
-            "contrat_service": 0,
+        # All document type keyword lists
+        _ALL_KW = {
+            "bulletin": _KW_BULLETIN,
+            "facture": _KW_FACTURE,
+            "contrat": _KW_CONTRAT,
+            "livre_de_paie": _KW_LDP,
+            "interessement": _KW_INTERESSEMENT,
+            "attestation": _KW_ATTESTATION,
+            "accord": _KW_ACCORD,
+            "pv_ag": _KW_PV_AG,
+            "contrat_service": _KW_CONTRAT_SERVICE,
+            # Fiscal
+            "liasse_fiscale": _KW_LIASSE_FISCALE,
+            "declaration_tva": _KW_DECLARATION_TVA,
+            "declaration_is": _KW_DECLARATION_IS,
+            "das2": _KW_DAS2,
+            "taxe_salaires": _KW_TAXE_SALAIRES,
+            "cfe_cvae": _KW_CFE_CVAE,
+            "fec": _KW_FEC,
+            "releve_frais_generaux": _KW_RELEVE_FRAIS_GENERAUX,
+            # Comptable
+            "bilan": _KW_BILAN,
+            "compte_resultat": _KW_COMPTE_RESULTAT,
+            "rapport_cac": _KW_RAPPORT_CAC,
+            "rapport_gestion": _KW_RAPPORT_GESTION,
+            "budget": _KW_BUDGET,
+            # Social / RH
+            "dpae": _KW_DPAE,
+            "registre_personnel": _KW_REGISTRE_PERSONNEL,
+            "duerp": _KW_DUERP,
+            "reglement_interieur": _KW_REGLEMENT_INTERIEUR,
+            "avenant": _KW_AVENANT,
+            "bilan_social": _KW_BILAN_SOCIAL,
+            "note_frais": _KW_NOTE_FRAIS,
+            # Juridique
+            "statuts": _KW_STATUTS,
+            "kbis": _KW_KBIS,
+            "bail": _KW_BAIL,
+            "assurance": _KW_ASSURANCE,
+            "releve_bancaire": _KW_RELEVE_BANCAIRE,
+            # Commercial
+            "devis": _KW_DEVIS,
+            "avoir": _KW_AVOIR,
+            "bon_commande": _KW_BON_COMMANDE,
+            "cerfa": _KW_CERFA,
+            "lettre_mission": _KW_LETTRE_MISSION,
         }
 
-        # Content-based scoring
-        scores["bulletin"] = _count_keywords(texte_lower, _KW_BULLETIN)
-        scores["facture"] = _count_keywords(texte_lower, _KW_FACTURE)
-        scores["contrat"] = _count_keywords(texte_lower, _KW_CONTRAT)
-        scores["livre_de_paie"] = _count_keywords(texte_lower, _KW_LDP)
-        scores["interessement"] = _count_keywords(texte_lower, _KW_INTERESSEMENT)
-        scores["attestation"] = _count_keywords(texte_lower, _KW_ATTESTATION)
-        scores["accord"] = _count_keywords(texte_lower, _KW_ACCORD)
-        scores["pv_ag"] = _count_keywords(texte_lower, _KW_PV_AG)
-        scores["contrat_service"] = _count_keywords(texte_lower, _KW_CONTRAT_SERVICE)
+        scores = {k: _count_keywords(texte_lower, v) for k, v in _ALL_KW.items()}
 
         # Filename hints (strong boost)
         fname_hints = {
@@ -409,6 +786,41 @@ class PDFParser(BaseParser):
             "accord": ["accord", "nao", "gpec", "qvt", "negociation"],
             "pv_ag": ["pv_ag", "proces_verbal", "assemblee", "ag_"],
             "contrat_service": ["prestation", "sous_traitance", "cgv"],
+            # Fiscal
+            "liasse_fiscale": ["liasse", "2050", "2051", "2065", "2031"],
+            "declaration_tva": ["tva", "ca3", "ca12", "3310"],
+            "declaration_is": ["is_", "impot_societes", "2065"],
+            "das2": ["das2", "honoraires"],
+            "taxe_salaires": ["taxe_salaires", "2502"],
+            "cfe_cvae": ["cfe", "cvae", "cet_"],
+            "fec": ["fec_", "ecritures_comptables"],
+            "releve_frais_generaux": ["frais_generaux", "2067"],
+            # Comptable
+            "bilan": ["bilan", "comptes_annuels"],
+            "compte_resultat": ["compte_resultat", "resultat"],
+            "rapport_cac": ["rapport_cac", "commissaire", "certification"],
+            "rapport_gestion": ["rapport_gestion", "rapport_annuel"],
+            "budget": ["budget", "previsionnel", "business_plan"],
+            # Social / RH
+            "dpae": ["dpae", "due_"],
+            "registre_personnel": ["registre", "personnel", "effectif"],
+            "duerp": ["duerp", "duer", "document_unique", "risques"],
+            "reglement_interieur": ["reglement_interieur", "ri_"],
+            "avenant": ["avenant"],
+            "bilan_social": ["bilan_social"],
+            "note_frais": ["note_frais", "frais_deplacement", "ndf"],
+            # Juridique
+            "statuts": ["statuts", "statut_"],
+            "kbis": ["kbis", "k_bis", "extrait_rcs"],
+            "bail": ["bail", "location"],
+            "assurance": ["assurance", "police_", "rc_pro"],
+            "releve_bancaire": ["releve_bancaire", "releve_compte"],
+            # Commercial
+            "devis": ["devis", "proposition"],
+            "avoir": ["avoir", "credit_note"],
+            "bon_commande": ["bon_commande", "commande", "bc_"],
+            "cerfa": ["cerfa"],
+            "lettre_mission": ["lettre_mission", "mission_"],
         }
         for doc_type, hints in fname_hints.items():
             if any(h in fname_lower for h in hints):
@@ -1040,6 +1452,382 @@ class PDFParser(BaseParser):
 
         decl = Declaration(
             type_declaration="contrat_service",
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # FISCAL (liasse, TVA, IS, DAS2, taxe salaires, CFE/CVAE, FEC, frais generaux)
+    # ============================================================
+
+    def _parser_fiscal(self, texte: str, document: Document, doc_type: str) -> list[Declaration]:
+        """Parse un document fiscal (liasse, declaration TVA/IS, DAS2, etc.)."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+        texte_lower = texte.lower()
+
+        metadata = {"type_document": doc_type}
+
+        # Extract common fiscal fields
+        # Exercice
+        m = re.search(r"(?:exercice|periode|année)\s*(?:du|clos)?\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})\s*(?:au|a|à)\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+        if m:
+            metadata["exercice_debut"] = m.group(1)
+            metadata["exercice_fin"] = m.group(2)
+
+        # Cerfa number
+        m = re.search(r"cerfa\s*(?:n[°o]?)?\s*(\d{4,5})", texte, re.IGNORECASE)
+        if m:
+            metadata["cerfa_numero"] = m.group(1)
+
+        # Main amounts
+        for label, key in [
+            (r"(?:resultat|résultat)\s*(?:fiscal|net|de l exercice)", "resultat"),
+            (r"(?:chiffre\s*d\s*affaires|ca\s*net)", "chiffre_affaires"),
+            (r"(?:total\s*actif|actif\s*total)", "total_actif"),
+            (r"(?:total\s*passif|passif\s*total)", "total_passif"),
+            (r"(?:benefice|bénéfice)\s*(?:imposable|fiscal)?", "benefice"),
+            (r"(?:deficit|déficit)\s*(?:reportable)?", "deficit"),
+            (r"(?:tva\s*collectee|tva\s*collectée)", "tva_collectee"),
+            (r"(?:tva\s*deductible|tva\s*déductible)", "tva_deductible"),
+            (r"(?:tva\s*nette|tva\s*a\s*payer|tva\s*à\s*payer)", "tva_nette"),
+            (r"(?:credit\s*de\s*tva|crédit\s*de\s*tva)", "credit_tva"),
+            (r"(?:base\s*imposable)", "base_imposable"),
+            (r"(?:montant\s*de\s*l\s*impot|montant\s*de\s*l\s*impôt|impot\s*du|impôt\s*dû)", "montant_impot"),
+        ]:
+            m = re.search(label + r"\s*[:\s]*([\-]?[\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata[key] = float(_parse_montant_local(m.group(1)))
+
+        # DAS2 specific: count beneficiaires
+        if doc_type == "das2":
+            beneficiaires = re.findall(r"(?:beneficiaire|bénéficiaire)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            metadata["nb_beneficiaires"] = len(beneficiaires)
+            total_hon = re.search(r"(?:total\s*(?:des\s*)?honoraires|total\s*verse|total\s*versé)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if total_hon:
+                metadata["total_honoraires"] = float(_parse_montant_local(total_hon.group(1)))
+
+        decl = Declaration(
+            type_declaration=doc_type,
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # COMPTABLE (bilan, compte de resultat, rapport CAC/gestion, budget)
+    # ============================================================
+
+    def _parser_comptable(self, texte: str, document: Document, doc_type: str) -> list[Declaration]:
+        """Parse un document comptable (bilan, compte de resultat, rapport, budget)."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        metadata = {"type_document": doc_type}
+
+        # Exercice
+        m = re.search(r"(?:exercice|periode|année)\s*(?:du|clos)?\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+        if m:
+            metadata["exercice"] = m.group(1)
+
+        # Key financial amounts
+        for label, key in [
+            (r"(?:total\s*actif|actif\s*total)", "total_actif"),
+            (r"(?:total\s*passif|passif\s*total)", "total_passif"),
+            (r"(?:capitaux\s*propres|fonds\s*propres)", "capitaux_propres"),
+            (r"(?:resultat\s*net|résultat\s*net)", "resultat_net"),
+            (r"(?:resultat\s*d\s*exploitation|résultat\s*d\s*exploitation)", "resultat_exploitation"),
+            (r"(?:chiffre\s*d\s*affaires|chiffre\s*d'affaires)", "chiffre_affaires"),
+            (r"(?:excedent\s*brut|excédent\s*brut|ebe|ebitda)", "ebe"),
+            (r"(?:endettement|dettes\s*financieres|dettes\s*financières)", "endettement"),
+            (r"(?:tresorerie|trésorerie)\s*(?:nette)?", "tresorerie"),
+            (r"(?:dividende|distribution)", "dividendes"),
+        ]:
+            m = re.search(label + r"\s*[:\s]*([\-]?[\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata[key] = float(_parse_montant_local(m.group(1)))
+
+        # Rapport CAC: opinion
+        if doc_type == "rapport_cac":
+            if "certifie" in texte.lower() or "certifié" in texte.lower():
+                if "reserve" in texte.lower() or "réserve" in texte.lower():
+                    metadata["opinion"] = "certification_avec_reserves"
+                elif "refus" in texte.lower():
+                    metadata["opinion"] = "refus_de_certifier"
+                else:
+                    metadata["opinion"] = "certification_sans_reserve"
+
+        decl = Declaration(
+            type_declaration=doc_type,
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # SOCIAL / RH (DPAE, registre, DUERP, reglement interieur, avenant, bilan social)
+    # ============================================================
+
+    def _parser_social_rh(self, texte: str, document: Document, doc_type: str) -> list[Declaration]:
+        """Parse un document social/RH."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        metadata = {"type_document": doc_type}
+        employes = []
+
+        if doc_type == "dpae":
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+            m = re.search(r"(?:date\s*(?:d\s*)?embauche|date\s*d\s*entree|date\s*d\s*entrée)\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_embauche"] = m.group(1)
+            m = _RE_TYPE_CONTRAT.search(texte)
+            if m:
+                metadata["type_contrat"] = m.group(1).upper()
+
+        elif doc_type == "registre_personnel":
+            # Try to count listed employees
+            nirs = list(_RE_NIR.finditer(texte))
+            noms = list(re.finditer(r"(?:^|\n)\s*\d+\s*[|.)\s]+\s*([A-Z\u00C0-\u00FF]{2,})\s+([A-Za-z\u00C0-\u00FF]+)", texte))
+            for m in noms[:50]:
+                emp = Employe(nom=m.group(1).strip(), prenom=m.group(2).strip(), source_document_id=doc_id)
+                employes.append(emp)
+            if not employes and nirs:
+                for m in nirs[:50]:
+                    emp = Employe(nir=m.group(1).replace(" ", ""), source_document_id=doc_id)
+                    employes.append(emp)
+            metadata["effectif_detecte"] = len(employes)
+
+        elif doc_type == "avenant":
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+            m = re.search(r"(?:avenant\s*n[°o]?\s*)(\d+)", texte, re.IGNORECASE)
+            if m:
+                metadata["numero_avenant"] = m.group(1)
+            m = _RE_REMUNERATION.search(texte)
+            if m:
+                metadata["nouvelle_remuneration"] = float(_parse_montant_local(m.group(1)))
+
+        elif doc_type == "duerp":
+            # Count risk units
+            unites = re.findall(r"(?:unite|unité)\s*(?:de\s*)?travail\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            metadata["nb_unites_travail"] = len(unites)
+            risques = re.findall(r"(?:risque|danger)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            metadata["nb_risques_identifies"] = len(risques)
+
+        elif doc_type == "bilan_social":
+            # Extract key indicators
+            for label, key in [
+                (r"effectif\s*moyen", "effectif_moyen"),
+                (r"(?:taux\s*d\s*)?absenteisme|absentéisme", "taux_absenteisme"),
+                (r"(?:taux\s*de\s*)?turnover|rotation", "taux_turnover"),
+                (r"accidents?\s*(?:du\s*)?travail", "nb_at"),
+            ]:
+                m = re.search(label + r"\s*[:\s]*([\d\s]+(?:[.,]\d+)?)", texte, re.IGNORECASE)
+                if m:
+                    try:
+                        metadata[key] = float(m.group(1).replace(" ", "").replace(",", "."))
+                    except ValueError:
+                        pass
+
+        brut = Decimal("0")
+        if doc_type in ("dpae", "avenant"):
+            m = _RE_BRUT.search(texte)
+            if m:
+                brut = _parse_montant_local(m.group(1))
+            elif doc_type == "avenant":
+                m = _RE_REMUNERATION.search(texte)
+                if m:
+                    brut = _parse_montant_local(m.group(1))
+
+        decl = Declaration(
+            type_declaration=doc_type,
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=employes,
+            masse_salariale_brute=brut,
+            effectif_declare=len(employes),
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # JURIDIQUE (statuts, Kbis, bail, assurance, lettre de mission)
+    # ============================================================
+
+    def _parser_juridique(self, texte: str, document: Document, doc_type: str) -> list[Declaration]:
+        """Parse un document juridique."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        metadata = {"type_document": doc_type}
+
+        if doc_type == "statuts":
+            m = re.search(r"(?:denomination|dénomination)\s*(?:sociale)?\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["denomination"] = m.group(1).strip()[:100]
+            m = re.search(r"(?:capital\s*social)\s*[:\s]*([\d\s]+(?:[.,]\d+)?)\s*(?:euros|EUR|€)", texte, re.IGNORECASE)
+            if m:
+                metadata["capital_social"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:objet\s*social)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["objet_social"] = m.group(1).strip()[:200]
+            m = re.search(r"(?:siege\s*social|siège\s*social)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["siege_social"] = m.group(1).strip()[:150]
+            # Forme juridique
+            m = re.search(r"(?:sarl|sas|sa |eurl|sci|snc|sasu|societe\s*[aà]\s*responsabilite|société\s*[aà]\s*responsabilité|societe\s*anonyme|société\s*anonyme|societe\s*par\s*actions|société\s*par\s*actions)", texte, re.IGNORECASE)
+            if m:
+                metadata["forme_juridique"] = m.group(0).strip().upper()
+
+        elif doc_type == "kbis":
+            m = re.search(r"(?:rcs|r\.c\.s\.?)\s*(?:de\s*)?([^\n,]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["rcs"] = m.group(1).strip()[:60]
+            m = re.search(r"(?:date\s*d\s*immatriculation)\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_immatriculation"] = m.group(1)
+            m = re.search(r"(?:forme\s*juridique)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["forme_juridique"] = m.group(1).strip()[:60]
+
+        elif doc_type == "bail":
+            m = re.search(r"(?:loyer)\s*(?:mensuel|trimestriel|annuel)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["loyer"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:duree|durée)\s*(?:du\s*bail)?\s*[:\s]*([^\n,;.]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["duree_bail"] = m.group(1).strip()[:60]
+            m = re.search(r"(?:depot\s*de\s*garantie|dépôt\s*de\s*garantie)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["depot_garantie"] = float(_parse_montant_local(m.group(1)))
+
+        elif doc_type == "assurance":
+            m = re.search(r"(?:prime)\s*(?:annuelle|mensuelle)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["prime"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:franchise)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["franchise"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:assureur|compagnie)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["assureur"] = m.group(1).strip()[:80]
+
+        elif doc_type == "lettre_mission":
+            m = re.search(r"(?:expert[\s-]?comptable|cabinet)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["cabinet"] = m.group(1).strip()[:80]
+            m = re.search(r"(?:honoraires)\s*(?:annuels?)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["honoraires"] = float(_parse_montant_local(m.group(1)))
+
+        decl = Declaration(
+            type_declaration=doc_type,
+            reference=document.nom_fichier,
+            employeur=employeur,
+            employes=[],
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    # ============================================================
+    # COMMERCIAL (devis, avoir, bon de commande, note de frais, releve bancaire, cerfa)
+    # ============================================================
+
+    def _parser_commercial(self, texte: str, document: Document, doc_type: str) -> list[Declaration]:
+        """Parse un document commercial."""
+        doc_id = document.id
+        employeur = self._extraire_employeur(texte, doc_id)
+
+        metadata = {"type_document": doc_type}
+
+        # Common: montant HT/TTC/TVA
+        m = _RE_MONTANT_HT.search(texte)
+        if m:
+            metadata["montant_ht"] = float(_parse_montant_local(m.group(1)))
+        m = _RE_MONTANT_TVA.search(texte)
+        if m:
+            metadata["montant_tva"] = float(_parse_montant_local(m.group(1)))
+        m = _RE_MONTANT_TTC.search(texte)
+        if m:
+            metadata["montant_ttc"] = float(_parse_montant_local(m.group(1)))
+
+        if doc_type == "note_frais":
+            emp = self._extraire_employe(texte, doc_id)
+            employes = [emp] if (emp.nom or emp.nir) else []
+            # Total frais
+            m = re.search(r"(?:total|montant\s*total)\s*(?:des\s*frais)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["total_frais"] = float(_parse_montant_local(m.group(1)))
+
+            decl = Declaration(
+                type_declaration=doc_type,
+                reference=document.nom_fichier,
+                employeur=employeur,
+                employes=employes,
+                source_document_id=doc_id,
+                metadata=metadata,
+            )
+            return [decl]
+
+        elif doc_type == "releve_bancaire":
+            # Extract soldes
+            m = re.search(r"(?:ancien\s*solde|solde\s*(?:au|en)\s*debut|solde\s*initial)\s*[:\s]*([\-]?[\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["solde_initial"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:nouveau\s*solde|solde\s*(?:au|en)\s*fin|solde\s*final)\s*[:\s]*([\-]?[\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["solde_final"] = float(_parse_montant_local(m.group(1)))
+            # Count operations
+            ops = re.findall(r"\d{2}[/.-]\d{2}[/.-]\d{2,4}\s+.+?\s+[\-]?[\d\s]+[.,]\d{2}", texte)
+            metadata["nb_operations"] = len(ops)
+
+        elif doc_type == "devis":
+            m = re.search(r"(?:devis|proposition)\s*(?:n[°o]?\s*)?[:\s]*([A-Z0-9][\w\-]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["numero_devis"] = m.group(1)
+            m = re.search(r"(?:validite|validité)\s*[:\s]*([^\n,;]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["validite"] = m.group(1).strip()[:40]
+
+        elif doc_type == "avoir":
+            m = re.search(r"(?:avoir|credit\s*note)\s*(?:n[°o]?\s*)?[:\s]*([A-Z0-9][\w\-]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["numero_avoir"] = m.group(1)
+            m = re.search(r"(?:facture\s*(?:d\s*)?origine|reference\s*facture|référence\s*facture)\s*[:\s]*([A-Z0-9][\w\-]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["facture_origine"] = m.group(1)
+
+        elif doc_type == "bon_commande":
+            m = re.search(r"(?:commande|bon\s*de\s*commande)\s*(?:n[°o]?\s*)?[:\s]*([A-Z0-9][\w\-]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["numero_commande"] = m.group(1)
+
+        elif doc_type == "cerfa":
+            m = re.search(r"cerfa\s*(?:n[°o]?\s*)?(\d{4,5}(?:\*\d+)?)", texte, re.IGNORECASE)
+            if m:
+                metadata["cerfa_numero"] = m.group(1)
+            m = re.search(r"(?:annee|année|exercice)\s*[:\s]*(\d{4})", texte, re.IGNORECASE)
+            if m:
+                metadata["annee"] = m.group(1)
+
+        decl = Declaration(
+            type_declaration=doc_type,
             reference=document.nom_fichier,
             employeur=employeur,
             employes=[],

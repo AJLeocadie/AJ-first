@@ -4,6 +4,9 @@ Utilise le LecteurMultiFormat (OCR pytesseract si disponible,
 extraction basique sinon) pour extraire le texte des images,
 puis applique les memes regex que le PDF parser pour detecter
 les donnees sociales.
+
+Sur Vercel serverless (pas de Tesseract), effectue une classification
+par nom de fichier et tente une extraction basique des metadonnees.
 """
 
 import re
@@ -51,6 +54,70 @@ _COTISATION_PATTERNS = [
 
 _RE_MONTANT = re.compile(r"([\d\s]+[.,]\d{2})")
 
+# Classification par nom de fichier
+_FNAME_TYPE_MAP = {
+    "bulletin": ["bulletin", "paie", "salaire", "fiche_paie", "bp_", "bul_"],
+    "facture": ["facture", "invoice", "fac_", "fact_"],
+    "contrat": ["contrat", "cdi", "cdd", "embauche"],
+    "livre_de_paie": ["livre_de_paie", "ldp", "recap"],
+    "attestation": ["attestation", "certificat", "solde"],
+    "accord": ["accord", "nao", "gpec", "qvt"],
+    "pv_ag": ["pv_ag", "proces_verbal", "assemblee", "ag_"],
+    "contrat_service": ["prestation", "sous_traitance"],
+    "liasse_fiscale": ["liasse", "2050", "2051", "2065"],
+    "declaration_tva": ["tva", "ca3", "ca12"],
+    "das2": ["das2", "honoraires"],
+    "bilan": ["bilan", "comptes_annuels"],
+    "compte_resultat": ["compte_resultat"],
+    "dpae": ["dpae", "due_"],
+    "registre_personnel": ["registre", "effectif"],
+    "duerp": ["duerp", "document_unique"],
+    "reglement_interieur": ["reglement_interieur"],
+    "avenant": ["avenant"],
+    "statuts": ["statuts"],
+    "kbis": ["kbis", "k_bis"],
+    "bail": ["bail"],
+    "assurance": ["assurance", "police_"],
+    "releve_bancaire": ["releve_bancaire", "releve_compte"],
+    "devis": ["devis"],
+    "avoir": ["avoir"],
+    "note_frais": ["note_frais", "ndf"],
+    "bon_commande": ["bon_commande", "commande"],
+    "budget": ["budget", "previsionnel"],
+}
+
+# Labels for document types
+_TYPE_LABELS = {
+    "bulletin": "Bulletin de paie (image)",
+    "facture": "Facture (image)",
+    "contrat": "Contrat de travail (image)",
+    "livre_de_paie": "Livre de paie (image)",
+    "attestation": "Attestation (image)",
+    "accord": "Accord d entreprise (image)",
+    "pv_ag": "PV d assemblee generale (image)",
+    "contrat_service": "Contrat de prestation (image)",
+    "liasse_fiscale": "Liasse fiscale (image)",
+    "declaration_tva": "Declaration TVA (image)",
+    "das2": "DAS2 (image)",
+    "bilan": "Bilan (image)",
+    "compte_resultat": "Compte de resultat (image)",
+    "dpae": "DPAE (image)",
+    "registre_personnel": "Registre du personnel (image)",
+    "duerp": "DUERP (image)",
+    "reglement_interieur": "Reglement interieur (image)",
+    "avenant": "Avenant (image)",
+    "statuts": "Statuts (image)",
+    "kbis": "Extrait Kbis (image)",
+    "bail": "Bail (image)",
+    "assurance": "Assurance (image)",
+    "releve_bancaire": "Releve bancaire (image)",
+    "devis": "Devis (image)",
+    "avoir": "Avoir (image)",
+    "note_frais": "Note de frais (image)",
+    "bon_commande": "Bon de commande (image)",
+    "budget": "Budget (image)",
+}
+
 
 def _parse_montant(s: str) -> Decimal:
     """Parse un montant texte en Decimal."""
@@ -59,6 +126,15 @@ def _parse_montant(s: str) -> Decimal:
         return Decimal(s)
     except Exception:
         return Decimal("0")
+
+
+def _classify_by_filename(filename: str) -> str:
+    """Classify document type from filename."""
+    fname_lower = filename.lower()
+    for doc_type, hints in _FNAME_TYPE_MAP.items():
+        if any(h in fname_lower for h in hints):
+            return doc_type
+    return ""
 
 
 class ImageParser(BaseParser):
@@ -73,10 +149,17 @@ class ImageParser(BaseParser):
     def parser(self, chemin: Path, document: Document) -> list[Declaration]:
         resultat = self.lecteur.lire_fichier(chemin)
         texte = resultat.texte
-        if not texte or len(texte.strip()) < 10:
-            return []
+        ocr_available = resultat.confiance_ocr >= 0.5
 
-        return self._extraire_declarations(texte, document)
+        # Classify document by filename first
+        fname_type = _classify_by_filename(chemin.name)
+
+        if texte and len(texte.strip()) >= 10 and ocr_available:
+            # OCR available and produced text - full extraction
+            return self._extraire_declarations(texte, document, fname_type)
+
+        # OCR NOT available (Vercel) or poor text - filename-based classification
+        return self._parser_sans_ocr(document, chemin, fname_type, resultat.avertissements)
 
     def extraire_metadata(self, chemin: Path) -> dict[str, Any]:
         resultat = self.lecteur.lire_fichier(chemin)
@@ -89,10 +172,78 @@ class ImageParser(BaseParser):
             "avertissements": resultat.avertissements,
         }
 
-    def _extraire_declarations(self, texte: str, document: Document) -> list[Declaration]:
+    def _parser_sans_ocr(self, document: Document, chemin: Path, fname_type: str, avertissements: list) -> list[Declaration]:
+        """Parse when OCR is not available - uses filename classification."""
+        doc_id = document.id
+        employeur = Employeur(source_document_id=doc_id)
+        metadata = {
+            "type_document": fname_type or "image_non_ocr",
+            "ocr_disponible": False,
+            "avertissements": avertissements + [
+                "L extraction automatique du contenu de cette image n est pas disponible "
+                "sur cette plateforme (moteur OCR Tesseract non installe). "
+                "Le type de document a ete identifie a partir du nom de fichier. "
+                "Pour une extraction complete, renommez vos fichiers de maniere descriptive "
+                "(ex: bulletin_paie_dupont_01_2025.jpg, facture_fournisseur_123.png)."
+            ],
+        }
+
+        # Try to extract info from filename
+        fname = chemin.stem.lower()
+        # Look for SIRET in filename
+        m = re.search(r"(\d{14})", fname)
+        if m:
+            employeur.siret = m.group(1)
+            employeur.siren = m.group(1)[:9]
+
+        # Look for period in filename
+        periode = None
+        m = re.search(r"(\d{2})[_\-]?(\d{4})", fname)
+        if m:
+            try:
+                from datetime import date as date_cls
+                import calendar
+                mois = int(m.group(1))
+                annee = int(m.group(2))
+                if 1 <= mois <= 12 and 2000 <= annee <= 2030:
+                    debut = date_cls(annee, mois, 1)
+                    fin = date_cls(annee, mois, calendar.monthrange(annee, mois)[1])
+                    periode = DateRange(debut=debut, fin=fin)
+            except (ValueError, TypeError):
+                pass
+
+        # Look for name in filename
+        emp = Employe(source_document_id=doc_id)
+        parts = re.split(r'[_\-\s]+', chemin.stem)
+        excluded = {"bulletin", "paie", "salaire", "fiche", "bp", "bul", "pdf", "jpg",
+                     "png", "scan", "img", "photo", "document", "doc", "facture",
+                     "contrat", "attestation", "accord", "devis", "avoir", "bilan"}
+        for p in parts:
+            if len(p) >= 3 and p.isalpha() and p.lower() not in excluded:
+                emp.nom = p.upper()
+                break
+
+        employes = [emp] if emp.nom else []
+
+        decl = Declaration(
+            type_declaration=fname_type or "image",
+            reference=document.nom_fichier,
+            periode=periode,
+            employeur=employeur,
+            employes=employes,
+            masse_salariale_brute=Decimal("0"),
+            effectif_declare=len(employes),
+            source_document_id=doc_id,
+            metadata=metadata,
+        )
+        return [decl]
+
+    def _extraire_declarations(self, texte: str, document: Document, fname_type: str) -> list[Declaration]:
         """Extrait les declarations depuis le texte OCR."""
+        doc_id = document.id
+
         # Employeur
-        employeur = Employeur(source_document_id=document.id)
+        employeur = Employeur(source_document_id=doc_id)
         m = _RE_SIRET.search(texte)
         if m:
             siret = m.group(1).replace(" ", "")
@@ -104,7 +255,7 @@ class ImageParser(BaseParser):
                 employeur.siren = m.group(1)
 
         # Employe
-        emp = Employe(source_document_id=document.id)
+        emp = Employe(source_document_id=doc_id)
         m = _RE_NIR.search(texte)
         if m:
             emp.nir = m.group(1).replace(" ", "")
@@ -145,40 +296,73 @@ class ImageParser(BaseParser):
             except (ValueError, TypeError):
                 pass
 
-        # Cotisations
+        # Detect type from content
+        doc_type = self._detect_type_from_text(texte) or fname_type or "bulletin_de_paie"
+
+        # Cotisations (only for paie-related documents)
         cotisations = []
-        lignes = texte.split("\n")
-        for ligne in lignes:
-            for pattern, ct in _COTISATION_PATTERNS:
-                if pattern.search(ligne):
-                    montants = _RE_MONTANT.findall(ligne)
-                    if montants:
-                        vals = [_parse_montant(m) for m in montants]
-                        base = brut if brut > 0 else (vals[0] if len(vals) >= 1 else Decimal("0"))
-                        taux_p = vals[1] if len(vals) >= 4 else Decimal("0")
-                        montant_p = vals[2] if len(vals) >= 4 else (vals[-1] if vals else Decimal("0"))
-                        cotisations.append(Cotisation(
-                            type_cotisation=ct,
-                            base_brute=base,
-                            assiette=base,
-                            taux_patronal=taux_p,
-                            montant_patronal=montant_p,
-                            employe_id=emp.id,
-                            employeur_id=employeur.id,
-                            periode=periode,
-                            source_document_id=document.id,
-                        ))
-                    break
+        if doc_type in ("bulletin", "bulletin_de_paie", "livre_de_paie", ""):
+            lignes = texte.split("\n")
+            for ligne in lignes:
+                for pattern, ct in _COTISATION_PATTERNS:
+                    if pattern.search(ligne):
+                        montants = _RE_MONTANT.findall(ligne)
+                        if montants:
+                            vals = [_parse_montant(m) for m in montants]
+                            base = brut if brut > 0 else (vals[0] if len(vals) >= 1 else Decimal("0"))
+                            taux_p = vals[1] if len(vals) >= 4 else Decimal("0")
+                            montant_p = vals[2] if len(vals) >= 4 else (vals[-1] if vals else Decimal("0"))
+                            cotisations.append(Cotisation(
+                                type_cotisation=ct,
+                                base_brute=base,
+                                assiette=base,
+                                taux_patronal=taux_p,
+                                montant_patronal=montant_p,
+                                employe_id=emp.id,
+                                employeur_id=employeur.id,
+                                periode=periode,
+                                source_document_id=doc_id,
+                            ))
+                        break
+
+        metadata = {
+            "type_document": doc_type,
+            "ocr_disponible": True,
+        }
 
         decl = Declaration(
-            type_declaration="bulletin",
+            type_declaration=doc_type.split("_")[0] if "_" in doc_type else doc_type,
             reference=document.nom_fichier,
             periode=periode,
             employeur=employeur,
-            employes=[emp],
+            employes=[emp] if (emp.nom or emp.nir) else [],
             cotisations=cotisations,
             masse_salariale_brute=brut,
-            effectif_declare=1,
-            source_document_id=document.id,
+            effectif_declare=1 if (emp.nom or emp.nir) else 0,
+            source_document_id=doc_id,
+            metadata=metadata,
         )
         return [decl]
+
+    def _detect_type_from_text(self, texte: str) -> str:
+        """Simple content-based type detection for OCR text."""
+        texte_lower = texte.lower()
+        checks = [
+            ("bulletin", ["bulletin de paie", "net a payer", "cotisations salariales", "salaire brut"]),
+            ("facture", ["facture", "montant ht", "montant ttc", "tva"]),
+            ("contrat", ["contrat de travail", "periode d essai", "cdi", "cdd"]),
+            ("attestation", ["attestation employeur", "certificat de travail", "solde de tout compte"]),
+            ("accord", ["accord d entreprise", "accord collectif", "negociation annuelle"]),
+            ("pv_ag", ["assemblee generale", "proces verbal", "resolution"]),
+            ("bilan", ["bilan", "total actif", "total passif", "capitaux propres"]),
+            ("declaration_tva", ["declaration de tva", "tva collectee", "tva deductible"]),
+            ("liasse_fiscale", ["liasse fiscale", "cerfa 2050", "declaration de resultats"]),
+        ]
+        best = ""
+        best_score = 0
+        for doc_type, keywords in checks:
+            score = sum(1 for kw in keywords if kw in texte_lower)
+            if score > best_score:
+                best_score = score
+                best = doc_type
+        return best if best_score >= 2 else ""
