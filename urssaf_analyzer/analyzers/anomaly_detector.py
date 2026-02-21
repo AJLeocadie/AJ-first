@@ -183,32 +183,182 @@ class AnomalyDetector(BaseAnalyzer):
                         reference_legale=ref_legale,
                     ))
 
-            # FNAL deplafonne >= 50 salaries : verifier que c'est bien le bon taux
-            if effectif >= SEUIL_EFFECTIF_50 and ContributionType.FNAL in types_presents:
+            # FNAL : verifier le taux exact selon effectif
+            if ContributionType.FNAL in types_presents:
                 fnal_cots = [c for c in decl.cotisations if c.type_cotisation == ContributionType.FNAL]
                 for fc in fnal_cots:
-                    if fc.taux_patronal > 0 and fc.taux_patronal < Decimal("0.004"):
+                    if fc.taux_patronal > 0:
+                        if effectif >= SEUIL_EFFECTIF_50:
+                            # >= 50 : doit etre 0.50% deplafonne
+                            taux_attendu = Decimal("0.005")
+                            if abs(fc.taux_patronal - taux_attendu) > TOLERANCE_TAUX:
+                                findings.append(Finding(
+                                    categorie=FindingCategory.ANOMALIE,
+                                    severite=Severity.HAUTE,
+                                    titre="FNAL : taux incorrect pour effectif >= 50",
+                                    description=(
+                                        f"L'entreprise a {effectif} salaries (>= 50). "
+                                        f"Le FNAL doit etre calcule au taux deplafonne de 0.50% "
+                                        f"sur la totalite du salaire.\\n\\n"
+                                        f"Taux constate : {float(fc.taux_patronal)*100:.2f}%\\n"
+                                        f"Taux attendu : 0.50% (deplafonne)\\n\\n"
+                                        f"Impact : ecart systematique de cotisations."
+                                    ),
+                                    valeur_constatee=f"{float(fc.taux_patronal)*100:.2f}%",
+                                    valeur_attendue="0.50%",
+                                    score_risque=80,
+                                    recommandation="Corriger le taux FNAL a 0.50% deplafonne pour effectif >= 50.",
+                                    detecte_par=self.nom,
+                                    documents_concernes=[decl.source_document_id or decl.id],
+                                    reference_legale="Art. L834-1 CSS - FNAL deplafonne >= 50 salaries",
+                                ))
+                        else:
+                            # < 50 : doit etre 0.10% plafonne au PASS
+                            taux_attendu = Decimal("0.001")
+                            if abs(fc.taux_patronal - taux_attendu) > TOLERANCE_TAUX:
+                                findings.append(Finding(
+                                    categorie=FindingCategory.ANOMALIE,
+                                    severite=Severity.MOYENNE,
+                                    titre="FNAL : taux incorrect pour effectif < 50",
+                                    description=(
+                                        f"L'entreprise a {effectif} salaries (< 50). "
+                                        f"Le FNAL doit etre calcule au taux de 0.10% "
+                                        f"plafonne au PASS ({PASS_MENSUEL} EUR/mois).\\n\\n"
+                                        f"Taux constate : {float(fc.taux_patronal)*100:.2f}%\\n"
+                                        f"Taux attendu : 0.10% (plafonne PASS)"
+                                    ),
+                                    valeur_constatee=f"{float(fc.taux_patronal)*100:.2f}%",
+                                    valeur_attendue="0.10%",
+                                    score_risque=60,
+                                    recommandation="Corriger le taux FNAL a 0.10% plafonne au PASS pour effectif < 50.",
+                                    detecte_par=self.nom,
+                                    documents_concernes=[decl.source_document_id or decl.id],
+                                    reference_legale="Art. L834-1 CSS - FNAL plafonne < 50 salaries",
+                                ))
+
+            # Verification NIR format (13 chiffres + 2 cle)
+            for emp in decl.employes:
+                if emp.nir and emp.nir.strip():
+                    nir = emp.nir.strip().replace(" ", "")
+                    if len(nir) >= 13:
+                        nir_base = nir[:13]
+                        if not nir_base.isdigit():
+                            findings.append(Finding(
+                                categorie=FindingCategory.ANOMALIE,
+                                severite=Severity.HAUTE,
+                                titre=f"NIR invalide : format incorrect ({emp.prenom} {emp.nom})",
+                                description=(
+                                    f"Le NIR de {emp.prenom} {emp.nom} ne contient pas "
+                                    f"uniquement des chiffres : '{nir[:5]}...'.\\n\\n"
+                                    f"Le NIR (numero de securite sociale) doit etre compose "
+                                    f"de 13 chiffres + 2 chiffres de cle de controle."
+                                ),
+                                valeur_constatee=f"{nir[:5]}...",
+                                valeur_attendue="13 chiffres + 2 cle",
+                                score_risque=75,
+                                recommandation="Verifier et corriger le NIR du salarie.",
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id or decl.id],
+                                reference_legale="Art. R.114-7 CSS - NIR",
+                            ))
+                        elif len(nir) >= 15:
+                            # Verification cle de controle (97 - NIR mod 97)
+                            try:
+                                nir_num = int(nir_base)
+                                cle = int(nir[13:15])
+                                cle_attendue = 97 - (nir_num % 97)
+                                if cle != cle_attendue:
+                                    findings.append(Finding(
+                                        categorie=FindingCategory.ANOMALIE,
+                                        severite=Severity.HAUTE,
+                                        titre=f"NIR invalide : cle de controle ({emp.prenom} {emp.nom})",
+                                        description=(
+                                            f"La cle de controle du NIR de {emp.prenom} {emp.nom} "
+                                            f"est incorrecte.\\n"
+                                            f"Cle constatee : {cle:02d}\\n"
+                                            f"Cle attendue : {cle_attendue:02d}\\n\\n"
+                                            f"Une erreur de saisie du NIR entrainera le rejet "
+                                            f"de la DSN par Net-Entreprises."
+                                        ),
+                                        valeur_constatee=f"cle {cle:02d}",
+                                        valeur_attendue=f"cle {cle_attendue:02d}",
+                                        score_risque=80,
+                                        recommandation="Corriger le NIR. Verifier aupres du salarie avec sa carte vitale.",
+                                        detecte_par=self.nom,
+                                        documents_concernes=[decl.source_document_id or decl.id],
+                                        reference_legale="Decret 92-556 - Format NIR",
+                                    ))
+                            except (ValueError, IndexError):
+                                pass
+
+            # Verification net > brut (anomalie logique)
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                if emp_cots:
+                    brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                    total_salarial = sum((c.montant_salarial for c in emp_cots if c.montant_salarial > 0), Decimal("0"))
+                    net_estime = brut - total_salarial
+                    if brut > 0 and net_estime > brut:
                         findings.append(Finding(
                             categorie=FindingCategory.ANOMALIE,
                             severite=Severity.HAUTE,
-                            titre="FNAL : taux plafonne applique au lieu du deplafonne",
+                            titre=f"Net superieur au brut ({emp.prenom} {emp.nom})",
                             description=(
-                                f"L'entreprise a {effectif} salaries (>= 50). "
-                                f"Le FNAL doit etre calcule au taux deplafonne de 0.50% "
-                                f"sur la totalite du salaire, et non au taux plafonne "
-                                f"de 0.10%.\\n\\n"
-                                f"Taux constate : {float(fc.taux_patronal)*100:.2f}%\\n"
-                                f"Taux attendu : 0.50%\\n\\n"
-                                f"Impact : sous-declaration systematique de cotisations."
+                                f"Le net estime pour {emp.prenom} {emp.nom} est superieur "
+                                f"au brut : net estime {net_estime:.2f} EUR > brut {brut:.2f} EUR.\\n\\n"
+                                f"C'est impossible en paie standard : les cotisations salariales "
+                                f"reduisent toujours le brut pour obtenir le net."
                             ),
-                            valeur_constatee=f"{float(fc.taux_patronal)*100:.2f}%",
-                            valeur_attendue="0.50%",
-                            score_risque=80,
-                            recommandation="Corriger le taux FNAL a 0.50% deplafonne pour effectif >= 50.",
+                            valeur_constatee=f"net {net_estime:.2f} EUR",
+                            valeur_attendue=f"< brut {brut:.2f} EUR",
+                            score_risque=90,
+                            recommandation="Verifier la coherence des montants de cotisations salariales.",
                             detecte_par=self.nom,
                             documents_concernes=[decl.source_document_id or decl.id],
-                            reference_legale="Art. L834-1 CSS - FNAL deplafonne >= 50 salaries",
+                            reference_legale="Art. L3243-2 Code du travail - Bulletin de paie",
                         ))
+
+            # Verification SMIC (salaire minimum)
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                if emp_cots:
+                    brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                    if Decimal("0") < brut < SMIC_MENSUEL_BRUT:
+                        # Verifier si temps partiel
+                        temps_travail = emp.temps_travail if emp.temps_travail > 0 else Decimal("1.0")
+                        smic_proratis = SMIC_MENSUEL_BRUT * temps_travail
+                        if brut < smic_proratis - TOLERANCE_MONTANT:
+                            est_apprenti_emp = _est_apprenti(emp)
+                            if est_apprenti_emp:
+                                severity = Severity.FAIBLE
+                                note = " (apprenti : SMIC reduit possible)"
+                                score = 20
+                            else:
+                                severity = Severity.HAUTE
+                                note = ""
+                                score = 85
+                            findings.append(Finding(
+                                categorie=FindingCategory.ANOMALIE,
+                                severite=severity,
+                                titre=f"Salaire inferieur au SMIC{note}",
+                                description=(
+                                    f"Le salaire brut de {emp.prenom} {emp.nom} ({brut:.2f} EUR) "
+                                    f"est inferieur au SMIC mensuel 2026 "
+                                    f"({SMIC_MENSUEL_BRUT} EUR pour un temps plein).\\n\\n"
+                                    f"Temps de travail declare : {float(temps_travail)*100:.0f}%\\n"
+                                    f"SMIC proratise : {smic_proratis:.2f} EUR\\n\\n"
+                                    f"Que faire ?\\n"
+                                    f"Verifier le salaire de base et le temps de travail du salarie."
+                                ),
+                                valeur_constatee=f"{brut:.2f} EUR",
+                                valeur_attendue=f">= {smic_proratis:.2f} EUR",
+                                montant_impact=smic_proratis - brut,
+                                score_risque=score,
+                                recommandation="Verifier et corriger le salaire pour respecter le SMIC.",
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id or decl.id],
+                                reference_legale="Art. L3231-2 Code du travail - SMIC 2026",
+                            ))
 
         return findings
 

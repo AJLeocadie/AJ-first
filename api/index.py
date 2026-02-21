@@ -25,7 +25,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from urssaf_analyzer.config.settings import AppConfig
-from urssaf_analyzer.config.constants import SUPPORTED_EXTENSIONS
+from urssaf_analyzer.config.constants import SUPPORTED_EXTENSIONS, SMIC_MENSUEL_BRUT as _SMIC_MENSUEL, PASS_MENSUEL as _PASS_MENSUEL
 from urssaf_analyzer.core.orchestrator import Orchestrator
 from urssaf_analyzer.core.exceptions import URSSAFAnalyzerError
 from urssaf_analyzer.database.db_manager import Database
@@ -1849,7 +1849,7 @@ async def sim_exonerations(
     duree_contrat_mois: int = Query(0),
 ):
     brut = brut_mensuel
-    smic_mensuel = 1801.80
+    smic_mensuel = float(_SMIC_MENSUEL)
     ratio_smic = brut / smic_mensuel if smic_mensuel > 0 else 1
 
     exonerations = []
@@ -2863,7 +2863,7 @@ async def knowledge_audit():
 
     # 9. SMIC et minima (L.3231-2 CT)
     salaires_analyses = [s["dernier_brut"] for s in kb["salaries"].values() if s.get("dernier_brut", 0) > 0]
-    smic_mensuel = 1801.80  # SMIC 2025/2026 approximatif
+    smic_mensuel = float(_SMIC_MENSUEL)  # SMIC 2025/2026 approximatif
     sous_smic = [b for b in salaires_analyses if b < smic_mensuel and b > 0]
     social_checks.append(_audit_check(
         "Verification SMIC et minima conventionnels",
@@ -4766,6 +4766,95 @@ async def get_rh_alertes():
             "echeance": "",
         })
 
+    # 4k. DAS-2 (honoraires > 1200 EUR/beneficiaire/an)
+    kb = _biblio_knowledge
+    docs_compta = kb.get("documents_comptables", [])
+    factures_importees = [d for d in _doc_library if d.get("nature") in ("facture_achat", "facture_vente", "note_frais")]
+    if factures_importees or docs_compta:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "das2_honoraires",
+            "urgence": "moyenne",
+            "titre": "DAS-2 : declaration des honoraires",
+            "description": (
+                "Tout versement d'honoraires, commissions, courtages, ristournes "
+                "superieurs a 1200 EUR par beneficiaire et par an doit etre declare "
+                "via la DAS-2 avant le 28 fevrier de l'annee suivante."
+            ),
+            "reference": "CGI art. 241 a 243-bis - CSS art. L.133-5-3",
+            "action_requise": "Verifier le montant cumule des honoraires verses par beneficiaire et deposer la DAS-2",
+            "echeance": f"{aujourdhui.year + 1}-02-28",
+            "incidence_legale": "Amende de 150 EUR par declaration omise ou inexacte (art. 1736 CGI). Majoration 50% si retard > 1 mois.",
+        })
+
+    # 4l. Heures supplementaires - contingent annuel 220h
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "heures_supplementaires",
+            "urgence": "info",
+            "titre": "Contingent annuel d'heures supplementaires (220h)",
+            "description": (
+                "Le contingent annuel d'heures supplementaires est fixe a 220 heures par salarie. "
+                "Au-dela, chaque heure supplementaire ouvre droit a une contrepartie obligatoire en repos (COR). "
+                "Majorations: +25% pour les 8 premieres heures/semaine, +50% au-dela."
+            ),
+            "reference": "Art. L.3121-30 a L.3121-33 CT - Art. D.3121-24 CT",
+            "action_requise": "Verifier le decompte individuel des heures supplementaires et les majorations appliquees",
+            "incidence_legale": "Rappel de salaire sur 3 ans + dommages et interets pour non-respect du repos compensateur.",
+        })
+
+    # 4m. Conges payes - accumulation et prise
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "conges_payes",
+            "urgence": "info",
+            "titre": "Conges payes : droits et prise effective",
+            "description": (
+                "Chaque salarie acquiert 2,5 jours ouvrables de conges par mois (30 jours/an). "
+                "L'employeur doit permettre la prise des conges et verifier leur effectivite. "
+                "Le calcul de l'indemnite se fait au maintien de salaire ou au 1/10eme (le plus favorable)."
+            ),
+            "reference": "Art. L.3141-1 a L.3141-31 CT",
+            "action_requise": "Verifier le solde de conges de chaque salarie et planifier les periodes de prise",
+            "incidence_legale": "Indemnite compensatrice de conges non pris due au depart du salarie.",
+        })
+
+    # 4n. Affichages obligatoires
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "affichages_obligatoires",
+            "urgence": "info",
+            "titre": "Affichages obligatoires dans les locaux",
+            "description": (
+                "L'employeur doit afficher: horaires de travail, convention collective applicable, "
+                "coordonnees inspection du travail, consignes de securite, interdiction de fumer, "
+                "lutte contre le harcelement moral et sexuel, egalite de remuneration H/F."
+            ),
+            "reference": "Art. L.1321-1 et suivants CT - Art. R.4227-34 CT",
+            "action_requise": "Verifier la presence des affichages obligatoires dans tous les locaux",
+            "incidence_legale": "Contravention de 3e a 5e classe selon l'affichage manquant (750 a 1500 EUR).",
+        })
+
+    # 4o. Entretien professionnel bisannuel
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "entretien_professionnel",
+            "urgence": "moyenne",
+            "titre": "Entretien professionnel bisannuel",
+            "description": (
+                "L'entretien professionnel est obligatoire tous les 2 ans pour chaque salarie. "
+                "Un bilan recapitulatif doit etre fait tous les 6 ans. "
+                "Il porte sur les perspectives d'evolution professionnelle et les actions de formation."
+            ),
+            "reference": "Art. L.6315-1 CT",
+            "action_requise": "Verifier la planification des entretiens professionnels pour chaque salarie",
+            "incidence_legale": "Abondement correctif CPF de 3000 EUR par salarie si non-realise dans les 6 ans (entreprises >= 50 sal.).",
+        })
+
     # --- 6. Rappels declarations ---
     # DSN mensuelle : a transmettre au plus tard le 5 ou le 15 du mois suivant
     jour_du_mois = aujourdhui.day
@@ -4827,6 +4916,22 @@ async def get_rh_alertes():
                 })
         except (ValueError, TypeError):
             pass
+
+    # Include contextual alerts from analysis (DPAE/contrat/registre/DUERP absence)
+    kb_ctx_alerts = _biblio_knowledge.get("alertes_contextuelles", [])
+    for ctx_al in kb_ctx_alerts:
+        # Avoid duplicates by title
+        if not any(a.get("titre") == ctx_al.get("titre") for a in alertes):
+            alertes.append({
+                "id": str(uuid.uuid4())[:8],
+                "type": ctx_al.get("type", "analyse_contextuelle"),
+                "urgence": ctx_al.get("severite", "moyenne"),
+                "titre": ctx_al.get("titre", ""),
+                "description": ctx_al.get("description", ""),
+                "reference": ctx_al.get("reference_legale", ""),
+                "action_requise": "Importer le document manquant ou verifier sa conformite",
+                "incidence_legale": ctx_al.get("incidence_legale", ""),
+            })
 
     # Normaliser toutes les alertes pour avoir titre + description
     for a in alertes:
@@ -7102,6 +7207,13 @@ else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Compt
 if(nr>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Ressources humaines :</strong> "+nr+" contrat(s) cree(s)"+(npl>0?", "+npl+" creneaux planning":"")+ ". Consultez l onglet RH pour les visualiser.</span></div>";}
 else if(nu>0){h+="<div class='al info'><span class='ai'>&#128260;</span><span><strong>Ressources humaines :</strong> "+nu+" contrat(s) existant(s) mis a jour avec les nouvelles donnees.</span></div>";}
 else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Ressources humaines :</strong> Aucun salarie identifie dans les documents.</span></div>";}
+var alRH=ig.alertes_rh||[];if(alRH.length>0){h+="<div style='margin-top:12px'><h4 style='color:var(--r);margin-bottom:8px'>&#9888; "+alRH.length+" alerte(s) de conformite</h4>";
+for(var ai=0;ai<alRH.length;ai++){var al=alRH[ai];var alcls=al.severite==="haute"?"err":(al.severite==="moyenne"?"warn":"info");
+h+="<div class='al "+alcls+"' style='margin-bottom:6px'><span class='ai'>"+(al.severite==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+al.titre+"</strong> - "+al.description;
+if(al.reference_legale)h+="<br><em style='font-size:.85em;color:var(--tx2)'>"+al.reference_legale+"</em>";
+h+="</span></div>";}h+="</div>";}
+if(ig.documents_detectes&&ig.documents_detectes.length>0){h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128196;</span><span><strong>Types de documents detectes :</strong> "+ig.documents_detectes.join(", ")+"</span></div>";}
+if(ig.salaries_uniques>0){h+="<div class='al info' style='margin-top:6px'><span class='ai'>&#128100;</span><span><strong>"+ig.salaries_uniques+" salarie(s) unique(s)</strong> identifie(s) (dedupliques par NIR ou nom).</span></div>";}
 var log=ig.log||[];if(log.length>0){
 h+="<details style='margin-top:8px'><summary style='cursor:pointer;color:var(--tx2);font-size:.85em'>Detail du traitement ("+log.length+" etapes)</summary>";
 h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin-top:6px;font-family:monospace;font-size:.8em;max-height:200px;overflow-y:auto'>";
@@ -7297,7 +7409,7 @@ function loadRHConges(){rhGet("/api/rh/conges",function(list){var el=document.ge
 
 function enregArret(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ar-sal").value);fd.append("type_arret",document.getElementById("rh-ar-type").value);fd.append("date_debut",document.getElementById("rh-ar-dd").value);fd.append("date_fin",document.getElementById("rh-ar-df").value);fd.append("prolongation",document.getElementById("rh-ar-prol").value);fd.append("subrogation",document.getElementById("rh-ar-sub").value);
 rhPost("/api/rh/arrets",fd,function(){toast("Arret enregistre.","ok");loadRHArrets();});}
-function loadRHArrets(){rhGet("/api/rh/arrets",function(list){var el=document.getElementById("rh-ar-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun arret.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Subrogation</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-amber'>"+a.type_arret+"</span></td><td>"+a.date_debut+"</td><td>"+a.date_fin+"</td><td>"+(a.subrogation==="true"?"Oui":"Non")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
+function loadRHArrets(){rhGet("/api/rh/arrets",function(list){var el=document.getElementById("rh-ar-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun arret.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Subrogation</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-amber'>"+a.type_arret+"</span></td><td>"+a.date_debut+"</td><td>"+a.date_fin+"</td><td>"+(a.subrogation===true||a.subrogation==="true"?"Oui":"Non")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
 function enregSanction(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-sa-sal").value);fd.append("type_sanction",document.getElementById("rh-sa-type").value);fd.append("date_sanction",document.getElementById("rh-sa-date").value);fd.append("motif",document.getElementById("rh-sa-motif").value);fd.append("description",document.getElementById("rh-sa-desc").value);fd.append("date_entretien_prealable",document.getElementById("rh-sa-epr").value);
 rhPost("/api/rh/sanctions",fd,function(){toast("Sanction enregistree.","ok");loadRHSanctions();});}
@@ -7312,7 +7424,7 @@ rhPost("/api/rh/visites-medicales",fd,function(){toast("Visite enregistree.","ok
 function loadRHVisites(){rhGet("/api/rh/visites-medicales",function(list){var el=document.getElementById("rh-vm-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune visite.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Resultat</th><th>Prochaine</th></tr>";for(var i=0;i<list.length;i++){var v=list[i];var cls=v.resultat==="apte"?"badge-green":(v.resultat==="inapte"?"badge-red":"badge-amber");h+="<tr><td>"+v.salarie_id+"</td><td>"+v.type_visite+"</td><td>"+v.date_visite+"</td><td><span class='badge "+cls+"'>"+v.resultat+"</span></td><td>"+(v.date_prochaine||"-")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
 function genererAttestation(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-at-sal").value);fd.append("type_attestation",document.getElementById("rh-at-type").value);fd.append("date_generation",new Date().toISOString().substring(0,10));
-rhPost("/api/rh/attestations/generer",fd,function(d){document.getElementById("rh-at-res").innerHTML="<div class='card' style='background:var(--pl);margin-top:8px'><pre style='white-space:pre-wrap;font-size:.82em;line-height:1.6'>"+d.contenu+"</pre><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer</button></div>";toast("Attestation generee.","ok");loadRHAttestations();});}
+rhPost("/api/rh/attestations/generer",fd,function(d){document.getElementById("rh-at-res").innerHTML="<div class='card' style='background:var(--pl);margin-top:8px'><pre style='white-space:pre-wrap;font-size:.82em;line-height:1.6'>"+(d.texte||d.contenu||"Erreur generation")+"</pre><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer</button></div>";toast("Attestation generee.","ok");loadRHAttestations();});}
 function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el=document.getElementById("rh-at-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-blue'>"+a.type_attestation+"</span></td><td>"+a.date_generation+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
 function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
@@ -7332,7 +7444,12 @@ var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_n
 for(var sid in salaries){h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd)'>"+sid+"</td>";for(var j=0;j<7;j++){h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){var s=slots[k];var tp=s.type_poste||s.type||"normal";var bg=colors[tp]||"#3b82f6";h+="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 4px;margin:1px 0;font-size:.78em'>"+s.heure_debut+"-"+s.heure_fin+"</div>";}
 if(!slots.length)h+="<span style='color:#cbd5e1'>-</span>";h+="</td>";}h+="</tr>";}
 if(!Object.keys(salaries).length){h+="<tr><td colspan='8' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun creneau pour cette semaine.</td></tr>";}
-h+="</table>";cal.innerHTML=h;});}
+h+="</table>";
+h+="<div style='margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;font-size:.8em'>";
+var colorLabels={"normal":"Normal","astreinte":"Astreinte","nuit":"Nuit (+25% min)","dimanche":"Dimanche (+100%)","ferie":"Ferie (+100%)"};
+for(var tp in colors){h+="<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:14px;height:14px;border-radius:3px;background:"+colors[tp]+";display:inline-block'></span>"+colorLabels[tp]+"</span>";}
+h+="</div>";
+cal.innerHTML=h;});}
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
 
 function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ec-sal").value);fd.append("objet",document.getElementById("rh-ec-obj").value);fd.append("contenu",document.getElementById("rh-ec-txt").value);fd.append("type_echange",document.getElementById("rh-ec-type").value);fd.append("date_echange",document.getElementById("rh-ec-date").value);

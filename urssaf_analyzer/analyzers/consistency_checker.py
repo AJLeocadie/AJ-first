@@ -1107,13 +1107,28 @@ class ConsistencyChecker(BaseAnalyzer):
                         ),
                     ))
 
-        # -- Blocs obligatoires (via metadata) --
+        # -- Blocs obligatoires (via metadata + inference from data) --
         blocs_presents = set()
         if hasattr(decl, "metadata") and isinstance(getattr(decl, "metadata", None), dict):
             blocs_presents = set(decl.metadata.get("blocs_dsn", []))
-        elif hasattr(decl, "source_document_id"):
-            # If metadata is available through another path, we check it
-            pass
+
+        # Infer present blocs from actual declaration data
+        if decl.employeur and decl.employeur.siret:
+            blocs_presents.add("S20")  # Entreprise present
+            blocs_presents.add("S21.G00.06")  # Etablissement (SIRET present)
+        if decl.employes:
+            blocs_presents.add("S21.G00.30")  # Individu (employes present)
+            for emp_dsn in decl.employes:
+                if emp_dsn.date_embauche or emp_dsn.statut:
+                    blocs_presents.add("S21.G00.40")  # Contrat
+                    break
+        if decl.cotisations:
+            blocs_presents.add("S21.G00.81")  # Cotisation individuelle
+            blocs_presents.add("S21.G00.78")  # Base assujettie
+            blocs_presents.add("S21.G00.22")  # Cotisation agregee
+        if decl.masse_salariale_brute > 0:
+            blocs_presents.add("S21.G00.51")  # Remuneration
+            blocs_presents.add("S89")  # Totaux
 
         if blocs_presents:
             blocs_manquants = _BLOCS_DSN_OBLIGATOIRES - blocs_presents
