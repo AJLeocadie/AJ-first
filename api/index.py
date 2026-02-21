@@ -11,6 +11,7 @@ import time
 import shutil
 import hashlib
 import uuid
+import traceback
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -599,11 +600,15 @@ async def analyser_documents(
             declarations_out.append(decl_out)
 
         # Auto-generer les ecritures comptables a partir des declarations
+        _integration_log = []
         try:
             moteur = get_moteur()
+            nb_ecr_paie = 0
+            nb_ecr_facture = 0
             for decl in result.declarations:
                 d_meta = getattr(decl, "metadata", {}) or {}
                 d_type = d_meta.get("type_document", "")
+                _integration_log.append(f"Decl: type={decl.type_declaration}, meta_type={d_type}, emps={len(decl.employes)}, cots={len(decl.cotisations)}, masse={float(decl.masse_salariale_brute)}")
 
                 # --- Ecritures de paie (bulletins, DSN, livres de paie) ---
                 if d_type in ("facture_achat", "facture_vente"):
@@ -622,59 +627,135 @@ async def analyser_documents(
                                 montant_ttc=ttc if ttc > 0 else ht * Decimal("1.20"),
                                 nom_tiers=d_meta.get("tiers", "Tiers"),
                             )
-                        except Exception:
-                            pass
+                            nb_ecr_facture += 1
+                            _integration_log.append(f"  -> Ecriture facture OK: HT={ht} TVA={tva} TTC={ttc}")
+                        except Exception as e:
+                            _integration_log.append(f"  -> ERREUR facture: {e}")
+                    else:
+                        _integration_log.append(f"  -> Facture ignoree: HT={ht} TTC={ttc} (montants nuls)")
                     continue
 
                 if d_type in ("contrat_de_travail", "accord_interessement", "accord_participation", "attestation"):
+                    _integration_log.append(f"  -> Skip (type {d_type}, pas d ecriture)")
                     continue  # pas d ecriture comptable
 
                 # Ecritures de paie
-                for emp in decl.employes:
-                    cots = [c for c in decl.cotisations if c.employe_id == emp.id]
-                    brut = sum(c.base_brute for c in cots) if cots else Decimal("0")
-                    # Fallback: use masse_salariale / nb_employes
-                    if brut <= 0 and decl.masse_salariale_brute > 0:
-                        brut = decl.masse_salariale_brute / max(len(decl.employes), 1)
-                    if brut <= 0:
-                        continue
-                    # Use actual parsed cotisation totals when available
-                    actual_pat = sum(c.montant_patronal for c in cots) if cots else Decimal("0")
-                    actual_sal = sum(c.montant_salarial for c in cots) if cots else Decimal("0")
-                    net_from_meta = Decimal(str(d_meta.get("net_a_payer", 0)))
-                    cot_sal = float(actual_sal) if actual_sal > 0 else round(float(brut) * 0.22, 2)
-                    cot_pat_total = float(actual_pat) if actual_pat > 0 else round(float(brut) * 0.45, 2)
-                    cot_pat_urssaf = round(cot_pat_total * 0.78, 2)
-                    cot_pat_retraite = round(cot_pat_total * 0.22, 2)
-                    net_a_payer = float(net_from_meta) if net_from_meta > 0 else round(float(brut) - cot_sal, 2)
-                    date_piece = date.today()
-                    if decl.periode and decl.periode.debut:
-                        date_piece = decl.periode.debut
-                    elif decl.periode and decl.periode.fin:
-                        date_piece = decl.periode.fin
-                    nom_sal = f"{emp.prenom} {emp.nom}".strip() or "Salarie"
-                    try:
-                        moteur.generer_ecriture_paie(
-                            date_piece=date_piece,
-                            nom_salarie=nom_sal,
-                            salaire_brut=brut,
-                            cotisations_salariales=Decimal(str(cot_sal)),
-                            cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
-                            cotisations_patronales_retraite=Decimal(str(cot_pat_retraite)),
-                            net_a_payer=Decimal(str(net_a_payer)),
-                        )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                if not decl.employes:
+                    # Pas d employe mais masse salariale > 0 : generer une ecriture globale
+                    if decl.masse_salariale_brute > 0:
+                        brut = decl.masse_salariale_brute
+                        d_meta_net = Decimal(str(d_meta.get("net_a_payer", 0)))
+                        d_meta_pat = Decimal(str(d_meta.get("total_patronal", 0)))
+                        d_meta_sal = Decimal(str(d_meta.get("total_salarial", 0)))
+                        cot_sal = float(d_meta_sal) if d_meta_sal > 0 else round(float(brut) * 0.22, 2)
+                        cot_pat_total = float(d_meta_pat) if d_meta_pat > 0 else round(float(brut) * 0.45, 2)
+                        cot_pat_urssaf = round(cot_pat_total * 0.78, 2)
+                        cot_pat_retraite = round(cot_pat_total * 0.22, 2)
+                        net_a_payer = float(d_meta_net) if d_meta_net > 0 else round(float(brut) - cot_sal, 2)
+                        date_piece = date.today()
+                        if decl.periode and decl.periode.debut:
+                            date_piece = decl.periode.debut
+                        try:
+                            moteur.generer_ecriture_paie(
+                                date_piece=date_piece,
+                                nom_salarie="Salaries (global)",
+                                salaire_brut=brut,
+                                cotisations_salariales=Decimal(str(cot_sal)),
+                                cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
+                                cotisations_patronales_retraite=Decimal(str(cot_pat_retraite)),
+                                net_a_payer=Decimal(str(net_a_payer)),
+                            )
+                            nb_ecr_paie += 1
+                            _integration_log.append(f"  -> Ecriture paie globale OK: brut={brut}")
+                        except Exception as e:
+                            _integration_log.append(f"  -> ERREUR paie globale: {e}")
+                    else:
+                        _integration_log.append(f"  -> Pas d employe ni de masse salariale")
+                else:
+                    for emp in decl.employes:
+                        cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                        brut = sum(c.base_brute for c in cots) if cots else Decimal("0")
+                        # Fallback: use masse_salariale / nb_employes
+                        if brut <= 0 and decl.masse_salariale_brute > 0:
+                            brut = decl.masse_salariale_brute / max(len(decl.employes), 1)
+                        if brut <= 0:
+                            _integration_log.append(f"  -> Skip emp {emp.nom}: brut=0, cots={len(cots)}, masse={float(decl.masse_salariale_brute)}")
+                            continue
+                        # Use actual parsed cotisation totals when available
+                        actual_pat = sum(c.montant_patronal for c in cots) if cots else Decimal("0")
+                        actual_sal = sum(c.montant_salarial for c in cots) if cots else Decimal("0")
+                        net_from_meta = Decimal(str(d_meta.get("net_a_payer", 0)))
+                        cot_sal = float(actual_sal) if actual_sal > 0 else round(float(brut) * 0.22, 2)
+                        cot_pat_total = float(actual_pat) if actual_pat > 0 else round(float(brut) * 0.45, 2)
+                        cot_pat_urssaf = round(cot_pat_total * 0.78, 2)
+                        cot_pat_retraite = round(cot_pat_total * 0.22, 2)
+                        net_a_payer = float(net_from_meta) if net_from_meta > 0 else round(float(brut) - cot_sal, 2)
+                        date_piece = date.today()
+                        if decl.periode and decl.periode.debut:
+                            date_piece = decl.periode.debut
+                        elif decl.periode and decl.periode.fin:
+                            date_piece = decl.periode.fin
+                        nom_sal = f"{emp.prenom} {emp.nom}".strip() or "Salarie"
+                        try:
+                            moteur.generer_ecriture_paie(
+                                date_piece=date_piece,
+                                nom_salarie=nom_sal,
+                                salaire_brut=brut,
+                                cotisations_salariales=Decimal(str(cot_sal)),
+                                cotisations_patronales_urssaf=Decimal(str(cot_pat_urssaf)),
+                                cotisations_patronales_retraite=Decimal(str(cot_pat_retraite)),
+                                net_a_payer=Decimal(str(net_a_payer)),
+                            )
+                            nb_ecr_paie += 1
+                            _integration_log.append(f"  -> Ecriture paie OK: {nom_sal} brut={float(brut):.2f}")
+                        except Exception as e:
+                            _integration_log.append(f"  -> ERREUR paie {nom_sal}: {e}")
+            _integration_log.append(f"COMPTA: {nb_ecr_paie} ecritures paie + {nb_ecr_facture} ecritures facture generees")
+        except Exception as e:
+            _integration_log.append(f"ERREUR COMPTA GLOBALE: {e}\\n{traceback.format_exc()}")
 
         # Auto-integrer les salaries dans le module RH + Planning
+        nb_rh_new = 0
+        nb_rh_updated = 0
+        nb_planning_new = 0
         try:
             for decl in result.declarations:
                 d_meta = getattr(decl, "metadata", {}) or {}
                 d_type = d_meta.get("type_document", "")
+                if not decl.employes:
+                    # Pas d employe dans la declaration : tenter de creer un salarie generique
+                    # si on a la masse salariale (LDP sans detail employe par ex.)
+                    if decl.masse_salariale_brute > 0 and d_type not in ("facture_achat", "facture_vente", "contrat_de_travail"):
+                        emp_nom = "Salarie"
+                        if decl.employeur and decl.employeur.raison_sociale:
+                            emp_nom = f"Salarie ({decl.employeur.raison_sociale})"
+                        existing = [c for c in _rh_contrats if c.get("nom_salarie", "").lower() == emp_nom.lower()]
+                        if not existing:
+                            contrat = {
+                                "id": str(uuid.uuid4())[:8],
+                                "type_contrat": "CDI",
+                                "nom_salarie": emp_nom,
+                                "prenom_salarie": "",
+                                "poste": "Employe",
+                                "date_debut": date.today().strftime("%Y-%m-%d"),
+                                "date_fin": "",
+                                "salaire_brut": str(round(float(decl.masse_salariale_brute), 2)),
+                                "temps_travail": "temps_complet",
+                                "duree_hebdo": "35",
+                                "convention_collective": "",
+                                "periode_essai_jours": "0",
+                                "motif_cdd": "",
+                                "statut": "actif",
+                                "nir": "",
+                                "source": "analyse_automatique (" + (d_type or decl.type_declaration) + ")",
+                                "date_creation": datetime.now().isoformat(),
+                            }
+                            _rh_contrats.append(contrat)
+                            nb_rh_new += 1
+                    continue
                 for emp in decl.employes:
                     if not emp.nom and not emp.nir:
+                        _integration_log.append(f"  -> RH skip: employe sans nom ni NIR")
                         continue
                     # Identifier le salarie par nom+prenom OU par NIR
                     existing = [c for c in _rh_contrats if
@@ -719,6 +800,8 @@ async def analyser_documents(
                             "date_creation": datetime.now().isoformat(),
                         }
                         _rh_contrats.append(contrat)
+                        nb_rh_new += 1
+                        _integration_log.append(f"  -> RH nouveau: {emp.prenom} {emp.nom} brut={brut:.2f}")
                         # Auto-creer un planning pour le salarie
                         try:
                             if date_debut_str:
@@ -737,8 +820,9 @@ async def analyser_documents(
                                             "type": "normal",
                                             "note": "Planning auto (analyse)",
                                         })
-                        except Exception:
-                            pass
+                                        nb_planning_new += 1
+                        except Exception as e:
+                            _integration_log.append(f"  -> ERREUR planning: {e}")
                     else:
                         # Mettre a jour le salarie existant si nouvelles infos
                         c = existing[0]
@@ -748,10 +832,13 @@ async def analyser_documents(
                             brut = float(decl.masse_salariale_brute / max(len(decl.employes), 1))
                         if brut > 0 and (not c.get("salaire_brut") or c.get("salaire_brut") == "0"):
                             c["salaire_brut"] = str(round(brut, 2))
+                            nb_rh_updated += 1
                         if emp.nir and not c.get("nir"):
                             c["nir"] = emp.nir
-        except Exception:
-            pass
+                            nb_rh_updated += 1
+            _integration_log.append(f"RH: {nb_rh_new} nouveaux contrats, {nb_rh_updated} mis a jour, {nb_planning_new} creneaux planning")
+        except Exception as e:
+            _integration_log.append(f"ERREUR RH GLOBALE: {e}\\n{traceback.format_exc()}")
 
         # Build file info from actual uploaded files
         fichiers_info = []
@@ -776,6 +863,14 @@ async def analyser_documents(
             "mode_analyse": mode_analyse,
             "html_report": html_report,
             "knowledge_summary": _get_knowledge_summary(),
+            "integration": {
+                "compta_ecritures_paie": nb_ecr_paie,
+                "compta_ecritures_facture": nb_ecr_facture,
+                "rh_contrats_crees": nb_rh_new,
+                "rh_contrats_maj": nb_rh_updated,
+                "rh_planning_crees": nb_planning_new,
+                "log": _integration_log,
+            },
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
 
 
@@ -5283,6 +5378,7 @@ APP_HTML += """
 <div class="g4" id="az-dashboard"></div>
 </div>
 <div class="card" id="az-fichiers-card"><h2>Fichiers analyses</h2><div id="az-fichiers-list"></div></div>
+<div class="card" id="az-integration-card" style="display:none"><h2>Integration automatique</h2><div id="az-integration-results"></div></div>
 <div class="card" id="az-audit-card" style="display:none"><h2>Points de controle Audit</h2><div id="az-audit-checks"></div></div>
 <div class="card"><h2>Anomalies</h2><div id="az-findings"></div></div>
 <div class="card"><h2>Recommandations</h2><div id="az-reco"></div></div>
@@ -5817,7 +5913,7 @@ document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
 if(n==="biblio"){loadBiblio();loadKnowledge();}if(n==="equipe")loadEquipe();
 if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
-if(n==="rh")loadRHAlertes();if(n==="config"){loadEntete();loadAlertConfigs();}
+if(n==="rh"){loadRHContrats();loadRHAlertes();loadRHPlanning();}if(n==="config"){loadEntete();loadAlertConfigs();}
 }
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
@@ -5901,9 +5997,9 @@ renderAnomalies("az-findings",data.constats||[]);
 var recos=data.recommandations||[];var rh="";for(var i=0;i<recos.length;i++){rh+="<div class='al info'><span class='ai'>&#128161;</span><span><strong>#"+(i+1)+"</strong> "+(recos[i].description||recos[i].titre||"")+"</span></div>";}
 document.getElementById("az-reco").innerHTML=rh||"<p style='color:var(--tx2)'>Aucune.</p>";
 if(data.html_report){document.getElementById("az-html-card").style.display="block";document.getElementById("az-html-frame").srcdoc=data.html_report;}else{document.getElementById("az-html-card").style.display="none";}
-showFileInterpretation(data);showAuditChecks(data);
+showFileInterpretation(data);showAuditChecks(data);showIntegrationResults(data);
 document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
-function resetAz(){fichiers=[];analysisData=null;renderF();document.getElementById("res-analyse").style.display="none";document.getElementById("az-audit-card").style.display="none";document.getElementById("btn-az").disabled=false;toast("Pret pour une nouvelle analyse.","ok");}
+function resetAz(){fichiers=[];analysisData=null;renderF();document.getElementById("res-analyse").style.display="none";document.getElementById("az-audit-card").style.display="none";document.getElementById("az-integration-card").style.display="none";document.getElementById("btn-az").disabled=false;toast("Pret pour une nouvelle analyse.","ok");}
 
 /* === BIBLIOTHEQUE === */
 function loadKnowledge(){
@@ -6334,6 +6430,31 @@ h+="</table>";
 for(var k=0;k<data.declarations.length;k++){var dk=data.declarations[k];if(dk.s89_total_brut&&dk.masse_salariale_brute){var ecS89=Math.abs(dk.s89_total_brut-dk.masse_salariale_brute);if(ecS89>10){h+="<div class='al warn' style='margin-top:6px'><span class='ai'>&#9888;</span><span><strong>Ecart S89 :</strong> Total brut declare (S89) = "+dk.s89_total_brut.toFixed(2)+" EUR vs masse salariale calculee = "+dk.masse_salariale_brute.toFixed(2)+" EUR (ecart: "+ecS89.toFixed(2)+" EUR)</span></div>";}}}
 if(data.knowledge_summary){var ks=data.knowledge_summary;h+="<div class='al info' style='margin-top:10px'><span class='ai'>&#128218;</span><span><strong>Donnees integrees :</strong> "+ks.nb_salaries_connus+" salarie(s), "+ks.nb_cotisations_analysees+" cotisation(s), masse salariale "+ks.total_masse_salariale.toFixed(2)+" EUR"+(ks.nb_contrats_rh>0?" | "+ks.nb_contrats_rh+" contrat(s) RH cree(s)":"")+"</span></div>";}
 fl.innerHTML=h;}
+
+function showIntegrationResults(data){
+var card=document.getElementById("az-integration-card");var el=document.getElementById("az-integration-results");
+var ig=data.integration;
+if(!ig){card.style.display="none";return;}
+card.style.display="block";
+var h="<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px'>";
+var np=ig.compta_ecritures_paie||0;var nf=ig.compta_ecritures_facture||0;var nr=ig.rh_contrats_crees||0;var nu=ig.rh_contrats_maj||0;var npl=ig.rh_planning_crees||0;
+h+="<div class='sc "+(np>0?"green":"amber")+"'><div class='val'>"+np+"</div><div class='lab'>Ecritures paie</div></div>";
+h+="<div class='sc "+(nf>0?"green":"amber")+"'><div class='val'>"+nf+"</div><div class='lab'>Ecritures facture</div></div>";
+h+="<div class='sc "+(nr>0?"green":"amber")+"'><div class='val'>"+nr+"</div><div class='lab'>Contrats RH crees</div></div>";
+if(nu>0)h+="<div class='sc blue'><div class='val'>"+nu+"</div><div class='lab'>Contrats maj</div></div>";
+if(npl>0)h+="<div class='sc blue'><div class='val'>"+npl+"</div><div class='lab'>Planning crees</div></div>";
+h+="</div>";
+if(np>0||nf>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Comptabilite :</strong> "+np+" ecriture(s) de paie"+(nf>0?" + "+nf+" facture(s)":"")+" generee(s) automatiquement. Consultez l onglet Comptabilite pour les visualiser.</span></div>";}
+else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Comptabilite :</strong> Aucune ecriture generee. Les documents ne contiennent pas suffisamment de donnees exploitables.</span></div>";}
+if(nr>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Ressources humaines :</strong> "+nr+" contrat(s) cree(s)"+(npl>0?", "+npl+" creneaux planning":"")+ ". Consultez l onglet RH pour les visualiser.</span></div>";}
+else if(nu>0){h+="<div class='al info'><span class='ai'>&#128260;</span><span><strong>Ressources humaines :</strong> "+nu+" contrat(s) existant(s) mis a jour avec les nouvelles donnees.</span></div>";}
+else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Ressources humaines :</strong> Aucun salarie identifie dans les documents.</span></div>";}
+var log=ig.log||[];if(log.length>0){
+h+="<details style='margin-top:8px'><summary style='cursor:pointer;color:var(--tx2);font-size:.85em'>Detail du traitement ("+log.length+" etapes)</summary>";
+h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin-top:6px;font-family:monospace;font-size:.8em;max-height:200px;overflow-y:auto'>";
+for(var li=0;li<log.length;li++){var cls=(log[li].indexOf("ERREUR")>=0)?"color:var(--r)":(log[li].indexOf("OK")>=0?"color:var(--g)":"color:var(--tx2)");h+="<div style='"+cls+"'>"+log[li]+"</div>";}
+h+="</div></details>";}
+el.innerHTML=h;}
 
 function showAuditChecks(data){
 var mode=data.mode_analyse||document.getElementById("mode-analyse").value;
