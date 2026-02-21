@@ -2992,6 +2992,95 @@ async def knowledge_audit():
         "Registre heures sup, bulletins detailles, accords",
     ))
 
+    # 22. RGDU/Reduction generale (L.241-13 CSS)
+    social_checks.append(_audit_check(
+        "Reduction generale (RGDU 2026)",
+        "Art. L.241-13 CSS - Decret 2025",
+        ks["has_bulletins"],
+        f"Calculable pour {len(salaires_analyses)} salaire(s) verifies" if salaires_analyses else "Non verifiable sans bulletin",
+        "Bulletins de paie detailles, masse salariale annuelle",
+        incidence="Redressement URSSAF sur reduction indue ou non optimisee",
+    ))
+
+    # 23. AT/MP - Taux individuel (D.242-6-1 CSS)
+    social_checks.append(_audit_check(
+        "Taux AT/MP (notification annuelle)",
+        "Art. D.242-6-1 CSS",
+        "notification_at" in kb["pieces_justificatives"] or ks["has_bulletins"],
+        "Taux AT/MP verifiable via les bulletins" if ks["has_bulletins"] else "Notification de taux AT non importee",
+        "Notification annuelle CARSAT, releve de compte AT",
+        incidence="Taux AT incorrect = cotisations erronees sur toute l annee",
+    ))
+
+    # 24. CSG/CRDS assiette 98.25% (L.136-2 CSS)
+    social_checks.append(_audit_check(
+        "CSG/CRDS - Assiette 98.25% du brut",
+        "Art. L.136-2 CSS - Abattement 1.75% pour frais professionnels",
+        ks["has_bulletins"] and ks["nb_cotisations_analysees"] > 0,
+        f"Assiette CSG/CRDS verifiable sur {ks['nb_cotisations_analysees']} ligne(s)" if ks["nb_cotisations_analysees"] > 0 else "Aucune ligne CSG/CRDS analysee",
+        "Bulletins de paie avec lignes CSG/CRDS detaillees",
+    ))
+
+    # 25. Retraite complementaire AGIRC-ARRCO (L.921-1 CSS)
+    social_checks.append(_audit_check(
+        "Retraite complementaire AGIRC-ARRCO (T1/T2/CEG/CET)",
+        "ANI du 17/11/2017 - Art. L.921-1 CSS",
+        "retraite_complementaire_t1" in types_cot_presents or ks["has_bulletins"],
+        "Cotisations retraite complementaire detectees" if "retraite_complementaire_t1" in types_cot_presents else "Non verifiable sans bulletin",
+        "Bulletins de paie, releve de situation AGIRC-ARRCO",
+        incidence="Redressement AGIRC-ARRCO + penalites de retard",
+    ))
+
+    # 26. DPAE effectuees (L.1221-10 CT)
+    nb_dpae = len([d for d in _doc_library if d.get("nature") == "dpae"])
+    social_checks.append(_audit_check(
+        "DPAE (Declaration Prealable a l Embauche)",
+        "Art. L.1221-10 CT - Art. R.1221-1 CT",
+        nb_dpae > 0 or ks["nb_contrats_rh"] == 0,
+        f"{nb_dpae} DPAE importee(s) pour {ks['nb_contrats_rh']} contrat(s)" if nb_dpae > 0 else ("Non applicable (aucun salarie)" if ks["nb_contrats_rh"] == 0 else "Aucune DPAE importee - obligatoire avant toute embauche"),
+        "Accuse de reception DPAE de l URSSAF",
+        incidence="Amende 1097 EUR par salarie (travail dissimule: delit penal)" if nb_dpae == 0 and ks["nb_contrats_rh"] > 0 else "",
+    ))
+
+    # 27. Contrats de travail (L.1221-1 CT)
+    social_checks.append(_audit_check(
+        "Contrats de travail ecrits (CDD, temps partiel)",
+        "Art. L.1221-1 CT - Art. L.1242-12 CT (CDD) - Art. L.3123-6 CT (temps partiel)",
+        ks["nb_contrats_rh"] > 0,
+        f"{ks['nb_contrats_rh']} contrat(s) enregistre(s)" if ks["nb_contrats_rh"] > 0 else "Aucun contrat enregistre",
+        "Contrats de travail, avenants",
+        incidence="Requalification en CDI (CDD sans ecrit) - rappels de salaire et indemnites",
+    ))
+
+    # 28. Affichages obligatoires (R.2262-1 CT)
+    social_checks.append(_audit_check(
+        "Affichages obligatoires dans les locaux",
+        "Art. R.2262-1 CT - Art. R.4227-34 CT",
+        False,  # Impossible a verifier par l outil
+        "Controle visuel necessaire - non verifiable automatiquement. Affichages requis : horaires, convention collective, inspection du travail, securite, harcelement, egalite H/F",
+        "Photos des affichages, attestation de conformite",
+    ))
+
+    # 29. Reglement interieur (L.1311-2 CT)
+    social_checks.append(_audit_check(
+        "Reglement interieur (obligatoire >= 50 salaries)",
+        "Art. L.1311-2 CT",
+        nb_actifs < 50 or "reglement_interieur" in kb["pieces_justificatives"],
+        "Non applicable (effectif < 50)" if nb_actifs < 50 else ("Reglement interieur importe" if "reglement_interieur" in kb["pieces_justificatives"] else "Reglement interieur non importe - obligatoire >= 50 salaries"),
+        "Reglement interieur depose a l inspection du travail",
+        incidence="Sanctions disciplinaires inopposables aux salaries" if nb_actifs >= 50 else "",
+    ))
+
+    # 30. Participation / interessement (L.3322-2 CT)
+    social_checks.append(_audit_check(
+        "Accord de participation (obligatoire >= 50 salaries)",
+        "Art. L.3322-2 CT",
+        nb_actifs < 50 or "accord_participation" in kb["pieces_justificatives"],
+        "Non applicable (effectif < 50)" if nb_actifs < 50 else ("Accord de participation importe" if "accord_participation" in kb["pieces_justificatives"] else "Accord de participation non importe - obligatoire >= 50 salaries"),
+        "Accord de participation, PV de negociation",
+        incidence="Perte des exonerations sociales et fiscales sur l epargne salariale" if nb_actifs >= 50 else "",
+    ))
+
     # --- AUDIT FISCAL (CGI) ---
     fiscal_checks = []
 
@@ -3040,6 +3129,65 @@ async def knowledge_audit():
         "Verifiable via les bulletins importes" if ks["has_bulletins"] else "Non verifiable sans bulletin",
         "Declaration annuelle taxe sur salaires 2502"))
 
+    # Fiscal 10. DAS-2 - Declaration des honoraires (art. 241 CGI)
+    fiscal_checks.append(_audit_check(
+        "DAS-2 - Declaration des honoraires (> 1200 EUR/beneficiaire)",
+        "Art. 241 a 243-bis CGI - Art. L.133-5-3 CSS",
+        "das2" in kb["pieces_justificatives"],
+        "DAS-2 importee" if "das2" in kb["pieces_justificatives"] else "DAS-2 non importee - obligatoire si honoraires > 1200 EUR/beneficiaire/an",
+        "DAS-2, factures de prestataires/honoraires",
+        incidence="Amende 150 EUR par omission (art. 1736 CGI) + majoration 50% si retard > 1 mois",
+    ))
+
+    # Fiscal 11. FEC - Fichier des ecritures comptables (art. L.47 A-I LPF)
+    fiscal_checks.append(_audit_check(
+        "FEC - Fichier des ecritures comptables",
+        "Art. L.47 A-I LPF - Art. A.47 A-1 LPF",
+        "fec" in kb["pieces_justificatives"],
+        "FEC importe" if "fec" in kb["pieces_justificatives"] else "FEC non importe - obligation de presentation en cas de controle",
+        "FEC (format xml/txt conforme norme LPF)",
+        incidence="Amende 5000 EUR pour non-presentation du FEC + evaluation d office possible",
+    ))
+
+    # Fiscal 12. Facturation - Mentions obligatoires (art. 289 CGI)
+    nb_factures = len([d for d in _doc_library if d.get("nature") in ("facture_vente", "facture_achat")])
+    fiscal_checks.append(_audit_check(
+        "Facturation - Mentions obligatoires",
+        "Art. 289 CGI - Art. 242 nonies A Annexe II CGI",
+        nb_factures > 0,
+        f"{nb_factures} facture(s) importee(s)" if nb_factures > 0 else "Aucune facture importee",
+        "Factures avec mentions obligatoires (n, date, TVA, identite)",
+        incidence="Amende 15 EUR par mention manquante (plafond 25% du montant)" if nb_factures > 0 else "",
+    ))
+
+    # Fiscal 13. Delais de conservation (L.102 B LPF)
+    fiscal_checks.append(_audit_check(
+        "Delais de conservation des documents (6 ans fiscal, 10 ans comptable)",
+        "Art. L.102 B LPF - Art. L.123-22 Code de commerce",
+        len(_doc_library) > 0,
+        f"{len(_doc_library)} document(s) archives dans la bibliotheque" if _doc_library else "Aucun document archive",
+        "Ensemble des documents fiscaux et comptables",
+        incidence="Impossibilite de justifier en cas de controle = taxation d office",
+    ))
+
+    # Fiscal 14. Avantages en nature (art. 82 CGI)
+    fiscal_checks.append(_audit_check(
+        "Avantages en nature - Evaluation et declaration",
+        "Art. 82 CGI - Art. L.242-1 CSS",
+        ks["has_bulletins"],
+        "Verifiable si avantages en nature mentionnes sur les bulletins" if ks["has_bulletins"] else "Non verifiable sans bulletin",
+        "Bulletins de paie, etats des avantages en nature",
+    ))
+
+    # Fiscal 15. Credit impot formation dirigeant
+    fiscal_checks.append(_audit_check(
+        "Credit d impot formation du dirigeant",
+        "Art. 244 quater M CGI",
+        "formation_dirigeant" in kb["pieces_justificatives"],
+        "Attestation formation importee" if "formation_dirigeant" in kb["pieces_justificatives"] else "Non renseigne - verifier l eligibilite (PME < 250 sal.)",
+        "Attestation de formation, cerfa 2079-FCE",
+    ))
+
     # --- COUR DES COMPTES ---
     cdc_checks = []
     cdc_checks.append(_audit_check("Regularite des comptes", "Normes NEP - ISA",
@@ -3061,6 +3209,38 @@ async def knowledge_audit():
         "previsionnel" in kb["pieces_justificatives"],
         "Previsionnel importe" if "previsionnel" in kb["pieces_justificatives"] else "Previsionnel non disponible",
         "Previsionnels, plan de tresorerie"))
+
+    # CDC 5. Separation des exercices
+    cdc_checks.append(_audit_check(
+        "Separation des exercices (cut-off)",
+        "Art. L.123-12 Code de commerce - PCG art. 313-1",
+        "comptabilite" in kb["pieces_justificatives"],
+        "Verifiable si ecritures comptables disponibles" if "comptabilite" in kb["pieces_justificatives"] else "Non verifiable sans ecritures comptables",
+        "Journal de ventes/achats, ecritures de fin d exercice"))
+
+    # CDC 6. Exhaustivite des charges sociales
+    cdc_checks.append(_audit_check(
+        "Exhaustivite des charges sociales declarees",
+        "Norme ISA 550 - NEP 550",
+        ks["has_bulletins"] and ks["nb_cotisations_analysees"] > 0,
+        f"{ks['nb_cotisations_analysees']} ligne(s) de cotisations verifiee(s)" if ks["nb_cotisations_analysees"] > 0 else "Non verifiable",
+        "Bulletins de paie, journal de paie, DSN"))
+
+    # CDC 7. Respect des procedures de marches publics (si applicable)
+    cdc_checks.append(_audit_check(
+        "Procedures de marches / conventions reglementees",
+        "Art. L.225-38 Code de commerce",
+        "conventions_reglementees" in kb["pieces_justificatives"],
+        "Rapport special CAC importe" if "conventions_reglementees" in kb["pieces_justificatives"] else "Non renseigne - verifier si conventions reglementees existent",
+        "Rapport special CAC sur conventions reglementees"))
+
+    # CDC 8. Controle interne
+    cdc_checks.append(_audit_check(
+        "Procedures de controle interne",
+        "NEP 315 - ISA 315",
+        "procedures_ci" in kb["pieces_justificatives"],
+        "Documentation controle interne importee" if "procedures_ci" in kb["pieces_justificatives"] else "Non renseigne",
+        "Documentation des procedures, organigramme, delegations"))
 
     # Rapprochement detaille des masses (donnees supplementaires pour affichage)
     rapprochement_detail = {

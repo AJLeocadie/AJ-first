@@ -360,6 +360,251 @@ class AnomalyDetector(BaseAnalyzer):
                                 reference_legale="Art. L3231-2 Code du travail - SMIC 2026",
                             ))
 
+            # --- RGDU / Reduction Generale validation ---
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                rgdu_cots = [c for c in emp_cots
+                             if c.type_cotisation in (ContributionType.RGDU, ContributionType.LOI_FILLON)]
+                if rgdu_cots:
+                    brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                    brut_annuel = brut * 12
+                    seuil_fillon_mensuel = SMIC_MENSUEL_BRUT * Decimal("1.6")
+                    seuil_rgdu_mensuel = SMIC_MENSUEL_BRUT * Decimal("3")
+                    for rc in rgdu_cots:
+                        montant_reduction = abs(rc.montant_patronal) + abs(rc.montant_salarial)
+                        if montant_reduction > TOLERANCE_MONTANT:
+                            # Old Fillon: reduction should be zero if salary > 1.6 SMIC
+                            if rc.type_cotisation == ContributionType.LOI_FILLON and brut > seuil_fillon_mensuel + TOLERANCE_MONTANT:
+                                findings.append(Finding(
+                                    categorie=FindingCategory.ANOMALIE,
+                                    severite=Severity.HAUTE,
+                                    titre=f"Reduction Fillon appliquee au-dela de 1.6 SMIC ({emp.prenom} {emp.nom})",
+                                    description=(
+                                        f"Une reduction Fillon de {montant_reduction:.2f} EUR est "
+                                        f"appliquee pour {emp.prenom} {emp.nom} alors que le salaire "
+                                        f"brut ({brut:.2f} EUR) depasse le seuil de 1.6 SMIC "
+                                        f"({seuil_fillon_mensuel:.2f} EUR/mois).\\n\\n"
+                                        f"Au-dela de ce seuil, la reduction Fillon doit etre nulle. "
+                                        f"Depuis 2026, la Reduction Generale Degressive Unique (RGDU) "
+                                        f"remplace l'ancien dispositif Fillon avec un seuil a 3 SMIC.\\n\\n"
+                                        f"Que faire ?\\n"
+                                        f"1. Verifier que le logiciel de paie utilise bien la RGDU 2026\\n"
+                                        f"2. Supprimer la reduction Fillon qui n'est plus applicable\\n"
+                                        f"3. Evaluer l'eligibilite a la RGDU si le salaire est < 3 SMIC"
+                                    ),
+                                    valeur_constatee=f"{montant_reduction:.2f} EUR",
+                                    valeur_attendue="0.00 EUR",
+                                    montant_impact=montant_reduction,
+                                    score_risque=85,
+                                    recommandation="Supprimer la reduction Fillon et verifier l'eligibilite a la RGDU 2026.",
+                                    detecte_par=self.nom,
+                                    documents_concernes=[decl.source_document_id or decl.id],
+                                    reference_legale="CSS art. L241-13 - RGDU 2026 (ex-Fillon)",
+                                ))
+                            # New RGDU: reduction should be zero if salary >= 3 SMIC
+                            elif rc.type_cotisation == ContributionType.RGDU and not self.rules.est_eligible_rgdu(brut_annuel):
+                                findings.append(Finding(
+                                    categorie=FindingCategory.ANOMALIE,
+                                    severite=Severity.HAUTE,
+                                    titre=f"RGDU appliquee au-dela de 3 SMIC ({emp.prenom} {emp.nom})",
+                                    description=(
+                                        f"Une RGDU de {montant_reduction:.2f} EUR est appliquee pour "
+                                        f"{emp.prenom} {emp.nom} alors que le salaire brut annuel estime "
+                                        f"({brut_annuel:.2f} EUR) atteint ou depasse le seuil de 3 SMIC "
+                                        f"({seuil_rgdu_mensuel * 12:.2f} EUR/an).\\n\\n"
+                                        f"La RGDU est une reduction degressive qui s'annule a 3 SMIC. "
+                                        f"Au-dela de ce seuil, aucune reduction ne doit etre appliquee.\\n\\n"
+                                        f"Que faire ?\\n"
+                                        f"1. Verifier le parametre de remuneration annuelle dans le logiciel\\n"
+                                        f"2. Supprimer la RGDU pour ce salarie\\n"
+                                        f"3. Regulariser les periodes anterieures si necessaire"
+                                    ),
+                                    valeur_constatee=f"{montant_reduction:.2f} EUR",
+                                    valeur_attendue="0.00 EUR",
+                                    montant_impact=montant_reduction,
+                                    score_risque=90,
+                                    recommandation="Supprimer la RGDU : le salaire depasse 3 SMIC.",
+                                    detecte_par=self.nom,
+                                    documents_concernes=[decl.source_document_id or decl.id],
+                                    reference_legale="CSS art. L241-13 - RGDU plafonnee a 3 SMIC",
+                                ))
+
+            # --- AT/MP taux range check ---
+            at_cots = [c for c in decl.cotisations
+                       if c.type_cotisation == ContributionType.ACCIDENT_TRAVAIL]
+            for atc in at_cots:
+                if atc.taux_patronal > 0:
+                    taux_pct = atc.taux_patronal * 100
+                    if taux_pct < Decimal("0.20") or taux_pct > Decimal("18"):
+                        findings.append(Finding(
+                            categorie=FindingCategory.ANOMALIE,
+                            severite=Severity.HAUTE,
+                            titre=f"Taux AT/MP hors plage raisonnable ({taux_pct:.2f}%)",
+                            description=(
+                                f"Le taux AT/MP constate est de {taux_pct:.2f}%, ce qui est "
+                                f"en dehors de la plage raisonnable (0.20% a 18%).\\n\\n"
+                                f"Les taux AT/MP sont fixes par la CARSAT en fonction de la "
+                                f"sinistralite de l'entreprise et du secteur d'activite. "
+                                f"Un taux inferieur a 0.20% ou superieur a 18% est tres inhabituel "
+                                f"et peut indiquer une erreur de saisie.\\n\\n"
+                                f"Que faire ?\\n"
+                                f"1. Verifier le taux sur la notification annuelle de la CARSAT\\n"
+                                f"2. Comparer avec le taux de l'annee precedente\\n"
+                                f"3. Corriger dans le logiciel de paie si necessaire"
+                            ),
+                            valeur_constatee=f"{taux_pct:.2f}%",
+                            valeur_attendue="entre 0.20% et 18%",
+                            score_risque=75,
+                            recommandation="Verifier le taux AT/MP sur la notification CARSAT.",
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="CSS art. L242-5, D242-6-1 - Taux AT/MP",
+                        ))
+
+            # --- CSG/CRDS assiette 98.25% du brut ---
+            csg_crds_types = (
+                ContributionType.CSG_DEDUCTIBLE,
+                ContributionType.CSG_NON_DEDUCTIBLE,
+                ContributionType.CRDS,
+            )
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                if brut > 0:
+                    assiette_attendue = (brut * Decimal("0.9825")).quantize(
+                        Decimal("0.01"), ROUND_HALF_UP
+                    )
+                    csg_crds_cots = [c for c in emp_cots if c.type_cotisation in csg_crds_types]
+                    for cc in csg_crds_cots:
+                        if cc.assiette > 0:
+                            ecart_assiette = abs(cc.assiette - assiette_attendue)
+                            if ecart_assiette > Decimal("5"):
+                                ct_label = cc.type_cotisation.value.replace("_", " ").upper()
+                                findings.append(Finding(
+                                    categorie=FindingCategory.ANOMALIE,
+                                    severite=Severity.MOYENNE,
+                                    titre=f"Assiette {ct_label} incorrecte ({emp.prenom} {emp.nom})",
+                                    description=(
+                                        f"L'assiette de la {ct_label} pour {emp.prenom} {emp.nom} "
+                                        f"est de {cc.assiette:.2f} EUR, alors que l'assiette attendue "
+                                        f"(98.25% du brut) est de {assiette_attendue:.2f} EUR.\\n\\n"
+                                        f"Ecart constate : {ecart_assiette:.2f} EUR (tolerance : 5 EUR).\\n\\n"
+                                        f"La CSG et la CRDS sont calculees sur 98.25% du salaire brut "
+                                        f"(abattement forfaitaire de 1.75% pour frais professionnels). "
+                                        f"Cette erreur d'assiette est frequente dans les logiciels de paie.\\n\\n"
+                                        f"Que faire ?\\n"
+                                        f"Verifier le parametrage de l'assiette CSG/CRDS dans le logiciel de paie."
+                                    ),
+                                    valeur_constatee=f"{cc.assiette:.2f} EUR",
+                                    valeur_attendue=f"{assiette_attendue:.2f} EUR (98.25% de {brut:.2f})",
+                                    montant_impact=ecart_assiette,
+                                    score_risque=65,
+                                    recommandation="Corriger l'assiette CSG/CRDS a 98.25% du brut.",
+                                    detecte_par=self.nom,
+                                    documents_concernes=[decl.source_document_id or decl.id],
+                                    reference_legale="CSS art. L136-2 - Assiette CSG/CRDS (abattement 1.75%)",
+                                ))
+
+            # --- Proratisation temps partiel du PASS ---
+            for emp in decl.employes:
+                if Decimal("0") < emp.temps_travail < Decimal("1"):
+                    emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                    vp_cots = [c for c in emp_cots
+                               if c.type_cotisation == ContributionType.VIEILLESSE_PLAFONNEE]
+                    pass_proratise = PASS_MENSUEL * emp.temps_travail
+                    for vpc in vp_cots:
+                        if vpc.assiette > pass_proratise + TOLERANCE_MONTANT:
+                            findings.append(Finding(
+                                categorie=FindingCategory.ANOMALIE,
+                                severite=Severity.HAUTE,
+                                titre=f"PASS non proratise pour temps partiel ({emp.prenom} {emp.nom})",
+                                description=(
+                                    f"{emp.prenom} {emp.nom} travaille a "
+                                    f"{float(emp.temps_travail)*100:.0f}% d'un temps plein. "
+                                    f"L'assiette de la vieillesse plafonnee ({vpc.assiette:.2f} EUR) "
+                                    f"depasse le PASS proratise ({pass_proratise:.2f} EUR).\\n\\n"
+                                    f"Pour un salarie a temps partiel, le plafond de securite "
+                                    f"sociale doit etre proratise au prorata du temps de travail "
+                                    f"(PASS mensuel {PASS_MENSUEL} EUR x "
+                                    f"{float(emp.temps_travail)*100:.0f}% = "
+                                    f"{pass_proratise:.2f} EUR).\\n\\n"
+                                    f"Que faire ?\\n"
+                                    f"1. Verifier le temps de travail declare dans le logiciel de paie\\n"
+                                    f"2. Corriger le plafonnement de la cotisation vieillesse plafonnee\\n"
+                                    f"3. S'assurer que toutes les cotisations plafonnees sont proratisees"
+                                ),
+                                valeur_constatee=f"{vpc.assiette:.2f} EUR",
+                                valeur_attendue=f"<= {pass_proratise:.2f} EUR",
+                                montant_impact=vpc.assiette - pass_proratise,
+                                score_risque=80,
+                                recommandation="Proratiser le PASS au temps de travail du salarie.",
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id or decl.id],
+                                reference_legale="CSS art. L242-8 - Proratisation du plafond temps partiel",
+                            ))
+
+            # --- Retraite complementaire T2 ---
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                if emp_cots:
+                    brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                    t2_cots = [c for c in emp_cots
+                               if c.type_cotisation == ContributionType.RETRAITE_COMPLEMENTAIRE_T2]
+                    if brut > PASS_MENSUEL + TOLERANCE_MONTANT and not t2_cots:
+                        findings.append(Finding(
+                            categorie=FindingCategory.DONNEE_MANQUANTE,
+                            severite=Severity.HAUTE,
+                            titre=f"Retraite complementaire T2 manquante ({emp.prenom} {emp.nom})",
+                            description=(
+                                f"Le salaire brut de {emp.prenom} {emp.nom} ({brut:.2f} EUR) "
+                                f"depasse le PASS mensuel ({PASS_MENSUEL} EUR). La cotisation "
+                                f"de retraite complementaire Tranche 2 (AGIRC-ARRCO) devrait "
+                                f"etre presente sur la fraction du salaire entre 1 et 8 PASS.\\n\\n"
+                                f"L'absence de cette cotisation peut entrainer un manque a gagner "
+                                f"pour le salarie en termes de points de retraite complementaire.\\n\\n"
+                                f"Que faire ?\\n"
+                                f"1. Verifier le parametrage retraite complementaire dans le logiciel\\n"
+                                f"2. S'assurer que la Tranche 2 est bien declaree\\n"
+                                f"3. Regulariser aupres de l'AGIRC-ARRCO si necessaire"
+                            ),
+                            valeur_constatee="absente",
+                            valeur_attendue="cotisation T2 presente",
+                            score_risque=80,
+                            recommandation="Ajouter la cotisation retraite complementaire T2 pour les salaires > PASS.",
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="ANI AGIRC-ARRCO art. 36 - Tranche 2",
+                        ))
+                    elif brut <= PASS_MENSUEL and t2_cots:
+                        for t2c in t2_cots:
+                            t2_montant = abs(t2c.montant_patronal) + abs(t2c.montant_salarial)
+                            if t2_montant > TOLERANCE_MONTANT:
+                                findings.append(Finding(
+                                    categorie=FindingCategory.ANOMALIE,
+                                    severite=Severity.MOYENNE,
+                                    titre=f"Retraite complementaire T2 indue ({emp.prenom} {emp.nom})",
+                                    description=(
+                                        f"Le salaire brut de {emp.prenom} {emp.nom} ({brut:.2f} EUR) "
+                                        f"ne depasse pas le PASS mensuel ({PASS_MENSUEL} EUR). "
+                                        f"Or une cotisation retraite complementaire Tranche 2 de "
+                                        f"{t2_montant:.2f} EUR est presente.\\n\\n"
+                                        f"La Tranche 2 ne s'applique que sur la fraction du salaire "
+                                        f"comprise entre 1 et 8 PASS. Si le salaire est inferieur au "
+                                        f"PASS, cette cotisation devrait etre nulle.\\n\\n"
+                                        f"Que faire ?\\n"
+                                        f"Verifier le parametrage de la retraite complementaire et "
+                                        f"supprimer la cotisation T2 pour ce salarie."
+                                    ),
+                                    valeur_constatee=f"{t2_montant:.2f} EUR",
+                                    valeur_attendue="0.00 EUR",
+                                    montant_impact=t2_montant,
+                                    score_risque=65,
+                                    recommandation="Supprimer la cotisation T2 : salaire inferieur au PASS.",
+                                    detecte_par=self.nom,
+                                    documents_concernes=[decl.source_document_id or decl.id],
+                                    reference_legale="ANI AGIRC-ARRCO art. 36 - Tranche 2 (1-8 PASS)",
+                                ))
+
         return findings
 
     def _verifier_cotisation(

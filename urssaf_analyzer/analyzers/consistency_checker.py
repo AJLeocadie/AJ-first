@@ -1245,11 +1245,125 @@ class ConsistencyChecker(BaseAnalyzer):
                 ),
             ))
 
-        return findings
+        # -- CTP obligatoires : CTP 100 (cas general) doit etre present --
+        _CTP_OBLIGATOIRES = {"100"}  # CTP 100 = cas general regime general
+        if ctp_codes and _CTP_OBLIGATOIRES - ctp_codes:
+            ctp_manquants = _CTP_OBLIGATOIRES - ctp_codes
+            findings.append(Finding(
+                categorie=FindingCategory.DONNEE_MANQUANTE,
+                severite=Severity.MOYENNE,
+                titre=f"CTP obligatoire(s) manquant(s) : {', '.join(sorted(ctp_manquants))}",
+                description=(
+                    f"Le CTP 100 (regime general - cas general) est le code de base "
+                    f"pour toute DSN mensuelle. Son absence peut indiquer une erreur "
+                    f"de parametrage dans le logiciel de paie."
+                ),
+                montant_impact=Decimal("0"),
+                score_risque=65,
+                recommandation=(
+                    "Verifier les codes CTP declares dans la DSN. "
+                    "Le CTP 100 doit etre present pour les cotisations regime general."
+                ),
+                detecte_par=self.nom,
+                documents_concernes=[decl.source_document_id],
+                reference_legale="Table des CTP URSSAF - net-entreprises.fr",
+                details_technique=_details_technique(
+                    annee=annee, periode=per, document=doc_label,
+                    rubrique="CTP obligatoires",
+                    extra={"ctp_manquants": sorted(ctp_manquants), "ctp_presents": sorted(str(c) for c in ctp_codes)},
+                ),
+            ))
 
-    # =================================================================
-    # Coherence inter-documents (existant, ameliore)
-    # =================================================================
+        # -- Coherence employe / contrat : date embauche vs periode DSN --
+        for emp in decl.employes:
+            if emp.date_embauche and decl.periode:
+                try:
+                    from datetime import date as dt_date
+                    if isinstance(emp.date_embauche, str):
+                        dh = dt_date.fromisoformat(emp.date_embauche)
+                    else:
+                        dh = emp.date_embauche
+                    # Parse periode (YYYY-MM format)
+                    per_str = str(decl.periode).strip()
+                    if len(per_str) >= 7:
+                        per_year = int(per_str[:4])
+                        per_month = int(per_str[5:7])
+                        # Si date embauche > fin de la periode declaree, incoherence
+                        import calendar
+                        _, dernier_jour = calendar.monthrange(per_year, per_month)
+                        fin_periode = dt_date(per_year, per_month, dernier_jour)
+                        if dh > fin_periode:
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.HAUTE,
+                                titre=f"Date embauche future dans DSN ({emp.prenom} {emp.nom})",
+                                description=(
+                                    f"Le salarie {emp.prenom} {emp.nom} a une date d'embauche "
+                                    f"({dh.isoformat()}) posterieure a la fin de la periode "
+                                    f"declaree ({fin_periode.isoformat()}).\\n\\n"
+                                    f"Un salarie ne peut pas apparaitre dans une DSN "
+                                    f"pour une periode anterieure a son embauche."
+                                ),
+                                valeur_constatee=dh.isoformat(),
+                                valeur_attendue=f"<= {fin_periode.isoformat()}",
+                                montant_impact=Decimal("0"),
+                                score_risque=75,
+                                recommandation=(
+                                    "Verifier la date d'embauche du salarie et la periode "
+                                    "de la DSN. Corriger l'une ou l'autre si necessaire."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id],
+                                reference_legale="Cahier technique DSN - Bloc S21.G00.40",
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per, document=doc_label,
+                                    rubrique=f"Date embauche {emp.prenom} {emp.nom}",
+                                ),
+                            ))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+
+        # -- Coherence base assujettie S78 / cotisation individuelle S81 --
+        # Verifier que le total des cotisations par employe correspond a une base coherente
+        if decl.employes and decl.cotisations:
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                if len(emp_cots) >= 2:
+                    bases = [c.base_brute for c in emp_cots if c.base_brute > 0]
+                    if bases:
+                        base_max = max(bases)
+                        base_min = min(bases)
+                        # Les bases doivent etre coherentes (hors plafonnement)
+                        # Si ecart > 3x la plus petite, signaler
+                        if base_min > 0 and base_max > base_min * 3 and base_max > PASS_MENSUEL:
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.MOYENNE,
+                                titre=f"Bases assujetties incoherentes ({emp.prenom} {emp.nom})",
+                                description=(
+                                    f"Pour {emp.prenom} {emp.nom}, les bases de cotisations "
+                                    f"presentent un ecart important : "
+                                    f"min={base_min:.2f} EUR, max={base_max:.2f} EUR.\\n\\n"
+                                    f"Cet ecart peut etre normal (plafonnement PASS) "
+                                    f"mais merite verification."
+                                ),
+                                valeur_constatee=f"min={base_min:.2f}, max={base_max:.2f}",
+                                montant_impact=Decimal("0"),
+                                score_risque=45,
+                                recommandation=(
+                                    "Verifier les assiettes de cotisations. L'ecart peut etre "
+                                    "lie au plafonnement PASS ou a une erreur de parametrage."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id],
+                                reference_legale="Art. L242-1 CSS - Cahier technique DSN bloc S21.G00.78/S21.G00.81",
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per, document=doc_label,
+                                    rubrique=f"Bases cotisations {emp.prenom} {emp.nom}",
+                                ),
+                            ))
+
+        return findings
 
     def _verifier_coherence_inter_documents(self, declarations: list[Declaration]) -> list[Finding]:
         """Compare les declarations entre elles."""
