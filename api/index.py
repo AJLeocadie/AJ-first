@@ -817,7 +817,7 @@ async def analyser_documents(
                                             "date": d_planning.strftime("%Y-%m-%d"),
                                             "heure_debut": "09:00",
                                             "heure_fin": "17:00",
-                                            "type": "normal",
+                                            "type_poste": "normal",
                                             "note": "Planning auto (analyse)",
                                         })
                                         nb_planning_new += 1
@@ -4377,9 +4377,17 @@ async def ajouter_planning(
             index_existant = i
             break
 
+    # Resoudre le nom du salarie depuis les contrats
+    salarie_nom = salarie_id
+    for c in _rh_contrats:
+        if c.get("id") == salarie_id:
+            salarie_nom = f"{c.get('prenom', '')} {c.get('nom', '')}".strip() or salarie_id
+            break
+
     entree = {
         "id": planning_id,
         "salarie_id": salarie_id,
+        "salarie_nom": salarie_nom,
         "date": date,
         "heure_debut": heure_debut,
         "heure_fin": heure_fin,
@@ -5373,7 +5381,7 @@ APP_HTML += """
 <div class="card">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
 <h2>Resultats</h2>
-<div class="btn-group"><button class="btn btn-s btn-sm" onclick="exportPDF()">&#128196; Export PDF</button><button class="btn btn-s btn-sm" onclick="exportSection('az')">&#128190; CSV</button><button class="btn btn-s btn-sm" onclick="resetAz()">&#10227; Nouvelle</button></div>
+<div class="btn-group"><button class="btn btn-s btn-sm" onclick="exportPDF()">&#128196; Export PDF</button><button class="btn btn-s btn-sm" onclick="exportSection('az')">&#128190; CSV</button><button class="btn btn-blue" onclick="resetAz()" style="font-weight:600">&#10227; Nouvelle analyse</button></div>
 </div>
 <div class="g4" id="az-dashboard"></div>
 </div>
@@ -5383,6 +5391,7 @@ APP_HTML += """
 <div class="card"><h2>Anomalies</h2><div id="az-findings"></div></div>
 <div class="card"><h2>Recommandations</h2><div id="az-reco"></div></div>
 <div class="card" id="az-html-card" style="display:none"><h2>Rapport visuel complet</h2><iframe id="az-html-frame" style="width:100%;height:600px;border:1px solid var(--brd);border-radius:10px"></iframe></div>
+<div style="text-align:center;margin:20px 0"><button class="btn btn-blue" onclick="resetAz()" style="font-size:1.05em;padding:12px 32px;font-weight:600">&#10227; Nouvelle analyse</button></div>
 </div>
 </div>
 
@@ -5685,7 +5694,8 @@ APP_HTML += """
 <!-- ===== RESSOURCES HUMAINES ===== -->
 <div class="sec" id="s-rh">
 <div class="tabs" id="rh-tabs">
-<div class="tab active" onclick="showRHTab('contrats',this)">Contrats</div>
+<div class="tab active" onclick="showRHTab('salaries',this)">Salaries</div>
+<div class="tab" onclick="showRHTab('contrats',this)">Contrats</div>
 <div class="tab" onclick="showRHTab('conges',this)">Conges</div>
 <div class="tab" onclick="showRHTab('arrets',this)">Arrets</div>
 <div class="tab" onclick="showRHTab('sanctions',this)">Sanctions</div>
@@ -5698,7 +5708,12 @@ APP_HTML += """
 <div class="tab" onclick="showRHTab('bulletins',this)">Bulletins</div>
 </div>
 <div class="card">
-<div class="tc active" id="rh-contrats">
+<div class="tc active" id="rh-salaries">
+<h2>Liste des salaries</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Les salaries sont detectes automatiquement lors de l analyse de documents (bulletins, DSN, contrats). Vous pouvez aussi les ajouter manuellement via l onglet Contrats.</p>
+<div id="rh-sal-list"><p style="color:var(--tx2)">Aucun salarie.</p></div>
+</div>
+<div class="tc" id="rh-contrats">
 <h2>Gestion des contrats de travail</h2>
 <div class="g2"><div>
 <label>Type de contrat</label><select id="rh-type-ctr"><option value="CDI">CDI</option><option value="CDD">CDD</option><option value="CTT">CTT (Interim)</option><option value="Apprentissage">Apprentissage</option><option value="Professionnalisation">Professionnalisation</option><option value="Saisonnier">Saisonnier</option><option value="Intermittent">Intermittent</option></select>
@@ -5913,7 +5928,7 @@ document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
 if(n==="biblio"){loadBiblio();loadKnowledge();}if(n==="equipe")loadEquipe();
 if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
-if(n==="rh"){loadRHContrats();loadRHAlertes();loadRHPlanning();}if(n==="config"){loadEntete();loadAlertConfigs();}
+if(n==="rh"){loadRHSalaries();loadRHAlertes();}if(n==="config"){loadEntete();loadAlertConfigs();}
 }
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
@@ -6585,7 +6600,7 @@ w.document.write(html);w.document.close();setTimeout(function(){w.print();},600)
 
 /* === RH MODULE === */
 function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
+if(n==="salaries")loadRHSalaries();if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(){});}
@@ -6601,6 +6616,32 @@ if(eff.planning&&eff.planning.length)h+="<li>&#128197; "+eff.planning.length+" c
 if(eff.ecriture_comptable)h+="<li>&#128181; Ecriture comptable provisionnee ("+eff.ecriture_comptable.libelle+")</li>";
 h+="</ul></div>";}
 document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});}
+
+function loadRHSalaries(){
+rhGet("/api/rh/contrats",function(list){
+var el=document.getElementById("rh-sal-list");
+if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun salarie detecte. Importez des bulletins de paie, DSN ou contrats dans l onglet Import / Analyse.</p>";return;}
+var h="<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px'>";
+h+="<div class='sc blue'><div class='val'>"+list.length+"</div><div class='lab'>Salaries</div></div>";
+var actifs=0;var totalBrut=0;for(var i=0;i<list.length;i++){if(list[i].statut==="actif")actifs++;totalBrut+=parseFloat(list[i].salaire_brut||0);}
+h+="<div class='sc green'><div class='val'>"+actifs+"</div><div class='lab'>Actifs</div></div>";
+h+="<div class='sc'><div class='val'>"+totalBrut.toFixed(0)+" EUR</div><div class='lab'>Masse brute</div></div>";
+h+="</div>";
+h+="<table><thead><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Type contrat</th><th>Date debut</th><th class='num'>Brut mensuel</th><th>NIR</th><th>Statut</th><th>Source</th></tr></thead><tbody>";
+for(var i=0;i<list.length;i++){var c=list[i];
+var cls=c.statut==="actif"?"badge-green":(c.statut==="suspendu"?"badge-amber":"badge-red");
+var nirAff=c.nir?(c.nir.length>5?c.nir.substring(0,5)+"...":c.nir):"-";
+var src=(c.source||"").replace("analyse_automatique","Auto");
+h+="<tr><td><strong>"+c.nom_salarie+"</strong></td><td>"+c.prenom_salarie+"</td><td>"+c.poste+"</td>";
+h+="<td><span class='badge badge-blue'>"+c.type_contrat+"</span></td>";
+h+="<td>"+c.date_debut+"</td>";
+h+="<td class='num'>"+parseFloat(c.salaire_brut||0).toFixed(2)+" EUR</td>";
+h+="<td style='font-size:.8em'>"+nirAff+"</td>";
+h+="<td><span class='badge "+cls+"'>"+c.statut+"</span></td>";
+h+="<td style='font-size:.78em;color:var(--tx2)'>"+src+"</td></tr>";}
+h+="</tbody></table>";
+el.innerHTML=h;});
+}
 
 function loadRHContrats(){rhGet("/api/rh/contrats",function(list){
 var el=document.getElementById("rh-ctr-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun contrat.</p>";return;}
@@ -6638,7 +6679,7 @@ function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el
 
 function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
 rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");loadRHPlanning();});}
-function loadRHPlanning(){rhGet("/api/rh/planning",function(list){var el=document.getElementById("rh-pl-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun planning.</p>";return;}var h="<table><tr><th>Salarie</th><th>Date</th><th>Debut</th><th>Fin</th><th>Type</th></tr>";for(var i=0;i<list.length;i++){var p=list[i];h+="<tr><td>"+p.salarie_id+"</td><td>"+p.date+"</td><td>"+p.heure_debut+"</td><td>"+p.heure_fin+"</td><td><span class='badge badge-blue'>"+p.type_poste+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
+function loadRHPlanning(){rhGet("/api/rh/planning",function(list){var el=document.getElementById("rh-pl-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun planning.</p>";return;}var h="<table><tr><th>Salarie</th><th>Date</th><th>Debut</th><th>Fin</th><th>Type</th></tr>";for(var i=0;i<list.length;i++){var p=list[i];var nom=p.salarie_nom||p.salarie_id||"?";var tp=p.type_poste||p.type||"normal";h+="<tr><td>"+nom+"</td><td>"+p.date+"</td><td>"+p.heure_debut+"</td><td>"+p.heure_fin+"</td><td><span class='badge badge-blue'>"+tp+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
 function renderCalendar(){rhGet("/api/rh/planning",function(list){
 var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
 var semInput=document.getElementById("rh-pl-sem");var filterInput=document.getElementById("rh-pl-filter");
@@ -6649,8 +6690,8 @@ var colors={"normal":"#3b82f6","astreinte":"#f59e0b","nuit":"#6366f1","dimanche"
 var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left'>Salarie</th>";
 for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);h+="<th style='padding:8px;text-align:center'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
 h+="</tr>";
-var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;if(!salaries[sid])salaries[sid]={};var pd=new Date(p.date);for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
-for(var sid in salaries){h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd)'>"+sid+"</td>";for(var j=0;j<7;j++){h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){var s=slots[k];var bg=colors[s.type_poste]||"#3b82f6";h+="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 4px;margin:1px 0;font-size:.78em'>"+s.heure_debut+"-"+s.heure_fin+"</div>";}
+var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;if(!salaries[sid])salaries[sid]={};var pd=new Date(p.date);for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
+for(var sid in salaries){h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd)'>"+sid+"</td>";for(var j=0;j<7;j++){h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){var s=slots[k];var tp=s.type_poste||s.type||"normal";var bg=colors[tp]||"#3b82f6";h+="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 4px;margin:1px 0;font-size:.78em'>"+s.heure_debut+"-"+s.heure_fin+"</div>";}
 if(!slots.length)h+="<span style='color:#cbd5e1'>-</span>";h+="</td>";}h+="</tr>";}
 if(!Object.keys(salaries).length){h+="<tr><td colspan='8' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun creneau pour cette semaine.</td></tr>";}
 h+="</table>";cal.innerHTML=h;});}
