@@ -435,25 +435,33 @@ async def analyser_documents(
                 sha = hashlib.sha256(raw).hexdigest()[:16]
                 # Extraire les donnees du document correspondant
                 doc_data = {}
+                doc_statut = "analyse"
                 if idx_f < len(result.declarations):
                     decl = result.declarations[idx_f]
+                    d_meta_lib = getattr(decl, "metadata", {}) or {}
+                    doc_type_lib = d_meta_lib.get("type_document", "")
+                    if doc_type_lib == "inconnu" or not doc_type_lib:
+                        doc_statut = "non_reconnu"
                     doc_data = {
                         "nb_salaries": len(decl.employes),
                         "nb_cotisations": len(decl.cotisations),
                         "masse_salariale": float(decl.masse_salariale_brute),
                         "type_declaration": decl.type_declaration,
+                        "type_document": doc_type_lib or "inconnu",
                         "employeur_siret": decl.employeur.siret if decl.employeur else "",
                         "employeur_nom": decl.employeur.raison_sociale if decl.employeur else "",
                         "periode": decl.periode.debut.strftime("%Y-%m") if decl.periode and decl.periode.debut else "",
                         "salaries_noms": [f"{e.prenom} {e.nom}" for e in decl.employes],
                     }
+                else:
+                    doc_statut = "erreur"
                 _doc_library.append({
                     "id": str(uuid.uuid4())[:8],
                     "nom": f.filename,
                     "taille": len(raw),
                     "sha256": sha,
                     "date_import": datetime.now().isoformat(),
-                    "statut": "analyse",
+                    "statut": doc_statut,
                     "donnees_extraites": doc_data,
                     "actions": [{"action": "import+analyse", "par": "utilisateur", "date": datetime.now().isoformat()}],
                     "erreurs_corrigees": [],
@@ -919,11 +927,49 @@ async def analyser_documents(
         except Exception as e:
             _integration_log.append(f"ERREUR RH GLOBALE: {e}\\n{traceback.format_exc()}")
 
-        # Build file info from actual uploaded files
+        # Build file info with per-file parse status and document type
         fichiers_info = []
         for i, f in enumerate(fichiers):
             ext = Path(f.filename).suffix.lower() if f.filename else ""
-            fichiers_info.append({"nom": f.filename, "extension": ext, "index": i})
+            finfo = {"nom": f.filename, "extension": ext, "index": i}
+            if i < len(result.declarations):
+                decl = result.declarations[i]
+                d_meta = getattr(decl, "metadata", {}) or {}
+                doc_type = d_meta.get("type_document", "")
+                nature_labels = {
+                    "bulletin_de_paie": "Bulletin de paie",
+                    "bulletin": "Bulletin de paie",
+                    "livre_de_paie": "Livre de paie",
+                    "facture_achat": "Facture d achat",
+                    "facture_vente": "Facture de vente",
+                    "contrat_de_travail": "Contrat de travail",
+                    "accord_interessement": "Accord d interessement",
+                    "accord_participation": "Accord de participation",
+                    "attestation": "Attestation employeur",
+                }
+                if doc_type == "inconnu" or not doc_type:
+                    finfo["statut"] = "non_reconnu"
+                    finfo["type_document"] = "Document non reconnu"
+                    finfo["message"] = "Le type de ce document n a pas pu etre identifie. Les informations detectees ont ete extraites en mode generique."
+                else:
+                    finfo["statut"] = "analyse"
+                    finfo["type_document"] = nature_labels.get(doc_type, doc_type.replace("_", " ").title())
+                finfo["nb_employes"] = len(decl.employes)
+                finfo["nb_cotisations"] = len(decl.cotisations)
+                finfo["masse_salariale"] = float(decl.masse_salariale_brute)
+            elif ext and ext not in SUPPORTED_EXTENSIONS:
+                finfo["statut"] = "format_non_supporte"
+                finfo["type_document"] = "Format non supporte"
+                finfo["message"] = f"Le format {ext} n est pas supporte. Formats acceptes: PDF, Excel, CSV, DSN, XML, Images, TXT, DOCX."
+            else:
+                finfo["statut"] = "erreur_analyse"
+                finfo["type_document"] = "Erreur d analyse"
+                finfo["message"] = "L analyse de ce fichier a echoue."
+            fichiers_info.append(finfo)
+
+        # Count unrecognized files
+        nb_non_reconnus = sum(1 for fi in fichiers_info if fi.get("statut") == "non_reconnu")
+        nb_erreurs = sum(1 for fi in fichiers_info if fi.get("statut") in ("format_non_supporte", "erreur_analyse"))
 
         return {
             "synthese": {
@@ -934,6 +980,8 @@ async def analyser_documents(
                 "impact_financier_total": float(result.impact_total),
                 "score_risque_global": result.score_risque_global,
                 "nb_fichiers": len(result.documents_analyses),
+                "nb_fichiers_non_reconnus": nb_non_reconnus,
+                "nb_fichiers_erreur": nb_erreurs,
             },
             "constats": constats,
             "recommandations": recommandations,
@@ -6178,7 +6226,8 @@ return resp.json().then(function(data){analysisData=data;showJsonResults(data);}
 
 function showJsonResults(data){
 var s=data.synthese||{};var impact=s.impact_financier_total||0;
-document.getElementById("az-dashboard").innerHTML="<div class='sc blue'><div class='val'>"+((data.constats||[]).length)+"</div><div class='lab'>Anomalies</div></div><div class='sc "+(impact>1000?"red":"green")+"'><div class='val'>"+impact.toFixed(2)+" EUR</div><div class='lab'>Impact</div></div><div class='sc green'><div class='val'>"+Math.max(0,100-(s.score_risque_global||0))+"%</div><div class='lab'>Conformite</div></div><div class='sc'><div class='val'>"+(s.nb_fichiers||0)+"</div><div class='lab'>Fichiers</div></div>";
+var dashNr=s.nb_fichiers_non_reconnus||0;
+document.getElementById("az-dashboard").innerHTML="<div class='sc blue'><div class='val'>"+((data.constats||[]).length)+"</div><div class='lab'>Anomalies</div></div><div class='sc "+(impact>1000?"red":"green")+"'><div class='val'>"+impact.toFixed(2)+" EUR</div><div class='lab'>Impact</div></div><div class='sc green'><div class='val'>"+Math.max(0,100-(s.score_risque_global||0))+"%</div><div class='lab'>Conformite</div></div><div class='sc'><div class='val'>"+(s.nb_fichiers||0)+"</div><div class='lab'>Fichiers</div></div>"+(dashNr>0?"<div class='sc red'><div class='val'>"+dashNr+"</div><div class='lab'>Non reconnus</div></div>":"");
 renderAnomalies("az-findings",data.constats||[]);
 var recos=data.recommandations||[];var rh="";for(var i=0;i<recos.length;i++){rh+="<div class='al info'><span class='ai'>&#128161;</span><span><strong>#"+(i+1)+"</strong> "+(recos[i].description||recos[i].titre||"")+"</span></div>";}
 document.getElementById("az-reco").innerHTML=rh||"<p style='color:var(--tx2)'>Aucune.</p>";
@@ -6218,8 +6267,10 @@ var el=document.getElementById("biblio-list");
 if(!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
 var h="";for(var i=0;i<docs.length;i++){var d=docs[i];var de=d.donnees_extraites||{};
 h+="<div class='doc-item'><div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px'>";
-h+="<div><strong>"+d.nom+"</strong> <span class='badge badge-blue'>"+d.statut+"</span>";
+var bStatCls=d.statut==="non_reconnu"?"badge-red":(d.statut==="erreur"?"badge-red":"badge-blue");
+h+="<div><strong>"+d.nom+"</strong> <span class='badge "+bStatCls+"'>"+(d.statut==="non_reconnu"?"Non reconnu":d.statut)+"</span>";
 if(de.type_declaration)h+=" <span class='badge badge-purple'>"+de.type_declaration+"</span>";
+if(de.type_document&&de.type_document!=="inconnu")h+=" <span class='badge badge-teal'>"+de.type_document.replace(/_/g," ")+"</span>";
 h+="</div>";
 h+="<span style='font-size:.8em;color:var(--tx2)'>"+d.date_import.substring(0,10)+" | "+(d.taille/1024).toFixed(1)+" Ko</span></div>";
 if(de.nb_salaries||de.masse_salariale||de.employeur_nom){h+="<div style='margin-top:6px;font-size:.84em;display:flex;gap:12px;flex-wrap:wrap'>";
@@ -6588,13 +6639,21 @@ function showFileInterpretation(data){
 var fl=document.getElementById("az-fichiers-list");
 if(!data||!data.declarations||!data.declarations.length){fl.innerHTML="<p style='color:var(--tx2)'>Aucun fichier interprete.</p>";return;}
 var fi=data.fichiers_info||[];
-var h="<table><tr><th>Fichier</th><th>Nature detectee</th><th>Employeur</th><th>Periode</th><th class='num'>Salaries</th><th class='num'>Cotisations</th><th class='num'>Masse sal.</th></tr>";
+var nbNR=data.synthese?data.synthese.nb_fichiers_non_reconnus||0:0;
+var nbErr=data.synthese?data.synthese.nb_fichiers_erreur||0:0;
+var h="";
+if(nbNR>0||nbErr>0){h+="<div class='al warn' style='margin-bottom:10px'><span class='ai'>&#9888;</span><span>"+(nbNR>0?"<strong>"+nbNR+" document(s) non reconnu(s)</strong> : le type n a pas pu etre identifie automatiquement. Les donnees detectees ont ete extraites en mode generique.":"")+(nbErr>0?(nbNR>0?" | ":"")+"<strong>"+nbErr+" fichier(s) en erreur</strong> : format non supporte ou erreur d analyse.":"")+"</span></div>";}
+for(var fi_i=0;fi_i<fi.length;fi_i++){var fst=fi[fi_i];if(fst.statut==="format_non_supporte"){h+="<div class='al err' style='margin-bottom:6px;font-size:.88em'><span class='ai'>&#10060;</span><span><strong>"+fst.nom+"</strong> : "+(fst.message||"Format non supporte")+"</span></div>";}}
+h+="<table><tr><th>Fichier</th><th>Nature detectee</th><th>Employeur</th><th>Periode</th><th class='num'>Salaries</th><th class='num'>Cotisations</th><th class='num'>Masse sal.</th></tr>";
 for(var i=0;i<data.declarations.length;i++){var d=data.declarations[i];
 var nature=d.nature||"Document";
 var fname=(i<fi.length?fi[i].nom:"")||(d.reference||"fichier "+(i+1));
+var fstat=(i<fi.length)?fi[i].statut:"";
+if(fstat==="non_reconnu"){nature="Document non reconnu";}
 var empName=d.employeur?(d.employeur.raison_sociale||d.employeur.siret||"-"):"-";
 var badgeCls="badge-blue";
-if(nature.indexOf("Bulletin")>=0)badgeCls="badge-green";
+if(fstat==="non_reconnu")badgeCls="badge-red";
+else if(nature.indexOf("Bulletin")>=0)badgeCls="badge-green";
 else if(nature.indexOf("DSN")>=0)badgeCls="badge-purple";
 else if(nature.indexOf("Livre")>=0||nature.indexOf("Recapitulatif")>=0)badgeCls="badge-amber";
 else if(nature.indexOf("Bordereau")>=0)badgeCls="badge-teal";
@@ -6613,6 +6672,7 @@ if(d.tiers)extraInfo+=" | Tiers: "+d.tiers;
 if(d.type_contrat)extraInfo=" | Type: "+d.type_contrat;
 if(d.remuneration_brute)extraInfo+=" | Remun: "+d.remuneration_brute.toFixed(2)+" EUR";
 h+="<tr><td style='font-size:.84em'>"+fname+"</td><td><span class='badge "+badgeCls+"'>"+nature+"</span></td><td>"+empName+"</td><td>"+(d.periode||"-")+"</td><td class='num'>"+(d.nb_salaries||0)+"</td><td class='num'>"+(d.nb_cotisations||0)+"</td><td class='num'>"+(masse>0?masse.toFixed(2)+" EUR":"-")+"</td></tr>";
+if(fstat==="non_reconnu"){extraInfo+=" | <span style='color:var(--r)'>Type de document non identifie. Extraction en mode generique.</span>";}
 if(extraInfo){h+="<tr><td colspan='7' style='font-size:.82em;color:var(--tx2);padding:2px 8px;border-top:none'>"+extraInfo+"</td></tr>";}
 if(d.salaries&&d.salaries.length>0){for(var si=0;si<d.salaries.length;si++){var s=d.salaries[si];h+="<tr style='font-size:.82em;color:var(--tx2)'><td></td><td colspan='2'>"+((s.prenom||"")+" "+(s.nom||"")).trim()||"Salarie "+(si+1)+"</td><td>"+(s.nir?"NIR: "+s.nir.substring(0,5)+"...":"-")+"</td><td class='num'>"+s.brut_mensuel.toFixed(2)+" EUR</td><td class='num'>"+s.net_fiscal.toFixed(2)+" EUR</td><td></td></tr>";}}}
 if(data.declarations.length>1){var totMasse=0;var totSal=0;for(var j=0;j<data.declarations.length;j++){totMasse+=(data.declarations[j].masse_salariale_brute||0);totSal+=(data.declarations[j].nb_salaries||0);}

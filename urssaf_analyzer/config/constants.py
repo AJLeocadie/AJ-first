@@ -467,4 +467,6 @@ SUPPORTED_EXTENSIONS = {
     ".heic": "image",
     ".heif": "image",
     ".txt": "texte",
+    ".docx": "word",
+    ".doc": "word",
 }
