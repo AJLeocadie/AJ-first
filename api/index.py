@@ -5957,6 +5957,7 @@ function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=docume
 function closeSidebar(){document.getElementById("sidebar").classList.remove("open");document.getElementById("sidebar-overlay").classList.remove("show");}
 
 /* === NAV === */
+function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
 function showS(n,el){
 closeSidebar();
 document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
@@ -5964,10 +5965,14 @@ document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove
 var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
 if(el)el.classList.add("active");
 document.getElementById("page-title").textContent=titles[n]||n;
-if(n==="compta")loadCompta();if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
+if(n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
+if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
 if(n==="biblio"){loadBiblio();loadKnowledge();}if(n==="equipe")loadEquipe();
-if(n==="factures")loadPayStatuses();if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
-if(n==="rh"){loadRHSalaries();loadRHAlertes();}if(n==="config"){loadEntete();loadAlertConfigs();}
+if(n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
+if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
+if(n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();loadRHAlertes();}
+if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
+if(n==="config"){loadEntete();loadAlertConfigs();}
 }
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
