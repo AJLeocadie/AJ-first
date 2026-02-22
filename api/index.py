@@ -1220,7 +1220,7 @@ async def analyser_documents(
                 nature_labels = {
                     "bulletin_de_paie": "Bulletin de paie", "bulletin": "Bulletin de paie",
                     "livre_de_paie": "Livre de paie",
-                    "facture_achat": "Facture d achat", "facture_vente": "Facture de vente",
+                    "facture": "Facture", "facture_achat": "Facture d achat", "facture_vente": "Facture de vente",
                     "contrat_de_travail": "Contrat de travail", "contrat_service": "Contrat de prestation",
                     "accord_interessement": "Accord interessement", "accord_participation": "Accord participation",
                     "attestation": "Attestation employeur",
@@ -1237,6 +1237,7 @@ async def analyser_documents(
                     "bilan": "Bilan", "compte_resultat": "Compte de resultat",
                     "rapport_cac": "Rapport CAC", "rapport_gestion": "Rapport de gestion", "budget": "Budget",
                     # Social/RH
+                    "declaration_dsn": "DSN (Declaration Sociale Nominative)",
                     "dpae": "DPAE", "registre_personnel": "Registre du personnel",
                     "duerp": "DUERP", "reglement_interieur": "Reglement interieur",
                     "avenant": "Avenant", "bilan_social": "Bilan social", "note_frais": "Note de frais",

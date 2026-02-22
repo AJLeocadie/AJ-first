@@ -23,18 +23,48 @@ COLONNES_MAPPING = {
     "nom": "nom", "nom_salarie": "nom",
     "prenom": "prenom", "prenom_salarie": "prenom",
     "statut": "statut", "categorie": "statut",
-    # Cotisations
+    # Cotisations - base
     "base": "base_brute", "base_brute": "base_brute", "assiette": "assiette",
     "salaire_brut": "base_brute", "brut": "base_brute",
+    # Cotisations - taux
     "taux_patronal": "taux_patronal", "taux_employeur": "taux_patronal",
+    "taux_pat.": "taux_patronal", "taux_pat": "taux_patronal",
     "taux_salarial": "taux_salarial", "taux_salarie": "taux_salarial",
+    "taux_sal.": "taux_salarial", "taux_sal": "taux_salarial",
+    # Cotisations - montants patronaux
     "montant_patronal": "montant_patronal", "cotisation_employeur": "montant_patronal",
+    "part_patronale": "montant_patronal", "part_patronal": "montant_patronal",
+    "part_employeur": "montant_patronal", "charges_patronales": "montant_patronal",
+    "cotisations_patronales": "montant_patronal", "patronal": "montant_patronal",
+    # Cotisations - montants salariaux
     "montant_salarial": "montant_salarial", "cotisation_salarie": "montant_salarial",
+    "part_salariale": "montant_salarial", "part_salarie": "montant_salarial",
+    "charges_salariales": "montant_salarial", "cotisations_salariales": "montant_salarial",
+    "retenues": "montant_salarial", "salarial": "montant_salarial",
+    # Type de cotisation / rubrique
     "type_cotisation": "type_cotisation", "code_cotisation": "type_cotisation",
+    "rubrique": "type_cotisation", "libelle": "type_cotisation",
+    "libelle_cotisation": "type_cotisation", "nature_cotisation": "type_cotisation",
+    # Factures / documents comptables
+    "type": "type_document_ligne", "numero": "numero_piece",
+    "tiers": "tiers", "fournisseur": "tiers", "client": "tiers",
+    "ht": "montant_ht", "hors_taxe": "montant_ht", "montant_ht": "montant_ht",
+    "tva": "montant_tva", "montant_tva": "montant_tva",
+    "ttc": "montant_ttc", "toutes_taxes": "montant_ttc", "montant_ttc": "montant_ttc",
+    "date": "date_piece",
     # Periode
     "periode_debut": "periode_debut", "date_debut": "periode_debut",
     "periode_fin": "periode_fin", "date_fin": "periode_fin",
     "mois": "mois", "periode": "mois",
+}
+
+# Mots-cles pour detection du type de document CSV
+_CSV_TYPE_KEYWORDS = {
+    "bulletin_de_paie": ["rubrique", "cotisation", "brut", "salarial", "patronal", "salaire", "net"],
+    "livre_de_paie": ["nir", "securite_sociale", "nom_salarie"],
+    "facture": ["ht", "tva", "ttc", "fournisseur", "client", "facture"],
+    "declaration_dsn": ["nir", "ctp", "code_type_personnel"],
+    "grand_livre": ["compte", "debit", "credit", "journal"],
 }
 
 
@@ -48,14 +78,22 @@ class CSVParser(BaseParser):
         metadata = {"format": "csv"}
         try:
             with open(chemin, "r", encoding="utf-8-sig") as f:
-                dialect = csv.Sniffer().sniff(f.read(4096))
-                f.seek(0)
-                reader = csv.reader(f, dialect)
-                header = next(reader, [])
-                nb_lignes = sum(1 for _ in reader)
-                metadata["separateur"] = dialect.delimiter
-                metadata["colonnes"] = header
-                metadata["nb_lignes"] = nb_lignes
+                contenu = f.read(8192)
+            try:
+                dialect = csv.Sniffer().sniff(contenu[:4096])
+            except csv.Error:
+                first_line = contenu.split("\n", 1)[0]
+                dialect = csv.excel
+                if ";" in first_line:
+                    dialect.delimiter = ";"
+                elif "\t" in first_line:
+                    dialect = csv.excel_tab
+            reader = csv.reader(io.StringIO(contenu), dialect)
+            header = next(reader, [])
+            nb_lignes = sum(1 for _ in reader)
+            metadata["separateur"] = dialect.delimiter
+            metadata["colonnes"] = header
+            metadata["nb_lignes"] = nb_lignes
         except Exception as e:
             metadata["erreur_lecture"] = str(e)
         return metadata
@@ -71,7 +109,15 @@ class CSVParser(BaseParser):
         try:
             dialect = csv.Sniffer().sniff(contenu[:4096])
         except csv.Error:
-            dialect = csv.excel
+            # Detecter manuellement le separateur
+            first_line = contenu.split("\n", 1)[0]
+            if ";" in first_line:
+                dialect = csv.excel
+                dialect.delimiter = ";"
+            elif "\t" in first_line:
+                dialect = csv.excel_tab
+            else:
+                dialect = csv.excel
 
         reader = csv.DictReader(io.StringIO(contenu), dialect=dialect)
 
@@ -102,6 +148,9 @@ class CSVParser(BaseParser):
             except Exception:
                 continue  # Ligne mal formee, on continue
 
+        # Detecter le type de document a partir des colonnes
+        type_document = self._detecter_type_document(reader.fieldnames, col_map)
+
         declaration = Declaration(
             type_declaration="CSV",
             reference=chemin.stem,
@@ -111,12 +160,40 @@ class CSVParser(BaseParser):
             source_document_id=document.id,
         )
 
+        # Ajouter metadata avec type_document
+        declaration.metadata = declaration.metadata or {}
+        declaration.metadata["type_document"] = type_document
+        declaration.metadata["colonnes_detectees"] = list(col_map.values())
+        declaration.metadata["nb_lignes_parsees"] = len(cotisations)
+
         if cotisations:
             declaration.masse_salariale_brute = sum(
                 c.base_brute for c in cotisations
             )
 
         return [declaration]
+
+    def _detecter_type_document(self, fieldnames: list, col_map: dict) -> str:
+        """Detecte le type de document CSV a partir des en-tetes."""
+        if not fieldnames:
+            return "inconnu"
+        headers_lower = {h.strip().lower().replace(" ", "_") for h in fieldnames}
+        mapped_fields = set(col_map.values())
+
+        # Score par type
+        best_type = "inconnu"
+        best_score = 0
+        for doc_type, keywords in _CSV_TYPE_KEYWORDS.items():
+            score = sum(1 for kw in keywords if any(kw in h for h in headers_lower))
+            if score > best_score:
+                best_score = score
+                best_type = doc_type
+
+        # Affiner: si plusieurs employes -> livre de paie
+        if best_type == "bulletin_de_paie" and "nir" in mapped_fields:
+            best_type = "livre_de_paie"
+
+        return best_type if best_score >= 2 else "document_comptable"
 
     def _parser_ligne(
         self, row: dict, col_map: dict, doc_id: str, ligne: int
@@ -128,7 +205,10 @@ class CSVParser(BaseParser):
             if val:
                 mapped[champ] = val
 
-        if not mapped.get("base_brute") and not mapped.get("montant_patronal"):
+        # Accepter les lignes avec base_brute, montant_patronal, ou montant_ht (factures)
+        has_cotisation = mapped.get("base_brute") or mapped.get("montant_patronal")
+        has_facture = mapped.get("montant_ht") or mapped.get("montant_ttc")
+        if not has_cotisation and not has_facture:
             return None
 
         cotisation = Cotisation(source_document_id=doc_id)
@@ -161,6 +241,14 @@ class CSVParser(BaseParser):
             cotisation.type_cotisation = self._mapper_type_cotisation(
                 mapped["type_cotisation"]
             )
+
+        # Pour les factures: utiliser montant_ht comme base
+        if has_facture and not has_cotisation:
+            if "montant_ht" in mapped:
+                cotisation.base_brute = parser_montant(mapped["montant_ht"])
+                cotisation.assiette = cotisation.base_brute
+            if "montant_tva" in mapped:
+                cotisation.montant_patronal = parser_montant(mapped["montant_tva"])
 
         if "periode_debut" in mapped and "periode_fin" in mapped:
             debut = parser_date(mapped["periode_debut"])
