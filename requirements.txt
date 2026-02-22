@@ -8,8 +8,25 @@ python-multipart>=0.0.6
 pydantic>=2.0
 python-dotenv>=1.0
 
+# Parsing (essential for document analysis)
+pdfplumber>=0.10.0
+openpyxl>=3.1.0
+lxml>=4.9.0
+
+# Security
+cryptography>=41.0.0
+
 # Reporting
 jinja2>=3.1.0
 
+# CLI
+click>=8.1.0
+
 # Utilities
 python-dateutil>=2.8.0
+
+# Database (Supabase)
+supabase>=2.0.0
+
+# OCR
+Pillow>=10.0.0

@@ -135,7 +135,7 @@ IDCC_DATABASE: dict[str, dict] = {
     # ---------------------------------------------------------------
     "1486": {
         "nom": "Bureaux d etudes techniques, cabinets d ingenieurs-conseils (SYNTEC)",
-        "secteur": "syntec",
+        "secteur": "informatique",
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.006"),
         "mutuelle_employeur_min_pct": 50,
