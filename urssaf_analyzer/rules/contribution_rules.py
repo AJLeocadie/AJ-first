@@ -183,6 +183,7 @@ class ContributionRules:
     def calculer_assiette(
         self, type_cotisation: ContributionType,
         brut_mensuel: Decimal,
+        prevoyance_patronale: Decimal = Decimal("0"),
     ) -> Decimal:
         """Calcule l'assiette de cotisation apres plafonnement.
 
@@ -191,13 +192,16 @@ class ContributionRules:
         - Plafonnee au PASS mensuel (Tranche 1)
         - Plafonnee a 4 PASS (chomage, AGS)
         - Tranche 2 : entre 1 et 8 PASS
-        - 98.25% du brut (CSG/CRDS)
+        - 98.25% du brut + prevoyance patronale (CSG/CRDS)
+
+        Pour CSG/CRDS, prevoyance_patronale correspond aux cotisations
+        patronales prevoyance/mutuelle ajoutees sans abattement (art. L136-1-1 CSS).
         """
         taux = TAUX_COTISATIONS_2026.get(type_cotisation, {})
 
-        # CSG/CRDS : assiette = 98.25% du brut
+        # CSG/CRDS : assiette = 98.25% du brut + prevoyance/mutuelle patronale (sans abattement)
         if "assiette_pct" in taux:
-            return (brut_mensuel * taux["assiette_pct"]).quantize(
+            return (brut_mensuel * taux["assiette_pct"] + prevoyance_patronale).quantize(
                 Decimal("0.01"), ROUND_HALF_UP
             )
 

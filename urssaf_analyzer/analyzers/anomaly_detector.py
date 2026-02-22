@@ -475,19 +475,35 @@ class AnomalyDetector(BaseAnalyzer):
                         reference_legale="CSS art. L242-5, D242-6-1 - Taux AT/MP",
                     ))
 
-        # --- CSG/CRDS assiette 98.25% du brut ---
+        # --- CSG/CRDS assiette : 98.25% du brut + prevoyance/mutuelle patronale ---
+        # Art. L136-1-1 CSS : l'assiette CSG/CRDS comprend :
+        # - 98.25% du salaire brut (abattement 1.75% pour frais professionnels)
+        # - 100% des cotisations patronales prevoyance/mutuelle (sans abattement)
         csg_crds_types = (
             ContributionType.CSG_DEDUCTIBLE,
             ContributionType.CSG_NON_DEDUCTIBLE,
             ContributionType.CRDS,
         )
+        prevoyance_types = (
+            ContributionType.PREVOYANCE_CADRE,
+            ContributionType.PREVOYANCE_NON_CADRE,
+            ContributionType.MUTUELLE_OBLIGATOIRE,
+        )
         for emp in decl.employes:
             emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
             brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
             if brut > 0:
-                assiette_attendue = (brut * Decimal("0.9825")).quantize(
-                    Decimal("0.01"), ROUND_HALF_UP
+                # Part prevoyance/mutuelle patronale a ajouter sans abattement
+                prev_patronale = sum(
+                    c.montant_patronal for c in emp_cots
+                    if c.type_cotisation in prevoyance_types and c.montant_patronal > 0
                 )
+                assiette_attendue = (
+                    brut * Decimal("0.9825") + prev_patronale
+                ).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                detail_calcul = f"98.25% de {brut:.2f}"
+                if prev_patronale > 0:
+                    detail_calcul += f" + {prev_patronale:.2f} (prevoyance/mutuelle pat.)"
                 csg_crds_cots = [c for c in emp_cots if c.type_cotisation in csg_crds_types]
                 for cc in csg_crds_cots:
                     if cc.assiette > 0:
@@ -501,22 +517,24 @@ class AnomalyDetector(BaseAnalyzer):
                                 description=(
                                     f"L'assiette de la {ct_label} pour {emp.prenom} {emp.nom} "
                                     f"est de {cc.assiette:.2f} EUR, alors que l'assiette attendue "
-                                    f"(98.25% du brut) est de {assiette_attendue:.2f} EUR.\\n\\n"
+                                    f"est de {assiette_attendue:.2f} EUR.\\n\\n"
+                                    f"Calcul : {detail_calcul}\\n"
                                     f"Ecart constate : {ecart_assiette:.2f} EUR (tolerance : 5 EUR).\\n\\n"
-                                    f"La CSG et la CRDS sont calculees sur 98.25% du salaire brut "
-                                    f"(abattement forfaitaire de 1.75% pour frais professionnels). "
-                                    f"Cette erreur d'assiette est frequente dans les logiciels de paie.\\n\\n"
+                                    f"L'assiette CSG/CRDS se compose de :\\n"
+                                    f"- 98.25% du salaire brut (abattement 1.75% pour frais professionnels)\\n"
+                                    f"- 100% des cotisations patronales prevoyance et mutuelle "
+                                    f"(ajoutees SANS abattement)\\n\\n"
                                     f"Que faire ?\\n"
                                     f"Verifier le parametrage de l'assiette CSG/CRDS dans le logiciel de paie."
                                 ),
                                 valeur_constatee=f"{cc.assiette:.2f} EUR",
-                                valeur_attendue=f"{assiette_attendue:.2f} EUR (98.25% de {brut:.2f})",
+                                valeur_attendue=f"{assiette_attendue:.2f} EUR ({detail_calcul})",
                                 montant_impact=ecart_assiette,
                                 score_risque=65,
-                                recommandation="Corriger l'assiette CSG/CRDS a 98.25% du brut.",
+                                recommandation="Corriger l'assiette CSG/CRDS : 98.25% brut + prevoyance/mutuelle patronale.",
                                 detecte_par=self.nom,
                                 documents_concernes=[decl.source_document_id or decl.id],
-                                reference_legale="CSS art. L136-2 - Assiette CSG/CRDS (abattement 1.75%)",
+                                reference_legale="CSS art. L136-1-1 - Assiette CSG/CRDS (abattement 1.75% + prevoyance)",
                             ))
 
         # --- Proratisation temps partiel du PASS ---

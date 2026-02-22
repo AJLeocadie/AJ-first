@@ -2599,7 +2599,10 @@ async def generer_documents_demo(
         brut_normal = 2850.00
         brut_anomalie = 1650.00 if avec_anomalies else brut_normal  # < SMIC
         pass_m = float(_PASS_MENSUEL)
-        assiette_csg = round(brut_normal * 0.9825, 2)
+        # Prevoyance patronale (1.50% cadre obligatoire) pour assiette CSG
+        prevoyance_pat = round(brut_normal * 0.015, 2)
+        # Assiette CSG = 98.25% brut + prevoyance patronale (sans abattement)
+        assiette_csg = round(brut_normal * 0.9825 + prevoyance_pat, 2)
         bull_csv = "Rubrique;Base;Taux salarial;Part salariale;Taux patronal;Part patronal\\n"
         bull_csv += f"Salaire de base;{brut_normal if not avec_anomalies else brut_anomalie};;;;;\\n"
         # Maladie: patronal 13% (ou 7% reduit), salarial 0% depuis 2018
@@ -2611,7 +2614,10 @@ async def generer_documents_demo(
         bull_csv += f"Vieillesse plafonnee;{min(brut_normal, pass_m)};0.069;{round(min(brut_normal, pass_m) * 0.069, 2)};0.0855;{round(min(brut_normal, pass_m) * 0.0855, 2)}\\n"
         # Vieillesse deplafonnee: pat 2.11%, sal 2.40% (2026)
         bull_csv += f"Vieillesse deplafonnee;{brut_normal};0.024;{round(brut_normal * 0.024, 2)};0.0211;{round(brut_normal * 0.0211, 2)}\\n"
-        # CSG deductible 6.80%, non deductible 2.40%, CRDS 0.50% - assiette 98.25% brut
+        # Prevoyance cadre obligatoire: pat 1.50%
+        bull_csv += f"Prevoyance cadre;{brut_normal};;;0.015;{prevoyance_pat}\\n"
+        # CSG deductible 6.80%, non deductible 2.40%, CRDS 0.50%
+        # Assiette = 98.25% brut + prevoyance patronale (art. L136-1-1 CSS)
         bull_csv += f"CSG deductible;{assiette_csg};0.0680;{round(assiette_csg * 0.068, 2)};;;\\n"
         bull_csv += f"CSG non deductible;{assiette_csg};0.0240;{round(assiette_csg * 0.024, 2)};;;\\n"
         bull_csv += f"CRDS;{assiette_csg};0.005;{round(assiette_csg * 0.005, 2)};;;\\n"

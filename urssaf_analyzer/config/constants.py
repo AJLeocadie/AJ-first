@@ -197,22 +197,22 @@ TAUX_COTISATIONS_2026 = {
     ContributionType.CSG_DEDUCTIBLE: {
         "taux": Decimal("0.068"),                 # 6.80%
         "assiette_pct": Decimal("0.9825"),        # 98.25% du brut (abattement 1.75%)
-        "assiette": "98.25% brut",
-        "ref": "CSS art. L136-2, CGI art. 154 quinquies II",
+        "assiette": "98.25% brut + prevoyance/mutuelle patronale (sans abattement)",
+        "ref": "CSS art. L136-1-1, L136-2, CGI art. 154 quinquies II",
     },
 
     ContributionType.CSG_NON_DEDUCTIBLE: {
         "taux": Decimal("0.024"),                 # 2.40%
         "assiette_pct": Decimal("0.9825"),
-        "assiette": "98.25% brut",
-        "ref": "CSS art. L136-8",
+        "assiette": "98.25% brut + prevoyance/mutuelle patronale (sans abattement)",
+        "ref": "CSS art. L136-1-1, L136-8",
     },
 
     ContributionType.CRDS: {
         "taux": Decimal("0.005"),                 # 0.50%
         "assiette_pct": Decimal("0.9825"),
-        "assiette": "98.25% brut",
-        "ref": "Ordonnance 96-50 art. 14",
+        "assiette": "98.25% brut + prevoyance/mutuelle patronale (sans abattement)",
+        "ref": "CSS art. L136-1-1, Ordonnance 96-50 art. 14",
     },
 
     # --- CONTRIBUTIONS URSSAF ---
