@@ -2598,19 +2598,31 @@ async def generer_documents_demo(
     if type_demo in ("complet", "bulletin_seul", "mixte"):
         brut_normal = 2850.00
         brut_anomalie = 1650.00 if avec_anomalies else brut_normal  # < SMIC
-        taux_urssaf = 0.0705 if not avec_anomalies else 0.0850  # taux salarial AM erronne
+        pass_m = float(_PASS_MENSUEL)
+        assiette_csg = round(brut_normal * 0.9825, 2)
         bull_csv = "Rubrique;Base;Taux salarial;Part salariale;Taux patronal;Part patronal\\n"
         bull_csv += f"Salaire de base;{brut_normal if not avec_anomalies else brut_anomalie};;;;;\\n"
-        bull_csv += f"Maladie;{brut_normal};{taux_urssaf};{round(brut_normal * taux_urssaf, 2)};0.13;{round(brut_normal * 0.13, 2)}\\n"
-        bull_csv += f"Vieillesse plafonnee;{min(brut_normal, float(_PASS_MENSUEL))};0.069;{round(min(brut_normal, float(_PASS_MENSUEL)) * 0.069, 2)};0.0855;{round(min(brut_normal, float(_PASS_MENSUEL)) * 0.0855, 2)}\\n"
-        bull_csv += f"Vieillesse deplafonnee;{brut_normal};0.004;{round(brut_normal * 0.004, 2)};0.021;{round(brut_normal * 0.021, 2)}\\n"
-        bull_csv += f"CSG deductible;{round(brut_normal * 0.9825, 2)};0.0680;{round(brut_normal * 0.9825 * 0.068, 2)};;;\\n"
-        bull_csv += f"CSG non deductible;{round(brut_normal * 0.9825, 2)};0.0240;{round(brut_normal * 0.9825 * 0.024, 2)};;;\\n"
-        bull_csv += f"CRDS;{round(brut_normal * 0.9825, 2)};0.005;{round(brut_normal * 0.9825 * 0.005, 2)};;;\\n"
+        # Maladie: patronal 13% (ou 7% reduit), salarial 0% depuis 2018
+        if avec_anomalies:
+            bull_csv += f"Maladie;{brut_normal};0.0850;{round(brut_normal * 0.085, 2)};0.13;{round(brut_normal * 0.13, 2)}\\n"  # salarial faux
+        else:
+            bull_csv += f"Maladie;{brut_normal};0;0;0.13;{round(brut_normal * 0.13, 2)}\\n"
+        # Vieillesse plafonnee: pat 8.55%, sal 6.90%
+        bull_csv += f"Vieillesse plafonnee;{min(brut_normal, pass_m)};0.069;{round(min(brut_normal, pass_m) * 0.069, 2)};0.0855;{round(min(brut_normal, pass_m) * 0.0855, 2)}\\n"
+        # Vieillesse deplafonnee: pat 2.11%, sal 2.40% (2026)
+        bull_csv += f"Vieillesse deplafonnee;{brut_normal};0.024;{round(brut_normal * 0.024, 2)};0.0211;{round(brut_normal * 0.0211, 2)}\\n"
+        # CSG deductible 6.80%, non deductible 2.40%, CRDS 0.50% - assiette 98.25% brut
+        bull_csv += f"CSG deductible;{assiette_csg};0.0680;{round(assiette_csg * 0.068, 2)};;;\\n"
+        bull_csv += f"CSG non deductible;{assiette_csg};0.0240;{round(assiette_csg * 0.024, 2)};;;\\n"
+        bull_csv += f"CRDS;{assiette_csg};0.005;{round(assiette_csg * 0.005, 2)};;;\\n"
+        # Chomage: pat 4.05%, sal 0%
+        bull_csv += f"Chomage;{brut_normal};0;0;0.0405;{round(brut_normal * 0.0405, 2)}\\n"
+        # AGS: pat 0.15%
+        bull_csv += f"AGS;{brut_normal};0;0;0.0015;{round(brut_normal * 0.0015, 2)}\\n"
         if avec_anomalies:
             bull_csv += f"FNAL;{brut_normal};0.0050;0;0.0050;{round(brut_normal * 0.005, 2)}\\n"  # FNAL 0.50% mais effectif < 50
         else:
-            bull_csv += f"FNAL;{min(brut_normal, float(_PASS_MENSUEL))};0;0;0.001;{round(min(brut_normal, float(_PASS_MENSUEL)) * 0.001, 2)}\\n"
+            bull_csv += f"FNAL;{min(brut_normal, pass_m)};0;0;0.001;{round(min(brut_normal, pass_m) * 0.001, 2)}\\n"
         documents.append({
             "nom": "bulletin_paie_demo_202601.csv",
             "type": "text/csv",
@@ -2618,7 +2630,7 @@ async def generer_documents_demo(
             "description": "Bulletin de paie janvier 2026" + (" - AVEC anomalies" if avec_anomalies else " - CONFORME"),
             "anomalies_attendues": [
                 "Salaire inferieur au SMIC" if avec_anomalies else None,
-                "Taux maladie salarial incorrect (8.50% au lieu de 7.05%)" if avec_anomalies else None,
+                "Taux maladie salarial incorrect (8.50% au lieu de 0%)" if avec_anomalies else None,
                 "FNAL 0.50% applique alors que effectif < 50" if avec_anomalies else None,
             ] if avec_anomalies else [],
         })

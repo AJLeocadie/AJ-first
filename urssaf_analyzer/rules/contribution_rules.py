@@ -402,7 +402,12 @@ class ContributionRules:
         self, type_cotisation: ContributionType, taux_constate: Decimal,
         salaire_brut: Decimal = Decimal("0"), est_patronal: bool = True,
     ) -> tuple[bool, Optional[Decimal]]:
-        """Verifie si un taux est conforme. Retourne (conforme, taux_attendu)."""
+        """Verifie si un taux est conforme. Retourne (conforme, taux_attendu).
+
+        Pour les cotisations a taux reduit conditionnel (maladie, AF),
+        accepte a la fois le taux standard (affiche sur bulletin de paie)
+        et le taux reduit (applique en DSN apres reduction generale).
+        """
         if est_patronal:
             taux_attendu = self.get_taux_attendu_patronal(type_cotisation, salaire_brut)
         else:
@@ -412,8 +417,25 @@ class ContributionRules:
             return True, None
 
         ecart = abs(taux_constate - taux_attendu)
-        conforme = ecart <= TOLERANCE_TAUX
-        return conforme, taux_attendu
+        if ecart <= TOLERANCE_TAUX:
+            return True, taux_attendu
+
+        # Pour maladie et AF patronal, accepter aussi le taux standard
+        # (les bulletins de paie affichent le taux plein, la reduction
+        # etant appliquee separement via la reduction generale / RGDU)
+        if est_patronal and type_cotisation in (
+            ContributionType.MALADIE,
+            ContributionType.ALLOCATIONS_FAMILIALES,
+        ):
+            taux_data = TAUX_COTISATIONS_2026.get(type_cotisation, {})
+            taux_standard = taux_data.get("patronal")
+            taux_reduit = taux_data.get("patronal_reduit")
+            if taux_standard is not None and abs(taux_constate - taux_standard) <= TOLERANCE_TAUX:
+                return True, taux_standard
+            if taux_reduit is not None and abs(taux_constate - taux_reduit) <= TOLERANCE_TAUX:
+                return True, taux_reduit
+
+        return False, taux_attendu
 
     def verifier_plafonnement(
         self, type_cotisation: ContributionType,
