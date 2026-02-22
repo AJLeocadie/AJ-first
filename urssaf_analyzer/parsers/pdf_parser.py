@@ -465,6 +465,167 @@ _KW_RELEVE_FRAIS_GENERAUX = [
     "cadeaux", "frais generaux", "frais généraux",
 ]
 
+_KW_AVIS_IMPOSITION = [
+    "avis d imposition", "avis d'imposition",
+    "impot sur le revenu", "impôt sur le revenu",
+    "taxe fonciere", "taxe foncière",
+    "taxe d habitation", "taxe d'habitation",
+    "revenu fiscal de reference", "revenu fiscal de référence",
+    "prelevement a la source", "prélèvement à la source",
+    "direction generale des finances publiques",
+    "direction générale des finances publiques",
+    "centre des finances publiques",
+    "impots.gouv", "impôts.gouv",
+]
+
+_KW_BORDEREAU_URSSAF = [
+    "bordereau urssaf", "appel de cotisations",
+    "avis de paiement urssaf", "cotisations dues",
+    "bordereau recapitulatif de cotisations",
+    "bordereau récapitulatif de cotisations",
+    "versement des cotisations",
+    "compte employeur", "compte cotisant",
+    "net-entreprises", "urssaf.fr",
+    "siret employeur", "code type personnel",
+    "ctp ", "declaration unifiee",
+    "déclaration unifiée", "ducs",
+]
+
+# --- SOCIAL / RH (compléments) ---
+
+_KW_RUPTURE_CONVENTIONNELLE = [
+    "rupture conventionnelle", "cerfa 14598",
+    "homologation", "convention de rupture",
+    "indemnite specifique", "indemnité spécifique",
+    "indemnite de rupture", "indemnité de rupture",
+    "delai de retractation", "délai de rétractation",
+    "direction regionale", "direccte", "dreets",
+    "formulaire de rupture conventionnelle",
+    "article l1237-11", "l.1237-11",
+    "commun accord", "consentement mutuel",
+]
+
+_KW_CSE = [
+    "comite social et economique", "comité social et économique",
+    "comite social", "comité social",
+    "cse ", "c.s.e.",
+    "comite d entreprise", "comité d'entreprise",
+    "delegation du personnel", "délégation du personnel",
+    "chsct", "cssct",
+    "reunion cse", "réunion cse",
+    "budget fonctionnement", "budget activites sociales",
+    "budget activités sociales",
+    "secretaire du cse", "secrétaire du cse",
+    "tresorier du cse", "trésorier du cse",
+    "ordre du jour cse", "proces verbal cse",
+    "procès verbal cse", "pv cse",
+    "activites sociales et culturelles",
+    "activités sociales et culturelles",
+    "expert cse", "droit d alerte",
+    "consultation cse", "information consultation",
+]
+
+_KW_FRANCE_TRAVAIL = [
+    "france travail", "pole emploi", "pôle emploi",
+    "allocation d aide au retour a l emploi",
+    "allocation d'aide au retour à l'emploi",
+    "are ", "a.r.e.",
+    "demandeur d emploi", "demandeur d'emploi",
+    "inscription comme demandeur",
+    "radiation", "cessation d inscription",
+    "attestation employeur destinee",
+    "attestation employeur destinée",
+    "convention de reclassement",
+    "contrat de securisation professionnelle",
+    "contrat de sécurisation professionnelle",
+    "csp ", "aide au reclassement",
+    "homologation licenciement",
+    "autorisation de licenciement",
+    "inspection du travail",
+]
+
+_KW_MEDECINE_TRAVAIL = [
+    "medecine du travail", "médecine du travail",
+    "avis d aptitude", "avis d'aptitude",
+    "avis d inaptitude", "avis d'inaptitude",
+    "visite medicale", "visite médicale",
+    "visite d information et de prevention",
+    "visite d'information et de prévention",
+    "visite de reprise", "visite de pre-reprise",
+    "visite de pré-reprise",
+    "medecin du travail", "médecin du travail",
+    "apte", "inapte", "aptitude",
+    "service de sante au travail",
+    "service de santé au travail",
+    "article r4624", "article l4624",
+    "suivi individuel", "surveillance medicale",
+    "surveillance médicale",
+]
+
+_KW_EPARGNE_SALARIALE = [
+    "plan d epargne entreprise", "plan d'épargne entreprise",
+    "pee ", "p.e.e.",
+    "plan d epargne retraite", "plan d'épargne retraite",
+    "perco", "percol", "per collectif",
+    "per obligatoire", "pero",
+    "abondement", "versement employeur",
+    "deblocage anticipe", "déblocage anticipé",
+    "cas de deblocage", "cas de déblocage",
+    "teneur de comptes", "gestionnaire d epargne",
+    "gestionnaire d'épargne",
+    "fcpe", "fonds commun de placement",
+    "article l3332", "l.3332",
+    "article l3334", "l.3334",
+    "interessement verse", "intéressement versé",
+    "supplement d interessement", "supplément d'intéressement",
+    "plafond d abondement", "plafond d'abondement",
+]
+
+_KW_LICENCIEMENT = [
+    "lettre de licenciement", "notification de licenciement",
+    "licenciement pour motif", "licenciement economique",
+    "licenciement économique",
+    "licenciement pour faute", "faute grave", "faute lourde",
+    "cause reelle et serieuse", "cause réelle et sérieuse",
+    "preavis", "préavis", "indemnite de licenciement",
+    "indemnité de licenciement",
+    "entretien prealable", "entretien préalable",
+    "article l1232", "l.1232",
+    "article l1233", "l.1233",
+    "plan de sauvegarde", "pse ",
+]
+
+_KW_FORMATION = [
+    "plan de formation", "plan de developpement",
+    "plan de développement",
+    "attestation de formation", "certificat de formation",
+    "compte personnel de formation", "cpf",
+    "organisme de formation", "action de formation",
+    "convention de formation",
+    "bilan de competences", "bilan de compétences",
+    "validation des acquis", "vae ",
+    "qualiopi", "datadock",
+    "programme de formation", "feuille de presence",
+    "feuille de présence",
+    "article l6311", "l.6311",
+]
+
+_KW_MUTUELLE_PREVOYANCE = [
+    "contrat de mutuelle", "contrat de prevoyance",
+    "contrat de prévoyance",
+    "complementaire sante", "complémentaire santé",
+    "garantie frais de sante", "garantie frais de santé",
+    "decision unilaterale", "décision unilatérale",
+    "due employeur", "accord collectif mutuelle",
+    "portabilite", "portabilité",
+    "article l911-1", "l.911-1",
+    "garantie deces", "garantie décès",
+    "garantie incapacite", "garantie incapacité",
+    "garantie invalidite", "garantie invalidité",
+    "indemnites journalieres", "indemnités journalières",
+    "organisme assureur",
+]
+
 _KW_LETTRE_MISSION = [
     "lettre de mission", "mission d audit",
     "mission d'audit", "mission de revision",
@@ -701,14 +862,18 @@ class PDFParser(BaseParser):
             return self._parser_contrat_service(texte_complet, document)
         # --- Fiscal ---
         elif doc_type in ("liasse_fiscale", "declaration_tva", "declaration_is", "das2",
-                          "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux"):
+                          "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux",
+                          "avis_imposition", "bordereau_urssaf"):
             return self._parser_fiscal(texte_complet, document, doc_type)
         # --- Comptable ---
         elif doc_type in ("bilan", "compte_resultat", "rapport_cac", "rapport_gestion", "budget"):
             return self._parser_comptable(texte_complet, document, doc_type)
         # --- Social / RH ---
         elif doc_type in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
-                          "avenant", "bilan_social"):
+                          "avenant", "bilan_social", "rupture_conventionnelle",
+                          "cse", "france_travail", "medecine_travail",
+                          "epargne_salariale", "licenciement", "formation",
+                          "mutuelle_prevoyance"):
             return self._parser_social_rh(texte_complet, document, doc_type)
         # --- Juridique ---
         elif doc_type in ("statuts", "kbis", "bail", "assurance", "lettre_mission"):
@@ -745,6 +910,8 @@ class PDFParser(BaseParser):
             "cfe_cvae": _KW_CFE_CVAE,
             "fec": _KW_FEC,
             "releve_frais_generaux": _KW_RELEVE_FRAIS_GENERAUX,
+            "avis_imposition": _KW_AVIS_IMPOSITION,
+            "bordereau_urssaf": _KW_BORDEREAU_URSSAF,
             # Comptable
             "bilan": _KW_BILAN,
             "compte_resultat": _KW_COMPTE_RESULTAT,
@@ -759,6 +926,14 @@ class PDFParser(BaseParser):
             "avenant": _KW_AVENANT,
             "bilan_social": _KW_BILAN_SOCIAL,
             "note_frais": _KW_NOTE_FRAIS,
+            "rupture_conventionnelle": _KW_RUPTURE_CONVENTIONNELLE,
+            "cse": _KW_CSE,
+            "france_travail": _KW_FRANCE_TRAVAIL,
+            "medecine_travail": _KW_MEDECINE_TRAVAIL,
+            "epargne_salariale": _KW_EPARGNE_SALARIALE,
+            "licenciement": _KW_LICENCIEMENT,
+            "formation": _KW_FORMATION,
+            "mutuelle_prevoyance": _KW_MUTUELLE_PREVOYANCE,
             # Juridique
             "statuts": _KW_STATUTS,
             "kbis": _KW_KBIS,
@@ -795,6 +970,8 @@ class PDFParser(BaseParser):
             "cfe_cvae": ["cfe", "cvae", "cet_"],
             "fec": ["fec_", "ecritures_comptables"],
             "releve_frais_generaux": ["frais_generaux", "2067"],
+            "avis_imposition": ["avis_imposition", "impot_revenu", "taxe_fonciere"],
+            "bordereau_urssaf": ["bordereau_urssaf", "appel_cotisation", "urssaf_"],
             # Comptable
             "bilan": ["bilan", "comptes_annuels"],
             "compte_resultat": ["compte_resultat", "resultat"],
@@ -809,6 +986,14 @@ class PDFParser(BaseParser):
             "avenant": ["avenant"],
             "bilan_social": ["bilan_social"],
             "note_frais": ["note_frais", "frais_deplacement", "ndf"],
+            "rupture_conventionnelle": ["rupture_conv", "rc_", "homologation"],
+            "cse": ["cse_", "pv_cse", "comite_social", "reunion_cse"],
+            "france_travail": ["france_travail", "pole_emploi", "are_", "attestation_ft"],
+            "medecine_travail": ["medecine_travail", "avis_aptitude", "visite_med"],
+            "epargne_salariale": ["pee_", "perco_", "per_", "epargne_", "abondement"],
+            "licenciement": ["licenciement", "lettre_licenciement", "pse_"],
+            "formation": ["formation_", "cpf_", "plan_formation", "attestation_form"],
+            "mutuelle_prevoyance": ["mutuelle_", "prevoyance_", "complementaire_sante"],
             # Juridique
             "statuts": ["statuts", "statut_"],
             "kbis": ["kbis", "k_bis", "extrait_rcs"],
@@ -1503,6 +1688,30 @@ class PDFParser(BaseParser):
             if m:
                 metadata[key] = float(_parse_montant_local(m.group(1)))
 
+        # Avis d'imposition specific
+        if doc_type == "avis_imposition":
+            m = re.search(r"(?:revenu\s*fiscal\s*de\s*reference|revenu\s*fiscal\s*de\s*référence)\s*[:\s]*([\d\s]+(?:[.,]\d+)?)", texte, re.IGNORECASE)
+            if m:
+                metadata["revenu_fiscal_reference"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:montant\s*de\s*l\s*impot|montant\s*de\s*l\s*impôt|montant\s*net\s*a\s*payer)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["montant_impot"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:annee|année|revenus\s*de\s*l\s*annee|revenus\s*de\s*l\s*année)\s*[:\s]*(\d{4})", texte, re.IGNORECASE)
+            if m:
+                metadata["annee_revenus"] = m.group(1)
+
+        # Bordereau URSSAF specific
+        if doc_type == "bordereau_urssaf":
+            m = re.search(r"(?:total\s*des\s*cotisations|cotisations\s*dues|montant\s*a\s*payer|montant\s*à\s*payer)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["total_cotisations"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:periode|période)\s*(?:d\s*emploi)?\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})\s*(?:au|a|à)\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["periode_debut"] = m.group(1)
+                metadata["periode_fin"] = m.group(2)
+            ctps = re.findall(r"(?:ctp|code\s*type)\s*(\d{3,4})", texte, re.IGNORECASE)
+            metadata["codes_ctp"] = list(set(ctps))[:20]
+
         # DAS2 specific: count beneficiaires
         if doc_type == "das2":
             beneficiaires = re.findall(r"(?:beneficiaire|bénéficiaire)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
@@ -1643,8 +1852,187 @@ class PDFParser(BaseParser):
                     except ValueError:
                         pass
 
+        elif doc_type == "rupture_conventionnelle":
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+            m = re.search(r"(?:indemnite|indemnité)\s*(?:specifique|spécifique|de\s*rupture)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["indemnite_rupture"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:date\s*(?:de\s*)?(?:rupture|fin\s*(?:du\s*)?contrat))\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_rupture"] = m.group(1)
+            m = re.search(r"(?:anciennete|ancienneté)\s*[:\s]*([^\n,;]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["anciennete"] = m.group(1).strip()[:60]
+            metadata["homologuee"] = "homologation" in texte.lower() or "homologuee" in texte.lower() or "homologuée" in texte.lower()
+
+        elif doc_type == "cse":
+            texte_lower = texte.lower()
+            cse_type = "pv_cse"
+            if "budget" in texte_lower:
+                cse_type = "budget_cse"
+            elif "rapport" in texte_lower and "activit" in texte_lower:
+                cse_type = "rapport_cse"
+            elif "election" in texte_lower or "élection" in texte_lower:
+                cse_type = "elections_cse"
+            metadata["sous_type"] = cse_type
+            m = re.search(r"(?:reunion|réunion)\s*(?:du|en\s*date\s*du)\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_reunion"] = m.group(1)
+            # Participants count
+            participants = re.findall(r"(?:present|présent|membre)\s*[:\s]*([A-Z\u00C0-\u00FF][A-Za-z\u00C0-\u00FF\s-]+)", texte)
+            metadata["nb_participants"] = len(set(p.strip()[:50] for p in participants))
+            # Deliberations
+            deliberations = re.findall(r"(?:deliberation|délibération|resolution|résolution|point\s*\d+)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            metadata["nb_deliberations"] = len(deliberations)
+            # Budgets
+            for label, key in [
+                (r"budget\s*(?:de\s*)?fonctionnement", "budget_fonctionnement"),
+                (r"(?:budget\s*)?activites?\s*sociales|(?:budget\s*)?asc", "budget_asc"),
+            ]:
+                m = re.search(label + r"\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+                if m:
+                    metadata[key] = float(_parse_montant_local(m.group(1)))
+
+        elif doc_type == "france_travail":
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+            texte_lower = texte.lower()
+            ft_type = "decision_france_travail"
+            if "are" in texte_lower or "allocation" in texte_lower:
+                ft_type = "attestation_are"
+            elif "radiation" in texte_lower:
+                ft_type = "radiation"
+            elif "inscription" in texte_lower:
+                ft_type = "inscription"
+            elif "autorisation" in texte_lower and "licenciement" in texte_lower:
+                ft_type = "autorisation_licenciement"
+            elif "contrat de securisation" in texte_lower or "csp" in texte_lower:
+                ft_type = "csp"
+            metadata["sous_type"] = ft_type
+            m = re.search(r"(?:montant\s*(?:journalier|mensuel|de\s*l\s*allocation))\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["montant_allocation"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:date\s*(?:d\s*)?effet|a\s*compter\s*du)\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_effet"] = m.group(1)
+
+        elif doc_type == "medecine_travail":
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+            texte_lower = texte.lower()
+            if "inapt" in texte_lower:
+                metadata["resultat"] = "inapte"
+            elif "apte" in texte_lower:
+                if "restriction" in texte_lower or "amenagement" in texte_lower or "aménagement" in texte_lower:
+                    metadata["resultat"] = "apte_avec_restrictions"
+                else:
+                    metadata["resultat"] = "apte"
+            visite_type = "visite_medicale"
+            if "reprise" in texte_lower:
+                visite_type = "visite_reprise"
+            elif "pre-reprise" in texte_lower or "pré-reprise" in texte_lower:
+                visite_type = "visite_pre_reprise"
+            elif "embauche" in texte_lower:
+                visite_type = "visite_embauche"
+            elif "information et de prevention" in texte_lower or "information et de prévention" in texte_lower:
+                visite_type = "vip"
+            metadata["type_visite"] = visite_type
+            m = re.search(r"(?:date\s*(?:de\s*la\s*)?visite|examine le|examiné le)\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_visite"] = m.group(1)
+            m = re.search(r"(?:medecin|médecin|docteur|dr\.?)\s*[:\s]*([A-Z\u00C0-\u00FF][A-Za-z\u00C0-\u00FF\s-]+)", texte)
+            if m:
+                metadata["medecin"] = m.group(1).strip()[:60]
+
+        elif doc_type == "epargne_salariale":
+            texte_lower = texte.lower()
+            plan_type = "epargne_salariale"
+            if "pee" in texte_lower or "plan d epargne entreprise" in texte_lower or "plan d'épargne entreprise" in texte_lower:
+                plan_type = "pee"
+            elif "perco" in texte_lower or "percol" in texte_lower:
+                plan_type = "perco"
+            elif "per collectif" in texte_lower or "per obligatoire" in texte_lower:
+                plan_type = "per"
+            metadata["type_plan"] = plan_type
+            m = re.search(r"(?:abondement)\s*(?:maximum|max|plafond)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["abondement_max"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:gestionnaire|teneur\s*de\s*comptes?)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["gestionnaire"] = m.group(1).strip()[:80]
+
+        elif doc_type == "licenciement":
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+            texte_lower = texte.lower()
+            motif = "personnel"
+            if "economique" in texte_lower or "économique" in texte_lower:
+                motif = "economique"
+            elif "faute lourde" in texte_lower:
+                motif = "faute_lourde"
+            elif "faute grave" in texte_lower:
+                motif = "faute_grave"
+            elif "insuffisance" in texte_lower:
+                motif = "insuffisance"
+            metadata["motif"] = motif
+            m = re.search(r"(?:indemnite|indemnité)\s*(?:de\s*)?(?:licenciement|rupture)\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["indemnite_licenciement"] = float(_parse_montant_local(m.group(1)))
+            m = re.search(r"(?:preavis|préavis)\s*[:\s]*([^\n,;.]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["preavis"] = m.group(1).strip()[:60]
+            m = re.search(r"(?:date\s*(?:de\s*)?(?:notification|fin\s*(?:du\s*)?contrat))\s*[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["date_notification"] = m.group(1)
+
+        elif doc_type == "formation":
+            texte_lower = texte.lower()
+            form_type = "formation"
+            if "attestation" in texte_lower:
+                form_type = "attestation_formation"
+            elif "bilan de competences" in texte_lower or "bilan de compétences" in texte_lower:
+                form_type = "bilan_competences"
+            elif "vae" in texte_lower or "validation des acquis" in texte_lower:
+                form_type = "vae"
+            elif "plan de formation" in texte_lower or "plan de developpement" in texte_lower:
+                form_type = "plan_formation"
+            metadata["sous_type"] = form_type
+            m = re.search(r"(?:duree|durée)\s*(?:de\s*la\s*formation)?\s*[:\s]*([^\n,;.]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["duree"] = m.group(1).strip()[:60]
+            m = re.search(r"(?:organisme)\s*(?:de\s*formation)?\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["organisme"] = m.group(1).strip()[:80]
+            emp = self._extraire_employe(texte, doc_id)
+            if emp.nom or emp.nir:
+                employes.append(emp)
+
+        elif doc_type == "mutuelle_prevoyance":
+            texte_lower = texte.lower()
+            mp_type = "mutuelle"
+            if "prevoyance" in texte_lower or "prévoyance" in texte_lower:
+                mp_type = "prevoyance"
+            elif "decision unilaterale" in texte_lower or "décision unilatérale" in texte_lower:
+                mp_type = "due_mutuelle"
+            metadata["sous_type"] = mp_type
+            m = re.search(r"(?:organisme|assureur|compagnie)\s*[:\s]*([^\n]+)", texte, re.IGNORECASE)
+            if m:
+                metadata["organisme"] = m.group(1).strip()[:80]
+            m = re.search(r"(?:cotisation|prime)\s*(?:mensuelle|annuelle)?\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
+            if m:
+                metadata["cotisation"] = float(_parse_montant_local(m.group(1)))
+            # Taux de prise en charge employeur
+            m = re.search(r"(?:employeur|patronal)\s*[:\s]*(\d+)\s*%", texte, re.IGNORECASE)
+            if m:
+                metadata["part_employeur_pct"] = int(m.group(1))
+
         brut = Decimal("0")
-        if doc_type in ("dpae", "avenant"):
+        if doc_type in ("dpae", "avenant", "rupture_conventionnelle", "licenciement"):
             m = _RE_BRUT.search(texte)
             if m:
                 brut = _parse_montant_local(m.group(1))

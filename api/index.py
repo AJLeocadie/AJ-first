@@ -1,4 +1,4 @@
-"""NormaCheck v3.5 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.6 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
@@ -40,7 +40,7 @@ from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.5.0",
+    version="3.6.0",
 )
 
 app.add_middleware(
@@ -298,9 +298,11 @@ def _alimenter_knowledge(result):
             kb["pieces_justificatives"]["contrats_service"].append(decl.reference)
         # --- Fiscal documents ---
         elif fmt in ("liasse_fiscale", "declaration_tva", "declaration_is", "das2",
-                      "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux") or \
+                      "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux",
+                      "avis_imposition", "bordereau_urssaf") or \
              doc_type in ("liasse_fiscale", "declaration_tva", "declaration_is", "das2",
-                          "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux"):
+                          "taxe_salaires", "cfe_cvae", "fec", "releve_frais_generaux",
+                          "avis_imposition", "bordereau_urssaf"):
             cat = "fiscal"
             if cat not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"][cat] = []
@@ -331,9 +333,21 @@ def _alimenter_knowledge(result):
             kb["contexte_entreprise"] = ctx
         # --- Social/RH documents ---
         elif fmt in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
-                      "avenant", "bilan_social", "note_frais") or \
+                      "avenant", "bilan_social", "note_frais",
+                      "rupture_conventionnelle", "cse", "france_travail",
+                      "medecine_travail", "epargne_salariale", "licenciement",
+                      "formation", "mutuelle_prevoyance") or \
              doc_type in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
-                          "avenant", "bilan_social", "note_frais"):
+                          "avenant", "bilan_social", "note_frais",
+                          "rupture_conventionnelle", "cse", "france_travail",
+                          "medecine_travail", "epargne_salariale", "licenciement",
+                          "formation", "mutuelle_prevoyance",
+                          "pv_cse", "budget_cse", "rapport_cse", "elections_cse",
+                          "attestation_are", "radiation", "autorisation_licenciement",
+                          "visite_embauche", "visite_reprise", "vip",
+                          "pee", "perco", "per", "due_mutuelle",
+                          "attestation_formation", "plan_formation",
+                          "bilan_competences", "vae"):
             cat = "social_rh"
             if cat not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"][cat] = []
@@ -623,6 +637,7 @@ async def analyser_documents(
                     "sha256": sha,
                     "date_import": datetime.now().isoformat(),
                     "statut": doc_statut,
+                    "nature": doc_data.get("type_document", "inconnu"),
                     "donnees_extraites": doc_data,
                     "actions": [{"action": "import+analyse", "par": "utilisateur", "date": datetime.now().isoformat()}],
                     "erreurs_corrigees": [],
@@ -753,6 +768,35 @@ async def analyser_documents(
                 "avenant": "Avenant contrat de travail",
                 "bilan_social": "Bilan social",
                 "note_frais": "Note de frais",
+                "rupture_conventionnelle": "Rupture conventionnelle homologuee",
+                "cse": "Document CSE", "pv_cse": "PV reunion CSE",
+                "budget_cse": "Budget CSE", "rapport_cse": "Rapport CSE",
+                "elections_cse": "Elections CSE",
+                "france_travail": "Decision France Travail",
+                "attestation_are": "Attestation ARE (France Travail)",
+                "radiation": "Radiation France Travail",
+                "autorisation_licenciement": "Autorisation licenciement (DREETS)",
+                "csp": "Contrat securisation professionnelle",
+                "medecine_travail": "Avis medecine du travail",
+                "visite_embauche": "Visite medicale d embauche",
+                "visite_reprise": "Visite de reprise",
+                "vip": "Visite information prevention (VIP)",
+                "epargne_salariale": "Contrat epargne salariale",
+                "pee": "PEE (Plan epargne entreprise)",
+                "perco": "PERCO / PERCOL",
+                "per": "PER collectif",
+                "licenciement": "Lettre de licenciement",
+                "formation": "Formation professionnelle",
+                "attestation_formation": "Attestation de formation",
+                "bilan_competences": "Bilan de competences",
+                "vae": "VAE",
+                "plan_formation": "Plan de developpement des competences",
+                "mutuelle_prevoyance": "Contrat mutuelle / prevoyance",
+                "mutuelle": "Contrat mutuelle obligatoire",
+                "prevoyance": "Contrat prevoyance",
+                "due_mutuelle": "DUE mutuelle obligatoire",
+                "avis_imposition": "Avis d imposition",
+                "bordereau_urssaf": "Bordereau URSSAF / Appel cotisations",
                 # Juridique
                 "statuts": "Statuts de la societe",
                 "kbis": "Extrait Kbis / RCS",
@@ -1236,6 +1280,31 @@ async def analyser_documents(
                     "dpae": "DPAE", "registre_personnel": "Registre du personnel",
                     "duerp": "DUERP", "reglement_interieur": "Reglement interieur",
                     "avenant": "Avenant", "bilan_social": "Bilan social", "note_frais": "Note de frais",
+                    "rupture_conventionnelle": "Rupture conventionnelle",
+                    "cse": "Document CSE", "pv_cse": "PV reunion CSE",
+                    "budget_cse": "Budget CSE", "rapport_cse": "Rapport CSE",
+                    "elections_cse": "Elections CSE",
+                    "france_travail": "Decision France Travail",
+                    "attestation_are": "Attestation ARE", "radiation": "Radiation France Travail",
+                    "inscription": "Inscription France Travail",
+                    "autorisation_licenciement": "Autorisation licenciement",
+                    "csp": "CSP (Contrat securisation pro)",
+                    "medecine_travail": "Medecine du travail",
+                    "visite_embauche": "Visite embauche", "visite_reprise": "Visite reprise",
+                    "vip": "VIP (Visite info prevention)",
+                    "epargne_salariale": "Epargne salariale",
+                    "pee": "PEE", "perco": "PERCO/PERCOL", "per": "PER collectif",
+                    "licenciement": "Lettre de licenciement",
+                    "formation": "Formation professionnelle",
+                    "attestation_formation": "Attestation de formation",
+                    "bilan_competences": "Bilan de competences",
+                    "vae": "VAE (Validation acquis)",
+                    "plan_formation": "Plan de formation",
+                    "mutuelle_prevoyance": "Mutuelle / Prevoyance",
+                    "mutuelle": "Contrat mutuelle", "prevoyance": "Contrat prevoyance",
+                    "due_mutuelle": "DUE mutuelle obligatoire",
+                    "avis_imposition": "Avis d imposition",
+                    "bordereau_urssaf": "Bordereau URSSAF",
                     # Juridique
                     "statuts": "Statuts", "kbis": "Kbis", "bail": "Bail",
                     "assurance": "Assurance", "lettre_mission": "Lettre mission",
@@ -2891,6 +2960,12 @@ async def knowledge_base():
     }
 
 
+@app.get("/api/version")
+async def get_version():
+    """Retourne la version deployee pour diagnostic."""
+    return {"version": "3.6.0", "build": "20260222", "audit_checks": 63}
+
+
 @app.get("/api/bibliotheque/knowledge/audit")
 async def knowledge_audit():
     """Genere un rapport d'audit complet base sur la base de connaissances."""
@@ -3464,6 +3539,70 @@ async def knowledge_audit():
         "DSN mensuelles sur plusieurs annees",
         incidence="Variation brusque d effectif peut indiquer embauche/licenciement non declares" if variation_anormale else "",
         alerte=variation_anormale,
+    ))
+
+    # 34. Mutuelle / prevoyance obligatoire (L.911-1 CSS)
+    has_mutuelle = any(d.get("nature") in ("mutuelle_prevoyance", "mutuelle", "prevoyance", "due_mutuelle") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Complementaire sante obligatoire (mutuelle)",
+        "Art. L.911-7 CSS - ANI 2013",
+        has_mutuelle or ks["nb_contrats_rh"] == 0,
+        "Contrat mutuelle / prevoyance importe" if has_mutuelle else ("Non applicable (aucun salarie)" if ks["nb_contrats_rh"] == 0 else "Aucun justificatif mutuelle obligatoire importe"),
+        "Contrat collectif mutuelle, DUE ou accord collectif mutuelle",
+        incidence="Mise en demeure URSSAF + perte d exonerations sociales sur la mutuelle" if not has_mutuelle and ks["nb_contrats_rh"] > 0 else "",
+    ))
+
+    # 35. Visite medicale / suivi sante (R.4624-10 CT)
+    has_visite = any(d.get("nature") in ("medecine_travail", "visite_embauche", "visite_reprise", "vip") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Suivi medical des salaries (VIP/Visite medicale)",
+        "Art. R.4624-10 a R.4624-28 CT",
+        has_visite or ks["nb_contrats_rh"] == 0,
+        "Avis de medecine du travail importe(s)" if has_visite else ("Non applicable" if ks["nb_contrats_rh"] == 0 else "Aucun avis de medecine du travail importe"),
+        "Avis d aptitude, fiches de visite, attestation SPST",
+        incidence="Manquement a l obligation de securite (L.4121-1 CT)" if not has_visite and ks["nb_contrats_rh"] > 0 else "",
+    ))
+
+    # 36. Formation professionnelle (L.6311-1 CT)
+    has_formation = any(d.get("nature") in ("formation", "attestation_formation", "plan_formation", "bilan_competences", "vae") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Formation professionnelle / Plan de developpement",
+        "Art. L.6311-1 CT - Art. L.6321-1 CT",
+        has_formation,
+        "Documents formation importes" if has_formation else "Aucun document de formation importe",
+        "Plan de developpement des competences, attestations, bilan competences",
+    ))
+
+    # 37. Epargne salariale (L.3332-1 CT)
+    has_epargne = any(d.get("nature") in ("epargne_salariale", "pee", "perco", "per", "interessement", "accord_interessement", "accord_participation") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Epargne salariale (PEE / PERCO / interessement)",
+        "Art. L.3332-1 CT - Art. L.3312-1 CT",
+        has_epargne,
+        "Contrat(s) epargne salariale importe(s)" if has_epargne else "Aucun contrat epargne salariale importe - verifier l obligation le cas echeant",
+        "Accord PEE/PERCO, accord interessement/participation, reglement du plan",
+    ))
+
+    # 38. CSE / IRP (L.2311-1 CT)
+    has_cse = any(d.get("nature") in ("cse", "pv_cse", "budget_cse", "rapport_cse", "elections_cse") for d in _doc_library)
+    nb_actifs_cse = max(ks["nb_salaries_connus"], ks["nb_contrats_actifs"])
+    social_checks.append(_audit_check(
+        "CSE - Comite social et economique (obligatoire >= 11 salaries)",
+        "Art. L.2311-1 a L.2311-2 CT",
+        has_cse or nb_actifs_cse < 11,
+        "Document(s) CSE importe(s)" if has_cse else ("Non applicable (effectif < 11)" if nb_actifs_cse < 11 else "Aucun document CSE importe - obligatoire >= 11 salaries"),
+        "PV elections CSE, PV reunions, budget, rapport activites",
+        incidence="Delit d entrave (L.2317-1 CT): 1 an emprisonnement + 3750 EUR amende" if not has_cse and nb_actifs_cse >= 11 else "",
+    ))
+
+    # 39. Bordereau URSSAF / suivi cotisations
+    has_bordereau = any(d.get("nature") in ("bordereau_urssaf",) for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Bordereaux URSSAF / Justificatifs paiement cotisations",
+        "Art. L.243-3 CSS",
+        has_bordereau,
+        "Bordereau(x) URSSAF importe(s)" if has_bordereau else "Aucun bordereau URSSAF importe",
+        "Bordereaux recapitulatifs, avis d appel, justificatifs de paiement URSSAF",
     ))
 
     # --- AUDIT FISCAL (CGI) ---
@@ -4120,7 +4259,7 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 <div class="sig-block"><p><strong>L employeur</strong></p><p style="font-size:.85em;color:#64748b">Nom, qualite, signature</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 <div class="sig-block"><p><strong>Le(la) salarie(e)</strong></p><p style="font-size:.85em;color:#64748b">{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 </div>
-<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.5 - Ce document doit etre signe en deux exemplaires originaux</p>
+<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.6 - Ce document doit etre signe en deux exemplaires originaux</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -4368,7 +4507,7 @@ td{{padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:.88em}}.num{{text
 <tr class="total" style="background:#f0fdf4"><td>NET A PAYER AVANT IMPOT</td><td></td><td class="num" style="font-size:1.1em">{bulletin["net_a_payer"]:.2f} EUR</td></tr>
 <tr class="total" style="background:#eff6ff"><td>COUT TOTAL EMPLOYEUR</td><td class="num">{bulletin["cout_total_employeur"]:.2f} EUR</td><td></td></tr>
 </table>
-<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.5.</p>
+<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.6.</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -5945,7 +6084,7 @@ async def generer_dsn(
     add("S10.G00.00.001", siren_emetteur)
     add("S10.G00.00.002", nic_emetteur)
     add("S10.G00.00.003", nom_logiciel)
-    add("S10.G00.00.004", "NormaCheck v3.5")
+    add("S10.G00.00.004", "NormaCheck v3.6")
     add("S10.G00.00.005", "01")  # Nature de la declaration: DSN mensuelle
     add("S10.G00.00.006", "11")  # Type: normale
     add("S10.G00.00.007", "01")  # Numero de fraction
@@ -6284,7 +6423,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.5.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+NormaCheck v3.6.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 <span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
 </footer>
 <script>
@@ -6367,7 +6506,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 9 - Droit applicable</h2>
 <p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
 </div>
-<footer>NormaCheck v3.5.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6424,7 +6563,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 8 - Droit applicable</h2>
 <p>Les presentes CGV sont soumises au droit francais. Tout litige releve de la competence des tribunaux francais.</p>
 </div>
-<footer>NormaCheck v3.5.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6495,7 +6634,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Droit applicable</h2>
 <p>Le present site et ses mentions legales sont regis par le droit francais.</p>
 </div>
-<footer>NormaCheck v3.5.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6660,7 +6799,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
 <div class="sidebar" id="sidebar">
-<div class="logo"><em>NormaCheck</em> <span>v3.5</span></div>
+<div class="logo"><em>NormaCheck</em> <span>v3.6</span></div>
 <div class="nav-group">Analyse</div>
 <div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
 <div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
@@ -6680,7 +6819,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="logout" onclick="window.location.href='/'"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.5.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.6.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
 """
@@ -8099,7 +8238,7 @@ html+="<h2>Recommandations</h2>";var recos=analysisData.recommandations||[];for(
 html+="<div style='margin-top:40px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;font-size:.85em'><h3>Methodologie du score NormaCheck</h3><p>"+scoreData.explanation+"</p><table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:#1e40af;color:#fff'><th style='padding:6px 10px;text-align:left'>Deduction</th><th style='padding:6px 10px;text-align:left'>Raison</th></tr>";
 for(var i=0;i<scoreData.details.length;i++){var d=scoreData.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td></tr>";}
 html+="</table></div>";
-html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.5 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
+html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.6 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 
 /* === RH MODULE === */
