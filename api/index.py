@@ -1,17 +1,21 @@
-"""NormaCheck v3.8 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.8.1 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
+
+Deploiement : OVHcloud VPS (Docker) ou Vercel (serverless).
 """
 
 import io
 import json
+import os
 import tempfile
 import time
 import shutil
 import hashlib
 import uuid
 import traceback
+import logging
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -37,10 +41,36 @@ from urssaf_analyzer.comptabilite.plan_comptable import PlanComptable
 from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, TypeJournal
 from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
 
+# --- Detection environnement ---
+_IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
+_DATA_DIR = Path(os.getenv("NORMACHECK_DATA_DIR", "/data/normacheck")) if _IS_OVH else Path("/tmp/normacheck_data")
+_MAX_FILES = int(os.getenv("NORMACHECK_MAX_FILES", "50" if _IS_OVH else "20"))
+_MAX_UPLOAD_MB = int(os.getenv("NORMACHECK_MAX_UPLOAD_MB", "2000" if _IS_OVH else "500"))
+
+# --- Persistence (OVHcloud: fichiers JSON / Vercel: in-memory) ---
+_persist = None
+if _IS_OVH:
+    try:
+        from persistence import (
+            knowledge_store, doc_library_store, audit_log_store,
+            rh_contrats_store, rh_avenants_store, rh_conges_store,
+            rh_arrets_store, rh_sanctions_store, rh_attestations_store,
+            rh_entretiens_store, rh_visites_med_store, rh_echanges_store,
+            rh_planning_store, dsn_drafts_store, invitations_store,
+            facture_statuses_store, entete_config_store,
+            save_uploaded_file, save_report, get_data_stats,
+            log_action as persistent_log_action,
+        )
+        _persist = True
+    except ImportError:
+        _persist = False
+
+logger = logging.getLogger("normacheck")
+
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.8.0",
+    version="3.8.1",
 )
 
 app.add_middleware(
@@ -50,29 +80,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# --- Middleware auto-persistance (OVHcloud) ---
+@app.middleware("http")
+async def auto_persist_middleware(request: Request, call_next):
+    """Sauvegarde automatique apres toute requete POST/PUT/DELETE."""
+    response = await call_next(request)
+    if _persist and request.method in ("POST", "PUT", "DELETE") and response.status_code < 400:
+        try:
+            _save_state()
+        except Exception as e:
+            logger.warning(f"Auto-persist failed: {e}")
+    return response
+
+
 # --- Singletons ---
 _db: Optional[Database] = None
 _moteur: Optional[MoteurEcritures] = None
 
-# --- In-memory stores ---
-_doc_library: list[dict] = []
-_biblio_knowledge: dict = {
-    "salaries": {},        # nir -> {nom, prenom, brut, net, statut, contrat_type, ...}
-    "employeurs": {},      # siret -> {raison_sociale, effectif, code_naf, ...}
-    "cotisations": [],     # [{code, libelle, base, taux_salarial, taux_patronal, employe_nir, ...}]
-    "declarations_dsn": [],# DSN importees
-    "bulletins_paie": [],  # bulletins detectes
-    "documents_comptables": [],  # ecritures/factures detectees
-    "taux_verifies": {},   # {code_cotisation: {taux_attendu, taux_constate, conforme}}
-    "periodes_couvertes": [],  # ["2025-01", "2025-02", ...]
+# --- Stores ---
+# OVHcloud: charge depuis fichiers persistants / Vercel: in-memory (ephemere)
+_DEFAULT_KB = {
+    "salaries": {},
+    "employeurs": {},
+    "cotisations": [],
+    "declarations_dsn": [],
+    "bulletins_paie": [],
+    "documents_comptables": [],
+    "taux_verifies": {},
+    "periodes_couvertes": [],
     "anomalies_detectees": [],
-    "pieces_justificatives": {},  # {type_piece: [doc_ids]}
-    "contrats_detectes": [],  # contrats extraits des documents
-    "masse_salariale": {},  # {periode: montant}
-    "masse_salariale_totale": 0,  # cumul toutes periodes
-    "effectifs": {},        # {periode: nb}
-    "conventions_collectives": [],  # CCN detectees
-    "exonerations_detectees": [],  # exonerations apprentis, ZRR, etc.
+    "pieces_justificatives": {},
+    "contrats_detectes": [],
+    "masse_salariale": {},
+    "masse_salariale_totale": 0,
+    "effectifs": {},
+    "conventions_collectives": [],
+    "exonerations_detectees": [],
     "derniere_maj": None,
     "contexte_entreprise": {
         "secteur_activite": "",
@@ -85,30 +129,82 @@ _biblio_knowledge: dict = {
         "accords_entreprise": [],
         "regime_fiscal": "",
     },
-    "documents_par_type": {},  # {type: [references]}
-    "alertes_contextuelles": [],  # alertes generees a partir du contexte
+    "documents_par_type": {},
+    "alertes_contextuelles": [],
 }
-_invitations: list[dict] = []
-_facture_statuses: dict[str, dict] = {}
-_audit_log: list[dict] = []
-_dsn_drafts: list[dict] = []
-_rh_contrats: list[dict] = []
-_rh_avenants: list[dict] = []
-_rh_conges: list[dict] = []
-_rh_arrets: list[dict] = []
-_rh_sanctions: list[dict] = []
-_rh_attestations: list[dict] = []
-_rh_entretiens: list[dict] = []
-_rh_visites_med: list[dict] = []
-_rh_echanges: list[dict] = []
-_rh_planning: list[dict] = []
-_entete_config: dict = {}
+
+if _persist:
+    _doc_library = doc_library_store.load()
+    _biblio_knowledge = knowledge_store.load()
+    # Merge defaults for any missing keys
+    for k, v in _DEFAULT_KB.items():
+        if k not in _biblio_knowledge:
+            _biblio_knowledge[k] = v
+    _invitations = invitations_store.load()
+    _facture_statuses = facture_statuses_store.load()
+    _audit_log = audit_log_store.load()
+    _dsn_drafts = dsn_drafts_store.load()
+    _rh_contrats = rh_contrats_store.load()
+    _rh_avenants = rh_avenants_store.load()
+else:
+    _doc_library: list[dict] = []
+    _biblio_knowledge: dict = dict(_DEFAULT_KB)
+    _invitations: list[dict] = []
+    _facture_statuses: dict[str, dict] = {}
+    _audit_log: list[dict] = []
+    _dsn_drafts: list[dict] = []
+    _rh_contrats: list[dict] = []
+    _rh_avenants: list[dict] = []
+if _persist:
+    _rh_conges = rh_conges_store.load()
+    _rh_arrets = rh_arrets_store.load()
+    _rh_sanctions = rh_sanctions_store.load()
+    _rh_attestations = rh_attestations_store.load()
+    _rh_entretiens = rh_entretiens_store.load()
+    _rh_visites_med = rh_visites_med_store.load()
+    _rh_echanges = rh_echanges_store.load()
+    _rh_planning = rh_planning_store.load()
+    _entete_config = entete_config_store.load()
+else:
+    _rh_conges: list[dict] = []
+    _rh_arrets: list[dict] = []
+    _rh_sanctions: list[dict] = []
+    _rh_attestations: list[dict] = []
+    _rh_entretiens: list[dict] = []
+    _rh_visites_med: list[dict] = []
+    _rh_echanges: list[dict] = []
+    _rh_planning: list[dict] = []
+    _entete_config: dict = {}
+
+
+def _save_state():
+    """Persiste l'etat complet sur disque (OVHcloud uniquement)."""
+    if not _persist:
+        return
+    knowledge_store.save(_biblio_knowledge)
+    doc_library_store.save(_doc_library)
+    audit_log_store.save(_audit_log)
+    rh_contrats_store.save(_rh_contrats)
+    rh_avenants_store.save(_rh_avenants)
+    rh_conges_store.save(_rh_conges)
+    rh_arrets_store.save(_rh_arrets)
+    rh_sanctions_store.save(_rh_sanctions)
+    rh_attestations_store.save(_rh_attestations)
+    rh_entretiens_store.save(_rh_entretiens)
+    rh_visites_med_store.save(_rh_visites_med)
+    rh_echanges_store.save(_rh_echanges)
+    rh_planning_store.save(_rh_planning)
+    dsn_drafts_store.save(_dsn_drafts)
+    invitations_store.save(_invitations)
+    facture_statuses_store.save(_facture_statuses)
+    entete_config_store.save(_entete_config)
 
 
 def get_db() -> Database:
     global _db
     if _db is None:
-        _db = Database("/tmp/urssaf_analyzer.db")
+        db_path = str(_DATA_DIR / "db" / "normacheck.db") if _IS_OVH else "/tmp/urssaf_analyzer.db"
+        _db = Database(db_path)
     return _db
 
 
@@ -120,13 +216,44 @@ def get_moteur() -> MoteurEcritures:
 
 
 def log_action(profil_email: str, action: str, details: str = ""):
-    _audit_log.append({
+    entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
         "profil": profil_email,
         "action": action,
         "details": details,
-    })
+    }
+    _audit_log.append(entry)
+    if _persist:
+        audit_log_store.append(entry)
+
+
+# ==============================
+# HEALTH CHECK (OVHcloud monitoring)
+# ==============================
+
+@app.get("/api/health")
+async def health_check():
+    """Endpoint de sante pour Docker HEALTHCHECK et monitoring OVH."""
+    checks = {"status": "ok", "version": "3.8.1", "env": "ovhcloud" if _IS_OVH else "vercel"}
+    try:
+        db = get_db()
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {str(e)}"
+        checks["status"] = "degraded"
+    if _IS_OVH:
+        checks["persistence"] = "active" if _persist else "fallback_memory"
+        checks["data_dir"] = str(_DATA_DIR)
+        checks["data_writable"] = os.access(str(_DATA_DIR), os.W_OK)
+        try:
+            stats = get_data_stats()
+            checks["data_stats"] = stats
+        except Exception:
+            pass
+    checks["max_files"] = _MAX_FILES
+    checks["max_upload_mb"] = _MAX_UPLOAD_MB
+    return checks
 
 
 # ==============================
@@ -567,10 +694,10 @@ async def analyser_documents(
     integrer: bool = Query(True),
     mode_analyse: str = Query("complet"),
 ):
-    if len(fichiers) > 20:
-        raise HTTPException(400, "Maximum 20 fichiers par analyse.")
+    if len(fichiers) > _MAX_FILES:
+        raise HTTPException(400, f"Maximum {_MAX_FILES} fichiers par analyse.")
 
-    config = AppConfig(base_dir=Path("/tmp/normacheck_data"))
+    config = AppConfig(base_dir=_DATA_DIR)
     orchestrator = Orchestrator(config)
 
     with tempfile.TemporaryDirectory() as td:
@@ -579,8 +706,8 @@ async def analyser_documents(
         for f in fichiers:
             data = await f.read()
             total_size += len(data)
-            if total_size > 500 * 1024 * 1024:
-                raise HTTPException(400, "Taille totale depasse 500 Mo.")
+            if total_size > _MAX_UPLOAD_MB * 1024 * 1024:
+                raise HTTPException(400, f"Taille totale depasse {_MAX_UPLOAD_MB} Mo.")
             chemin = Path(td) / f.filename
             chemin.write_bytes(data)
             chemins.append(chemin)
@@ -653,6 +780,16 @@ async def analyser_documents(
                     "erreurs_corrigees": [],
                 })
             log_action("utilisateur", "analyse", f"{len(fichiers)} fichiers")
+            # Sauvegarder fichiers sur disque (OVHcloud)
+            if _persist:
+                analysis_id = str(uuid.uuid4())[:8]
+                for f_save in fichiers:
+                    await f_save.seek(0)
+                    raw_save = await f_save.read()
+                    save_uploaded_file(f_save.filename, raw_save, analysis_id)
+
+        # Persister l'etat apres analyse
+        _save_state()
 
         # Toujours generer le rapport HTML pour l'inclure dans la reponse JSON
         try:
@@ -3196,7 +3333,7 @@ async def knowledge_base():
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.1", "build": "20260222d", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
+    return {"version": "3.8.1", "build": "20260222e", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -6544,8 +6681,8 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
 </div>
 <div class="limits">
-<div class="limit"><strong>20 fichiers</strong> par analyse</div>
-<div class="limit"><strong>500 Mo</strong> max par analyse</div>
+<div class="limit"><strong>50 fichiers</strong> par analyse</div>
+<div class="limit"><strong>2 Go</strong> max par analyse</div>
 <div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
 </div>
 </div>
@@ -7061,7 +7198,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 APP_HTML += """
 <!-- ===== DASHBOARD ===== -->
 <div class="sec active" id="s-dashboard">
-<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 20 fichiers max, 500 Mo max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
+<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 50 fichiers max, 2 Go max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
 <div class="g4" id="dash-stats">
 <div class="sc blue"><div class="val" id="dash-anomalies">0</div><div class="lab">Anomalies</div></div>
 <div class="sc amber"><div class="val" id="dash-impact">0 EUR</div><div class="lab">Impact cotisations</div></div>
@@ -7089,7 +7226,7 @@ APP_HTML += """
 <div class="sec" id="s-analyse">
 <div class="card">
 <h2>Importer et analyser</h2>
-<div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>20 fichiers</strong> et <strong>500 Mo</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>50 fichiers</strong> et <strong>2 Go</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
 <div class="g2" style="margin-bottom:14px">
 <div><label>Mode d analyse</label><select id="mode-analyse">
 <option value="simple">Analyse simple</option>

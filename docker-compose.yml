@@ -1,0 +1,94 @@
+# ============================================
+# NormaCheck - Docker Compose OVHcloud
+# ============================================
+version: "3.8"
+
+services:
+  normacheck:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: normacheck-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Donnees persistantes (survive aux redemarrages/mises a jour)
+      - normacheck_data:/data/normacheck
+    environment:
+      - NORMACHECK_ENV=production
+      - NORMACHECK_DATA_DIR=/data/normacheck
+      - NORMACHECK_WORKERS=4
+      - NORMACHECK_MAX_UPLOAD_MB=2000
+      - NORMACHECK_MAX_FILES=50
+      # Supabase (optionnel - decommenter si utilise)
+      # - SUPABASE_URL=${SUPABASE_URL}
+      # - SUPABASE_KEY=${SUPABASE_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  nginx:
+    image: nginx:alpine
+    container_name: normacheck-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      normacheck:
+        condition: service_healthy
+
+  # Certbot pour SSL Let's Encrypt
+  certbot:
+    image: certbot/certbot
+    container_name: normacheck-certbot
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+  # Backup automatique quotidien
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: normacheck-backup
+    restart: unless-stopped
+    volumes:
+      - normacheck_data:/data/normacheck:ro
+      - normacheck_backups:/backups
+    entrypoint: >
+      /bin/sh -c 'while true; do
+        STAMP=$$(date +%Y%m%d_%H%M%S);
+        echo "[$$STAMP] Backup starting...";
+        cp /data/normacheck/db/normacheck.db "/backups/normacheck_$$STAMP.db" 2>/dev/null || true;
+        tar czf "/backups/uploads_$$STAMP.tar.gz" -C /data/normacheck uploads 2>/dev/null || true;
+        find /backups -name "normacheck_*.db" -mtime +30 -delete 2>/dev/null || true;
+        find /backups -name "uploads_*.tar.gz" -mtime +30 -delete 2>/dev/null || true;
+        echo "[$$STAMP] Backup done. Sleeping 24h...";
+        sleep 86400;
+      done'
+
+volumes:
+  normacheck_data:
+    driver: local
+  normacheck_backups:
+    driver: local
+  certbot_certs:
+    driver: local
+  certbot_www:
+    driver: local
