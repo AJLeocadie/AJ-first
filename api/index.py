@@ -1,4 +1,4 @@
-"""NormaCheck v3.6 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.8 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
@@ -3196,7 +3196,7 @@ async def knowledge_base():
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.0", "build": "20260222", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
+    return {"version": "3.8.0", "build": "20260222c", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -4492,7 +4492,7 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 <div class="sig-block"><p><strong>L employeur</strong></p><p style="font-size:.85em;color:#64748b">Nom, qualite, signature</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 <div class="sig-block"><p><strong>Le(la) salarie(e)</strong></p><p style="font-size:.85em;color:#64748b">{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 </div>
-<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.6 - Ce document doit etre signe en deux exemplaires originaux</p>
+<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.8 - Ce document doit etre signe en deux exemplaires originaux</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -4740,7 +4740,7 @@ td{{padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:.88em}}.num{{text
 <tr class="total" style="background:#f0fdf4"><td>NET A PAYER AVANT IMPOT</td><td></td><td class="num" style="font-size:1.1em">{bulletin["net_a_payer"]:.2f} EUR</td></tr>
 <tr class="total" style="background:#eff6ff"><td>COUT TOTAL EMPLOYEUR</td><td class="num">{bulletin["cout_total_employeur"]:.2f} EUR</td><td></td></tr>
 </table>
-<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.6.</p>
+<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.8.</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -6317,7 +6317,7 @@ async def generer_dsn(
     add("S10.G00.00.001", siren_emetteur)
     add("S10.G00.00.002", nic_emetteur)
     add("S10.G00.00.003", nom_logiciel)
-    add("S10.G00.00.004", "NormaCheck v3.6")
+    add("S10.G00.00.004", "NormaCheck v3.8")
     add("S10.G00.00.005", "01")  # Nature de la declaration: DSN mensuelle
     add("S10.G00.00.006", "11")  # Type: normale
     add("S10.G00.00.007", "01")  # Numero de fraction
@@ -6656,7 +6656,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.6.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+NormaCheck v3.8.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 <span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
 </footer>
 <script>
@@ -6739,7 +6739,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 9 - Droit applicable</h2>
 <p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
 </div>
-<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6796,7 +6796,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 8 - Droit applicable</h2>
 <p>Les presentes CGV sont soumises au droit francais. Tout litige releve de la competence des tribunaux francais.</p>
 </div>
-<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6867,7 +6867,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Droit applicable</h2>
 <p>Le present site et ses mentions legales sont regis par le droit francais.</p>
 </div>
-<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -7032,7 +7032,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
 <div class="sidebar" id="sidebar">
-<div class="logo"><em>NormaCheck</em> <span>v3.6</span></div>
+<div class="logo"><em>NormaCheck</em> <span>v3.8</span></div>
 <div class="nav-group">Analyse</div>
 <div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
 <div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
@@ -7052,7 +7052,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="logout" onclick="window.location.href='/'"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.6.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
 """
@@ -8471,7 +8471,7 @@ html+="<h2>Recommandations</h2>";var recos=analysisData.recommandations||[];for(
 html+="<div style='margin-top:40px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;font-size:.85em'><h3>Methodologie du score NormaCheck</h3><p>"+scoreData.explanation+"</p><table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:#1e40af;color:#fff'><th style='padding:6px 10px;text-align:left'>Deduction</th><th style='padding:6px 10px;text-align:left'>Raison</th></tr>";
 for(var i=0;i<scoreData.details.length;i++){var d=scoreData.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td></tr>";}
 html+="</table></div>";
-html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.6 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
+html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.8 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 
 /* === RH MODULE === */
