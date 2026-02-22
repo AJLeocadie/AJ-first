@@ -1847,6 +1847,8 @@ async def sim_exonerations(
     age_salarie: int = Query(30),
     ccn: str = Query(""),
     duree_contrat_mois: int = Query(0),
+    heures_supplementaires: float = Query(0),
+    nb_heures_mensuelles: float = Query(151.67),
 ):
     brut = brut_mensuel
     smic_mensuel = float(_SMIC_MENSUEL)
@@ -1946,6 +1948,84 @@ async def sim_exonerations(
             "montant_mensuel": exo_jei, "montant_annuel": round(exo_jei * 12, 2),
             "conditions": "Chercheurs, techniciens, mandataires - 8 ans max", "applicable": True})
         total_exo += exo_jei
+
+    # 11. TEPA - Desocialisation des heures supplementaires (Art. 81 quater CGI / Art. L.241-17 CSS)
+    if heures_supplementaires > 0:
+        taux_horaire_hs = round(brut / nb_heures_mensuelles, 2) if nb_heures_mensuelles > 0 else 0
+        # Majoration 25% pour les 8 premieres HS, 50% au-dela
+        hs_25 = min(heures_supplementaires, 8) * taux_horaire_hs * 1.25
+        hs_50 = max(0, heures_supplementaires - 8) * taux_horaire_hs * 1.50
+        montant_hs_total = round(hs_25 + hs_50, 2)
+        # Reduction salariale : exoneration cotisations salariales vieillesse (11.31%)
+        exo_tepa_sal = round(montant_hs_total * 0.1131, 2)
+        # Deduction forfaitaire patronale : 1.50 EUR/h (< 250 sal) ou 0.50 EUR/h (>= 250)
+        deduc_pat_par_h = 1.50 if effectif < 250 else 0.50
+        exo_tepa_pat = round(heures_supplementaires * deduc_pat_par_h, 2)
+        # Exoneration IR : les HS sont defiscalisees dans la limite de 7500 EUR/an
+        exo_ir_hs = round(min(montant_hs_total, 7500 / 12), 2)
+        exonerations.append({
+            "nom": "TEPA - Heures supplementaires defiscalisees",
+            "reference": "Art. 81 quater CGI / Art. L.241-17 CSS",
+            "montant_mensuel": round(exo_tepa_sal + exo_tepa_pat, 2),
+            "montant_annuel": round((exo_tepa_sal + exo_tepa_pat) * 12, 2),
+            "applicable": True,
+            "conditions": f"{heures_supplementaires:.1f}h HS/mois, taux horaire {taux_horaire_hs:.2f} EUR. "
+                          f"Reduction salariale: {exo_tepa_sal:.2f} EUR, deduction patronale: {exo_tepa_pat:.2f} EUR. "
+                          f"Exoneration IR: {exo_ir_hs:.2f} EUR/mois (plafond 7500 EUR/an). "
+                          f"Contingent annuel 220h (Art. D.3121-24 CT).",
+            "detail": {
+                "heures_sup": heures_supplementaires,
+                "montant_hs_brut": montant_hs_total,
+                "reduction_salariale": exo_tepa_sal,
+                "deduction_patronale": exo_tepa_pat,
+                "exoneration_ir": exo_ir_hs,
+            },
+        })
+        total_exo += exo_tepa_sal + exo_tepa_pat
+    else:
+        exonerations.append({
+            "nom": "TEPA - Heures supplementaires defiscalisees",
+            "reference": "Art. 81 quater CGI / Art. L.241-17 CSS",
+            "montant_mensuel": 0, "montant_annuel": 0,
+            "applicable": False,
+            "conditions": "Pas d heures supplementaires renseignees. Ajoutez des HS pour calculer l exoneration.",
+        })
+
+    # 12. BER (Bassin d'Emploi a Redynamiser - Art. L.131-4-4 CSS)
+    if zone == "ber":
+        exo_ber = round(brut * 0.32, 2)
+        exonerations.append({
+            "nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
+            "reference": "Art. L.131-4-4 CSS / Art. 44 duodecies CGI",
+            "montant_mensuel": exo_ber, "montant_annuel": round(exo_ber * 12, 2),
+            "applicable": True,
+            "conditions": "Exoneration totale des cotisations patronales pendant 5 ans dans les BER (Ariege, Pyrenees-Orientales).",
+        })
+        total_exo += exo_ber
+
+    # 13. Contrat professionnalisation (> 45 ans)
+    if statut_salarie == "contrat_pro" or (age_salarie >= 45 and duree_contrat_mois > 0):
+        exo_pro = round(brut * 0.28, 2) if age_salarie >= 45 else round(brut * 0.15, 2)
+        exonerations.append({
+            "nom": "Aide contrat de professionnalisation",
+            "reference": "Art. L.6325-16 CT / Art. D.6325-21 CT",
+            "montant_mensuel": exo_pro, "montant_annuel": round(exo_pro * 12, 2),
+            "applicable": True,
+            "conditions": f"Age: {age_salarie} ans. " + ("Aide renforcee (+45 ans)." if age_salarie >= 45 else "Aide standard."),
+        })
+        total_exo += exo_pro
+
+    # 14. ACRE (Aide aux Createurs et Repreneurs d Entreprise)
+    if statut_salarie == "acre":
+        exo_acre = round(brut * 0.261, 2)
+        exonerations.append({
+            "nom": "ACRE (Aide aux Createurs/Repreneurs)",
+            "reference": "Art. L.131-6-4 CSS",
+            "montant_mensuel": exo_acre, "montant_annuel": round(exo_acre * 12, 2),
+            "applicable": True,
+            "conditions": "Exoneration partielle cotisations pendant 12 mois. Plafond 130% SMIC.",
+        })
+        total_exo += exo_acre
 
     # Cout sans/avec exoneration
     taux_pat = 0.42
@@ -2494,6 +2574,146 @@ def _calculer_ir_simple(revenu: float, nb_parts: float) -> float:
         impot += tranche * taux
         prev = seuil
     return round(impot * nb_parts, 2)
+
+
+# ==============================
+# DOCUMENTS DEMO / SIMULATION
+# ==============================
+
+@app.get("/api/simulation/demo-documents")
+async def generer_documents_demo(
+    type_demo: str = Query("complet"),
+    avec_anomalies: bool = Query(True),
+):
+    """Genere des documents fictifs pour tester l analyse.
+
+    type_demo: complet, bulletin_seul, dsn_seul, mixte
+    avec_anomalies: si True, introduit des erreurs volontaires pour tester la detection
+    """
+    smic = float(_SMIC_MENSUEL)
+    documents = []
+
+    # --- Bulletin de paie fictif (CSV) ---
+    if type_demo in ("complet", "bulletin_seul", "mixte"):
+        brut_normal = 2850.00
+        brut_anomalie = 1650.00 if avec_anomalies else brut_normal  # < SMIC
+        taux_urssaf = 0.0705 if not avec_anomalies else 0.0850  # taux salarial AM erronne
+        bull_csv = "Rubrique;Base;Taux salarial;Part salariale;Taux patronal;Part patronal\\n"
+        bull_csv += f"Salaire de base;{brut_normal if not avec_anomalies else brut_anomalie};;;;;\\n"
+        bull_csv += f"Maladie;{brut_normal};{taux_urssaf};{round(brut_normal * taux_urssaf, 2)};0.13;{round(brut_normal * 0.13, 2)}\\n"
+        bull_csv += f"Vieillesse plafonnee;{min(brut_normal, float(_PASS_MENSUEL))};0.069;{round(min(brut_normal, float(_PASS_MENSUEL)) * 0.069, 2)};0.0855;{round(min(brut_normal, float(_PASS_MENSUEL)) * 0.0855, 2)}\\n"
+        bull_csv += f"Vieillesse deplafonnee;{brut_normal};0.004;{round(brut_normal * 0.004, 2)};0.021;{round(brut_normal * 0.021, 2)}\\n"
+        bull_csv += f"CSG deductible;{round(brut_normal * 0.9825, 2)};0.0680;{round(brut_normal * 0.9825 * 0.068, 2)};;;\\n"
+        bull_csv += f"CSG non deductible;{round(brut_normal * 0.9825, 2)};0.0240;{round(brut_normal * 0.9825 * 0.024, 2)};;;\\n"
+        bull_csv += f"CRDS;{round(brut_normal * 0.9825, 2)};0.005;{round(brut_normal * 0.9825 * 0.005, 2)};;;\\n"
+        if avec_anomalies:
+            bull_csv += f"FNAL;{brut_normal};0.0050;0;0.0050;{round(brut_normal * 0.005, 2)}\\n"  # FNAL 0.50% mais effectif < 50
+        else:
+            bull_csv += f"FNAL;{min(brut_normal, float(_PASS_MENSUEL))};0;0;0.001;{round(min(brut_normal, float(_PASS_MENSUEL)) * 0.001, 2)}\\n"
+        documents.append({
+            "nom": "bulletin_paie_demo_202601.csv",
+            "type": "text/csv",
+            "contenu": bull_csv,
+            "description": "Bulletin de paie janvier 2026" + (" - AVEC anomalies" if avec_anomalies else " - CONFORME"),
+            "anomalies_attendues": [
+                "Salaire inferieur au SMIC" if avec_anomalies else None,
+                "Taux maladie salarial incorrect (8.50% au lieu de 7.05%)" if avec_anomalies else None,
+                "FNAL 0.50% applique alors que effectif < 50" if avec_anomalies else None,
+            ] if avec_anomalies else [],
+        })
+
+    # --- DSN fictive (format texte structure) ---
+    if type_demo in ("complet", "dsn_seul", "mixte"):
+        nir_valide = "1850175108888"
+        cle_nir = str(97 - (int(nir_valide) % 97)).zfill(2)
+        nir_anomalie = "2991375000000" if avec_anomalies else nir_valide  # NIR invalide
+        brut_dsn = "2850.00"
+        net_dsn = "2223.00"
+        if avec_anomalies:
+            net_dsn = "3100.00"  # Net > Brut = anomalie
+
+        dsn_txt = "S10.G00.00.001,'00001'\\n"
+        dsn_txt += "S10.G00.00.002,'01'\\n"
+        dsn_txt += "S10.G00.01.001,'123456789'\\n"
+        dsn_txt += "S10.G00.01.002,'DEMO ENTREPRISE SAS'\\n"
+        dsn_txt += "S20.G00.05.001,'01'\\n"
+        dsn_txt += "S20.G00.05.002,'202601'\\n"
+        dsn_txt += "S21.G00.06.001,'12345678900012'\\n"
+        dsn_txt += "S21.G00.06.002,'DEMO ENTREPRISE SAS'\\n"
+        dsn_txt += f"S21.G00.30.001,'{nir_anomalie if avec_anomalies else nir_valide}{cle_nir}'\\n"
+        dsn_txt += "S21.G00.30.002,'DUPONT'\\n"
+        dsn_txt += "S21.G00.30.004,'Jean'\\n"
+        dsn_txt += "S21.G00.30.006,'01011990'\\n"
+        dsn_txt += f"S21.G00.51.001,'{brut_dsn}'\\n"
+        dsn_txt += f"S21.G00.51.011,'{net_dsn}'\\n"
+        dsn_txt += "S21.G00.51.012,'151.67'\\n"
+        dsn_txt += "S21.G00.40.001,'C0001'\\n"
+        dsn_txt += "S21.G00.40.002,'01012024'\\n"  # Date embauche
+        dsn_txt += "S21.G00.40.007,'02'\\n"  # Non-cadre
+        if avec_anomalies:
+            dsn_txt += "S21.G00.81.001,''\\n"  # CTP vide = anomalie
+        else:
+            dsn_txt += "S21.G00.81.001,'100'\\n"
+        dsn_txt += f"S21.G00.81.004,'{brut_dsn}'\\n"
+
+        documents.append({
+            "nom": "dsn_demo_202601.dsn",
+            "type": "text/plain",
+            "contenu": dsn_txt,
+            "description": "DSN mensuelle janvier 2026" + (" - AVEC anomalies" if avec_anomalies else " - CONFORME"),
+            "anomalies_attendues": [
+                "NIR invalide (cle de controle incorrecte)" if avec_anomalies else None,
+                "Net fiscal > Brut (incoherent)" if avec_anomalies else None,
+                "CTP vide (Code Type Personnel obligatoire)" if avec_anomalies else None,
+            ] if avec_anomalies else [],
+        })
+
+    # --- Facture fictive (CSV) ---
+    if type_demo in ("complet", "mixte"):
+        fact_csv = "Type;Date;Numero;Tiers;HT;TVA;TTC\\n"
+        fact_csv += "Facture achat;2026-01-15;FA-2026-001;FOURNISSEUR DEMO;1500.00;300.00;1800.00\\n"
+        if avec_anomalies:
+            fact_csv += "Facture achat;2026-01-20;FA-2026-002;FOURNISSEUR X;2000.00;500.00;2500.00\\n"  # TVA 25% = erreur
+        fact_csv += "Facture vente;2026-01-25;FV-2026-001;CLIENT DEMO;3000.00;600.00;3600.00\\n"
+        documents.append({
+            "nom": "factures_demo_202601.csv",
+            "type": "text/csv",
+            "contenu": fact_csv,
+            "description": "Factures janvier 2026" + (" - TVA incorrecte sur FA-002" if avec_anomalies else ""),
+            "anomalies_attendues": [
+                "Taux TVA 25% anormal sur FA-2026-002 (taux standards: 5.5%, 10%, 20%)" if avec_anomalies else None,
+            ] if avec_anomalies else [],
+        })
+
+    # Filtrer les None des anomalies
+    for doc in documents:
+        doc["anomalies_attendues"] = [a for a in doc.get("anomalies_attendues", []) if a]
+
+    return {
+        "type_demo": type_demo,
+        "avec_anomalies": avec_anomalies,
+        "nb_documents": len(documents),
+        "documents": documents,
+        "instructions": "Telechargez les fichiers CSV/DSN generes et importez-les via Import/Analyse pour tester la detection d anomalies.",
+    }
+
+
+@app.get("/api/simulation/demo-documents/{index}/telecharger")
+async def telecharger_document_demo(
+    index: int,
+    type_demo: str = Query("complet"),
+    avec_anomalies: bool = Query(True),
+):
+    """Telecharge un document de demo au format fichier."""
+    result = await generer_documents_demo(type_demo, avec_anomalies)
+    docs = result["documents"]
+    if index < 0 or index >= len(docs):
+        raise HTTPException(404, "Document non trouve")
+    doc = docs[index]
+    from fastapi.responses import Response
+    content = doc["contenu"].replace("\\n", "\n")
+    return Response(content=content, media_type="text/plain",
+                    headers={"Content-Disposition": f'attachment; filename="{doc["nom"]}"'})
 
 
 # ==============================
@@ -3744,22 +3964,30 @@ async def generer_bulletin(
     primes: str = Form("0"),
     avantages_nature: str = Form("0"),
     absences_jours: str = Form("0"),
+    heures_travaillees: str = Form("151.67"),
 ):
     """Genere un bulletin de salaire conforme R.3243-1 du Code du travail."""
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
 
+    alertes = []
+
     # Si contrat_id fourni, recuperer les infos
     contrat = None
+    ccn_label = ""
     if contrat_id:
         for c in _rh_contrats:
             if c["id"] == contrat_id:
                 contrat = c
-                nom_salarie = nom_salarie or c["nom_salarie"]
-                prenom_salarie = prenom_salarie or c["prenom_salarie"]
-                salaire_brut = salaire_brut if float(salaire_brut or 0) > 0 else str(c["salaire_brut"])
+                nom_salarie = nom_salarie or c.get("nom_salarie", "") or c.get("nom", "")
+                prenom_salarie = prenom_salarie or c.get("prenom_salarie", "") or c.get("prenom", "")
+                salaire_brut = salaire_brut if float(salaire_brut or 0) > 0 else str(c.get("salaire_brut", 0))
                 est_cadre = "true" if c.get("convention_collective", "").lower().find("cadre") >= 0 else est_cadre
+                ccn_label = c.get("convention_collective", "")
+                if c.get("duree_hebdo") and float(c.get("duree_hebdo", 35)) != 35:
+                    heures_travaillees = str(round(float(c["duree_hebdo"]) / 35 * 151.67, 2))
                 break
 
+    h_trav = float(heures_travaillees or "151.67")
     brut_base = Decimal(str(float(salaire_brut or "0")))
     hs = Decimal(str(float(heures_supplementaires or "0")))
     prime = Decimal(str(float(primes or "0")))
@@ -3769,8 +3997,10 @@ async def generer_bulletin(
     # Retenue absences (base 21.67 jours ouvrables/mois)
     retenue_abs = round(float(brut_base) / 21.67 * abs_j, 2) if abs_j > 0 else 0
 
+    # Taux horaire (base heures travaillees)
+    taux_horaire = round(float(brut_base) / h_trav, 2) if h_trav > 0 else 0
+
     # Majoration HS (25% pour les 8 premieres heures, 50% au-dela - art. L.3121-36 CT)
-    taux_horaire = round(float(brut_base) / 151.67, 2)
     if float(hs) > 0:
         hs_25 = min(float(hs), 8) * taux_horaire * 1.25
         hs_50 = max(0, float(hs) - 8) * taux_horaire * 1.50
@@ -3780,8 +4010,56 @@ async def generer_bulletin(
 
     brut_total = float(brut_base) + montant_hs + float(prime) + float(an) - retenue_abs
 
+    # --- Alertes SMIC et minimum conventionnel ---
+    smic_horaire = round(float(_SMIC_MENSUEL) / 151.67, 2)  # ~12.04 EUR en 2026
+    smic_mensuel = float(_SMIC_MENSUEL)
+
+    if float(brut_base) > 0 and taux_horaire < smic_horaire:
+        alertes.append({
+            "niveau": "haute",
+            "message": f"ALERTE SMIC : Le taux horaire ({taux_horaire:.2f} EUR/h) est inferieur au SMIC horaire ({smic_horaire:.2f} EUR/h). "
+                       f"Le salaire brut minimum pour {h_trav}h est de {round(smic_horaire * h_trav, 2):.2f} EUR. "
+                       f"Ref: Art. L.3231-2 du Code du travail.",
+        })
+
+    if float(brut_base) > 0 and float(brut_base) < smic_mensuel and h_trav >= 151.67:
+        alertes.append({
+            "niveau": "haute",
+            "message": f"ALERTE SMIC MENSUEL : Le salaire brut ({float(brut_base):.2f} EUR) est inferieur au SMIC mensuel "
+                       f"({smic_mensuel:.2f} EUR) pour un temps complet. Ref: Art. D.3231-6 CT.",
+        })
+
+    # Alerte minimum conventionnel (si convention renseignee)
+    if ccn_label:
+        alertes.append({
+            "niveau": "info",
+            "message": f"Convention collective : {ccn_label}. Verifiez que le salaire respecte le minimum conventionnel "
+                       f"applicable a la classification du poste (Art. L.2253-1 CT).",
+        })
+
+    # Alerte heures sup au-dela du contingent annuel (220h/an - art. D.3121-24 CT)
+    if float(hs) > 0:
+        alertes.append({
+            "niveau": "info",
+            "message": f"Heures supplementaires : {float(hs):.1f}h ce mois. Contingent annuel : 220h (Art. D.3121-24 CT). "
+                       f"Au-dela, repos compensateur obligatoire de 100% (Art. L.3121-30 CT). "
+                       f"Exoneration TEPA applicable : reduction cotisations salariales sur les HS.",
+        })
+
     calc = ContributionRules()
     bulletin_data = calc.calculer_bulletin_complet(Decimal(str(brut_total)), est_cadre=est_cadre.lower() == "true")
+
+    # Exoneration TEPA sur HS (Art. 81 quater CGI / Art. L.241-17 CSS)
+    exo_tepa_salariale = 0.0
+    exo_tepa_patronale = 0.0
+    if montant_hs > 0:
+        # Reduction salariale : exoneration cotisations salariales d'assurance vieillesse sur HS (11.31%)
+        exo_tepa_salariale = round(montant_hs * 0.1131, 2)
+        # Deduction forfaitaire patronale : 1.50 EUR par heure (entreprises < 250 sal)
+        exo_tepa_patronale = round(float(hs) * 1.50, 2)
+
+    net_avant_impot = float(bulletin_data.get("net_avant_impot", brut_total * Decimal("0.78")))
+    cout_employeur = float(bulletin_data.get("cout_total_employeur", brut_total * Decimal("1.45")))
 
     bulletin = {
         "id": str(uuid.uuid4())[:8],
@@ -3790,6 +4068,8 @@ async def generer_bulletin(
         "prenom_salarie": prenom_salarie,
         "mois": mois or date.today().strftime("%Y%m"),
         "salaire_base": float(brut_base),
+        "heures_travaillees": h_trav,
+        "taux_horaire": taux_horaire,
         "heures_supplementaires": float(hs),
         "montant_hs": montant_hs,
         "primes": float(prime),
@@ -3797,15 +4077,22 @@ async def generer_bulletin(
         "retenue_absences": retenue_abs,
         "brut_total": brut_total,
         "lignes": bulletin_data.get("lignes", []),
-        "net_avant_impot": float(bulletin_data.get("net_avant_impot", 0)),
+        "net_avant_impot": net_avant_impot,
         "total_patronal": float(bulletin_data.get("total_patronal", 0)),
         "total_salarial": float(bulletin_data.get("total_salarial", 0)),
-        "net_a_payer": float(bulletin_data.get("net_avant_impot", brut_total * Decimal("0.78"))),
-        "cout_total_employeur": float(bulletin_data.get("cout_total_employeur", brut_total * Decimal("1.45"))),
+        "net_a_payer": net_avant_impot + exo_tepa_salariale,
+        "cout_total_employeur": cout_employeur - exo_tepa_patronale,
+        "exoneration_tepa": {
+            "reduction_salariale": exo_tepa_salariale,
+            "deduction_patronale": exo_tepa_patronale,
+            "reference": "Art. 81 quater CGI / Art. L.241-17 CSS",
+        } if montant_hs > 0 else None,
+        "alertes": alertes,
         "mentions_obligatoires": [
             "Mentions conformes a l'article R.3243-1 du Code du travail",
-            "Convention collective applicable",
-            "Nombre d'heures de travail",
+            "Convention collective applicable" + (f" : {ccn_label}" if ccn_label else ""),
+            f"Nombre d'heures de travail : {h_trav}h",
+            f"Taux horaire : {taux_horaire:.2f} EUR",
             "Nature et montant des accessoires de salaire",
             "Montant de la remuneration brute",
             "Montant et assiette des cotisations et contributions sociales",
@@ -3850,6 +4137,20 @@ async def document_bulletin(bulletin_id: str):
         ms = f"{l.get('montant_salarial',0):.2f}" if isinstance(l, dict) else ""
         lignes_html += f"<tr><td>{lib}</td><td class='num'>{mp}</td><td class='num'>{ms}</td></tr>"
 
+    # Alertes HTML pour le bulletin imprimable
+    alertes_html = ""
+    for a in bulletin.get("alertes", []):
+        color = "#991b1b" if a.get("niveau") == "haute" else "#92400e"
+        bg = "#fef2f2" if a.get("niveau") == "haute" else "#fffbeb"
+        alertes_html += f'<div style="padding:8px 12px;margin:4px 0;border-radius:6px;background:{bg};color:{color};font-size:.84em;border:1px solid {color}20">&#9888; {a["message"]}</div>'
+
+    # TEPA HTML
+    tepa_html = ""
+    if bulletin.get("exoneration_tepa"):
+        t = bulletin["exoneration_tepa"]
+        tepa_html = f"""<tr style="background:#f0fdf4"><td>TEPA - Reduction salariale HS</td><td></td><td class="num" style="color:#166534">-{t["reduction_salariale"]:.2f}</td></tr>
+<tr style="background:#f0fdf4"><td>TEPA - Deduction patronale HS</td><td class="num" style="color:#166534">-{t["deduction_patronale"]:.2f}</td><td></td></tr>"""
+
     html = f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
 <title>Bulletin de paie - {bulletin["prenom_salarie"]} {bulletin["nom_salarie"]} - {bulletin["mois"]}</title>
 <style>body{{font-family:'Segoe UI',sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#1e293b}}
@@ -3857,22 +4158,33 @@ h1{{color:#1e40af;text-align:center;font-size:1.3em}}
 table{{width:100%;border-collapse:collapse;margin:12px 0}}th{{background:#1e40af;color:#fff;padding:8px 12px;text-align:left;font-size:.85em}}
 td{{padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:.88em}}.num{{text-align:right;font-family:monospace}}
 .total{{font-weight:700;background:#eff6ff}}
+.info-box{{display:flex;gap:20px;justify-content:center;margin:14px 0;flex-wrap:wrap}}
+.info-item{{text-align:center;padding:8px 16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0}}
+.info-item .val{{font-size:1.2em;font-weight:700;color:#1e40af}}
+.info-item .lab{{font-size:.75em;color:#64748b}}
 .print-btn{{position:fixed;top:20px;right:20px;padding:10px 20px;background:#1e40af;color:#fff;border:none;border-radius:8px;cursor:pointer}}
 @media print{{.print-btn{{display:none}}}}</style></head><body>
 <button class="print-btn" onclick="window.print()">Imprimer / PDF</button>
 {header}
 <h1>BULLETIN DE PAIE</h1>
 <p style="text-align:center;color:#64748b">Periode: {bulletin["mois"]} | Salarie: {bulletin["prenom_salarie"]} {bulletin["nom_salarie"]}</p>
+{alertes_html}
+<div class="info-box">
+<div class="info-item"><div class="val">{bulletin["heures_travaillees"]}h</div><div class="lab">Heures travaillees</div></div>
+<div class="info-item"><div class="val">{bulletin["taux_horaire"]:.2f} EUR</div><div class="lab">Taux horaire</div></div>
+<div class="info-item"><div class="val">{bulletin["heures_supplementaires"]:.1f}h</div><div class="lab">Heures sup.</div></div>
+</div>
 <table>
 <tr><th>Rubrique</th><th class="num">Part patronale</th><th class="num">Part salariale</th></tr>
-<tr><td><strong>Salaire de base</strong></td><td class="num">{bulletin["salaire_base"]:.2f}</td><td></td></tr>
-{"<tr><td>Heures supplementaires</td><td class='num'>" + f"{bulletin['montant_hs']:.2f}" + "</td><td></td></tr>" if bulletin["montant_hs"] > 0 else ""}
+<tr><td><strong>Salaire de base ({bulletin["heures_travaillees"]}h x {bulletin["taux_horaire"]:.2f} EUR)</strong></td><td class="num">{bulletin["salaire_base"]:.2f}</td><td></td></tr>
+{"<tr><td>Heures supplementaires (" + f"{bulletin['heures_supplementaires']:.1f}" + "h - maj. 25%/50%)</td><td class='num'>" + f"{bulletin['montant_hs']:.2f}" + "</td><td></td></tr>" if bulletin["montant_hs"] > 0 else ""}
 {"<tr><td>Primes</td><td class='num'>" + f"{bulletin['primes']:.2f}" + "</td><td></td></tr>" if bulletin["primes"] > 0 else ""}
 {"<tr><td>Avantages en nature</td><td class='num'>" + f"{bulletin['avantages_nature']:.2f}" + "</td><td></td></tr>" if bulletin["avantages_nature"] > 0 else ""}
 {"<tr><td style='color:#ef4444'>Retenue absences (-" + str(bulletin['retenue_absences']) + "j)</td><td class='num' style='color:#ef4444'>-" + f"{bulletin['retenue_absences']:.2f}" + "</td><td></td></tr>" if bulletin["retenue_absences"] > 0 else ""}
 <tr class="total"><td>BRUT TOTAL</td><td class="num">{bulletin["brut_total"]:.2f}</td><td></td></tr>
 {lignes_html}
 <tr class="total"><td>Total cotisations</td><td class="num">{bulletin["total_patronal"]:.2f}</td><td class="num">{bulletin["total_salarial"]:.2f}</td></tr>
+{tepa_html}
 <tr class="total" style="background:#f0fdf4"><td>NET A PAYER AVANT IMPOT</td><td></td><td class="num" style="font-size:1.1em">{bulletin["net_a_payer"]:.2f} EUR</td></tr>
 <tr class="total" style="background:#eff6ff"><td>COUT TOTAL EMPLOYEUR</td><td class="num">{bulletin["cout_total_employeur"]:.2f} EUR</td><td></td></tr>
 </table>
@@ -6246,7 +6558,7 @@ APP_HTML += """
 <input type="checkbox" id="chk-integrer" checked style="width:auto;margin:0">
 <label for="chk-integrer" style="margin:0;font-weight:500;color:var(--p);font-size:.86em;cursor:pointer">Integrer les documents dans la bibliotheque</label>
 </div>
-<button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button>
+<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button><button class="btn btn-s" onclick="genererDemo()" title="Generer des documents fictifs pour tester">&#128295; Documents de test</button></div>
 <div class="prg" id="prg-az"><div class="prg-bar"><div class="prg-fill" id="pf-az"></div></div><div class="prg-txt" id="pt-az">Import...</div></div>
 </div>
 <div id="res-analyse" style="display:none">
@@ -6257,6 +6569,7 @@ APP_HTML += """
 </div>
 <div class="g4" id="az-dashboard"></div>
 </div>
+<div class="card" id="az-impact-detail" style="display:none"></div>
 <div class="card" id="az-fichiers-card"><h2>Fichiers analyses</h2><div id="az-fichiers-list"></div></div>
 <div class="card" id="az-integration-card" style="display:none"><h2>Integration automatique</h2><div id="az-integration-results"></div></div>
 <div class="card" id="az-audit-card" style="display:none"><h2>Points de controle Audit</h2><div id="az-audit-checks"></div></div>
@@ -6466,7 +6779,7 @@ APP_HTML += """
 <div class="tc" id="sim-exo"><h2>Exonerations et aides a l emploi</h2>
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulez les exonerations applicables selon zone geographique, statut du salarie, convention collective et effectif.</p>
 <div class="g4"><div><label>Brut mensuel</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif</label><input type="number" id="exo-eff" value="10"></div><div><label>Age salarie</label><input type="number" id="exo-age" value="30"></div><div><label>Duree contrat (mois)</label><input type="number" id="exo-duree" value="0"></div></div>
-<div class="g3"><div><label>Zone geographique</label><select id="exo-zone"><option value="metropole">Metropole</option><option value="zrr">ZRR (Revitalisation rurale)</option><option value="zfu">ZFU-TE (Franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="outremer">Outre-mer (DOM-TOM)</option></select></div><div><label>Statut salarie</label><select id="exo-statut"><option value="standard">Standard</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div></div>
+<div class="g4"><div><label>Zone geographique</label><select id="exo-zone"><option value="metropole">Metropole</option><option value="zrr">ZRR (Revitalisation rurale)</option><option value="zfu">ZFU-TE (Franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="outremer">Outre-mer (DOM-TOM)</option><option value="ber">BER (Bassin emploi a redynamiser)</option></select></div><div><label>Statut salarie</label><select id="exo-statut"><option value="standard">Standard</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Heures sup /mois</label><input type="number" step="0.5" id="exo-hs" value="0"></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div></div>
 <button class="btn btn-blue" onclick="simExo()">Simuler les exonerations</button><div id="sim-exo-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-masse"><h2>Simulation masse salariale</h2>
@@ -6708,11 +7021,17 @@ APP_HTML += """
 </div>
 <div class="tc" id="rh-bulletins">
 <h2>Generation de bulletins de paie</h2>
+<div class="al info" style="margin-bottom:12px"><span class="ai">&#128161;</span><span>Renseignez l ID contrat <strong>ou</strong> saisissez directement le nom et salaire. Le bulletin inclut la verification SMIC et convention collective.</span></div>
 <div class="g2"><div>
-<label>Contrat (ID)</label><input id="rh-bp-ctr" placeholder="ID du contrat">
-<label>Mois (YYYY-MM)</label><input id="rh-bp-mois" placeholder="2025-01">
-<label>Heures supplementaires</label><input type="number" step="0.5" id="rh-bp-hs" value="0">
+<label>Contrat (ID) <small style="color:var(--tx2)">- auto-remplit les champs</small></label><input id="rh-bp-ctr" placeholder="ID du contrat" oninput="prefillBulletin(this.value)">
+<label>Nom</label><input id="rh-bp-nom" placeholder="NOM">
+<label>Prenom</label><input id="rh-bp-prenom" placeholder="Prenom">
+<label>Mois (YYYY-MM)</label><input id="rh-bp-mois" placeholder="2026-01">
+<label>Salaire brut mensuel (EUR)</label><input type="number" step="0.01" id="rh-bp-brut" placeholder="0.00">
+<label>Cadre</label><select id="rh-bp-cadre"><option value="false">Non</option><option value="true">Oui</option></select>
 </div><div>
+<label>Heures travaillees /mois</label><input type="number" step="0.01" id="rh-bp-heures" value="151.67">
+<label>Heures supplementaires</label><input type="number" step="0.5" id="rh-bp-hs" value="0">
 <label>Primes (EUR)</label><input type="number" step="0.01" id="rh-bp-primes" value="0">
 <label>Avantages en nature (EUR)</label><input type="number" step="0.01" id="rh-bp-avantages" value="0">
 <label>Jours absence</label><input type="number" step="0.5" id="rh-bp-abs" value="0">
@@ -6866,6 +7185,17 @@ function addF(files){for(var i=0;i<files.length;i++){var f=files[i];var dup=fals
 function renderF(){var el=document.getElementById("fl-analyse");var h="";for(var i=0;i<fichiers.length;i++){h+="<div class='fi'><span class='nm'>"+fichiers[i].name+"</span><span style='color:var(--tx2);font-size:.8em'>"+(fichiers[i].size/1024).toFixed(1)+" Ko</span><button class='rm' onclick='rmF("+i+")'>&times;</button></div>";}el.innerHTML=h;document.getElementById("btn-az").disabled=fichiers.length===0;}
 function rmF(i){fichiers.splice(i,1);renderF();}
 
+function genererDemo(){
+fetch("/api/simulation/demo-documents?type_demo=complet&avec_anomalies=true").then(safeJson).then(function(r){
+var docs=r.documents||[];if(!docs.length){toast("Aucun document genere.");return;}
+for(var i=0;i<docs.length;i++){var d=docs[i];var content=d.contenu.replace(/\\n/g,"\n");var blob=new Blob([content],{type:"text/plain"});var f=new File([blob],d.nom,{type:d.type||"text/plain"});fichiers.push(f);}
+renderF();
+var msg=r.nb_documents+" documents de test generes";
+var anomMsg="";for(var i=0;i<docs.length;i++){var an=docs[i].anomalies_attendues||[];if(an.length)anomMsg+=docs[i].nom+": "+an.join(", ")+". ";}
+if(anomMsg)msg+=" avec anomalies volontaires. "+anomMsg;
+toast(msg,"ok");
+}).catch(function(e){toast("Erreur: "+e.message);});}
+
 function lancerAnalyse(){
 if(!fichiers.length)return;
 var btn=document.getElementById("btn-az"),prg=document.getElementById("prg-az"),fill=document.getElementById("pf-az"),txt=document.getElementById("pt-az");
@@ -6885,13 +7215,35 @@ return resp.json().then(function(data){analysisData=data;showJsonResults(data);}
 function showJsonResults(data){
 var s=data.synthese||{};var impact=s.impact_financier_total||0;
 var dashNr=s.nb_fichiers_non_reconnus||0;
-document.getElementById("az-dashboard").innerHTML="<div class='sc blue'><div class='val'>"+((data.constats||[]).length)+"</div><div class='lab'>Anomalies</div></div><div class='sc "+(impact>1000?"red":"green")+"'><div class='val'>"+impact.toFixed(2)+" EUR</div><div class='lab'>Impact</div></div><div class='sc green'><div class='val'>"+Math.max(0,100-(s.score_risque_global||0))+"%</div><div class='lab'>Conformite</div></div><div class='sc'><div class='val'>"+(s.nb_fichiers||0)+"</div><div class='lab'>Fichiers</div></div>"+(dashNr>0?"<div class='sc red'><div class='val'>"+dashNr+"</div><div class='lab'>Non reconnus</div></div>":"");
+var nbAno=(data.constats||[]).length;var conform=Math.max(0,100-(s.score_risque_global||0));
+var dashH="<div class='sc blue' style='cursor:pointer' data-scroll='az-findings' onclick='scrollToEl(this)'><div class='val'>"+nbAno+"</div><div class='lab'>Anomalies &#8595;</div></div>";
+dashH+="<div class='sc "+(impact>1000?"red":"green")+"' style='cursor:pointer' data-toggle='az-impact-detail' onclick='toggleDetailAttr(this)'><div class='val'>"+impact.toFixed(2)+" EUR</div><div class='lab'>Impact &#8595;</div></div>";
+dashH+="<div class='sc green' style='cursor:pointer' data-scroll='az-audit-card' onclick='scrollToEl(this)'><div class='val'>"+conform+"%</div><div class='lab'>Conformite &#8595;</div></div>";
+dashH+="<div class='sc'><div class='val'>"+(s.nb_fichiers||0)+"</div><div class='lab'>Fichiers</div></div>";
+if(dashNr>0)dashH+="<div class='sc red'><div class='val'>"+dashNr+"</div><div class='lab'>Non reconnus</div></div>";
+document.getElementById("az-dashboard").innerHTML=dashH;
+var impactDetail=document.getElementById("az-impact-detail");
+if(impactDetail){
+var ih="<h3>Detail de l impact financier</h3>";
+var charges={};var constats=data.constats||[];
+for(var i=0;i<constats.length;i++){var c=constats[i];var cat=c.categorie||c.type||"Autre";if(!charges[cat])charges[cat]={total:0,items:[]};var imp=c.impact_financier||0;charges[cat].total+=imp;charges[cat].items.push({desc:c.description||c.titre||"",impact:imp,severity:c.severite||c.niveau||"info"});}
+ih+="<table><tr><th>Categorie</th><th class='num'>Impact (EUR)</th><th class='num'>Nb anomalies</th><th>Detail</th></tr>";
+for(var cat in charges){var g=charges[cat];ih+="<tr style='cursor:pointer' onclick='toggleNextRow(this)'><td><strong>"+cat+"</strong></td><td class='num' style='color:"+(g.total>500?"var(--r)":"var(--tx)")+"'>"+g.total.toFixed(2)+"</td><td class='num'>"+g.items.length+"</td><td style='font-size:.82em;color:var(--tx2)'>Cliquer pour voir</td></tr>";
+ih+="<tr style='display:none'><td colspan='4'><div style='padding:6px;background:var(--bg2);border-radius:6px;font-size:.84em'>";
+for(var j=0;j<g.items.length;j++){var it=g.items[j];ih+="<div style='display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid var(--brd)'><span>"+it.desc+"</span><span class='num' style='min-width:80px'>"+(it.impact||0).toFixed(2)+" EUR</span></div>";}
+ih+="</div></td></tr>";}
+ih+="</table>";
+impactDetail.innerHTML=ih;impactDetail.style.display="block";}
 renderAnomalies("az-findings",data.constats||[]);
 var recos=data.recommandations||[];var rh="";for(var i=0;i<recos.length;i++){rh+="<div class='al info'><span class='ai'>&#128161;</span><span><strong>#"+(i+1)+"</strong> "+(recos[i].description||recos[i].titre||"")+"</span></div>";}
 document.getElementById("az-reco").innerHTML=rh||"<p style='color:var(--tx2)'>Aucune.</p>";
 if(data.html_report){document.getElementById("az-html-card").style.display="block";document.getElementById("az-html-frame").srcdoc=data.html_report;}else{document.getElementById("az-html-card").style.display="none";}
 showFileInterpretation(data);showAuditChecks(data);showIntegrationResults(data);
 document.getElementById("dash-docs").textContent=(s.nb_fichiers||0);loadDash();}
+function toggleDetail(id){var el=document.getElementById(id);if(el)el.style.display=el.style.display==="none"?"block":"none";}
+function toggleDetailAttr(src){var id=src.dataset.toggle;if(id)toggleDetail(id);}
+function toggleNextRow(tr){var next=tr.nextElementSibling;if(next)next.style.display=next.style.display==="none"?"":"none";}
+function scrollToEl(src){var id=src.dataset.scroll;var el=id?document.getElementById(id):null;if(el)el.scrollIntoView({behavior:"smooth"});}
 function resetAz(){fichiers=[];analysisData=null;renderF();document.getElementById("res-analyse").style.display="none";document.getElementById("az-audit-card").style.display="none";document.getElementById("az-integration-card").style.display="none";document.getElementById("btn-az").disabled=false;toast("Pret pour une nouvelle analyse.","ok");}
 
 /* === BIBLIOTHEQUE === */
@@ -7243,7 +7595,7 @@ function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementByI
 function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simCout(){var p="brut_mensuel="+gv("ce-brut")+"&effectif="+gv("ce-eff")+"&est_cadre="+gv("ce-cadre")+"&primes="+gv("ce-primes")+"&avantages_nature="+gv("ce-avantages")+"&frais_km="+gv("ce-km")+"&tickets_restaurant="+gv("ce-tr")+"&mutuelle_employeur="+gv("ce-mut");fetch("/api/simulation/cout-employeur?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_total.toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_mensuel.toFixed(2)+"</div><div class='lab'>Cout total/mois</div></div><div class='sc'><div class='val'>"+r.cout_total_annuel.toFixed(2)+"</div><div class='lab'>Cout total/an</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";h+="<tr><td>Charges patronales URSSAF</td><td class='num'>"+r.charges_patronales_urssaf.toFixed(2)+"</td></tr>";h+="<tr><td>Charges salariales</td><td class='num'>"+r.charges_salariales.toFixed(2)+"</td></tr>";h+="<tr><td>Formation professionnelle</td><td class='num'>"+r.formation_professionnelle.toFixed(2)+"</td></tr>";h+="<tr><td>Taxe apprentissage</td><td class='num'>"+r.taxe_apprentissage.toFixed(2)+"</td></tr>";h+="<tr><td>Effort construction</td><td class='num'>"+r.effort_construction.toFixed(2)+"</td></tr>";h+="<tr><td>Participation obligatoire</td><td class='num'>"+r.participation_obligatoire.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total charges annexes</td><td class='num'>"+r.total_charges_annexes.toFixed(2)+"</td></tr>";h+="<tr><td>Avantages nature</td><td class='num'>"+r.avantages_nature.toFixed(2)+"</td></tr>";h+="<tr><td>Frais km rembourses</td><td class='num'>"+r.frais_km_rembourses.toFixed(2)+"</td></tr>";h+="<tr><td>Tickets restaurant</td><td class='num'>"+r.tickets_restaurant.toFixed(2)+"</td></tr>";h+="<tr><td>Mutuelle employeur</td><td class='num'>"+r.mutuelle_employeur.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total avantages</td><td class='num'>"+r.total_avantages.toFixed(2)+"</td></tr></table>";h+="<div class='g4' style='margin-top:12px'><div class='sc'><div class='val'>"+r.repartition.salaire_net+"%</div><div class='lab'>Salaire net</div></div><div class='sc'><div class='val'>"+r.repartition.charges_salariales+"%</div><div class='lab'>Charges sal.</div></div><div class='sc'><div class='val'>"+r.repartition.charges_patronales+"%</div><div class='lab'>Charges pat.</div></div><div class='sc'><div class='val'>"+r.repartition.annexes_avantages+"%</div><div class='lab'>Annexes+Avantages</div></div></div>";h+="<p style='margin-top:10px;color:var(--tx2);font-size:.84em'>Ratio cout/net : <b>"+r.ratio_cout_net+"x</b> - Pour 1 EUR net verse, l employeur depense "+r.ratio_cout_net+" EUR</p>";document.getElementById("sim-cout-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&ccn="+encodeURIComponent(gv("exo-ccn"));fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc green'><div class='val'>"+r.total_exonerations_mensuelles.toFixed(2)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+r.total_exonerations_annuelles.toFixed(2)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie</div></div></div>";h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.charges_patronales_normales.toFixed(2)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+r.charges_patronales_apres_exo.toFixed(2)+"</div><div class='lab'>Charges apres exo</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel</th><th class='num'>Annuel</th><th>Statut</th></tr>";var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"color:var(--green)":"color:var(--tx2)";h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.8em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"Applicable":"Non applicable")+"</td></tr>";}h+="</table>";h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Ratio SMIC: "+r.ratio_smic+" | Statut: "+r.statut_salarie+"</p>";document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"));fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc green'><div class='val'>"+r.total_exonerations_mensuelles.toFixed(2)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+r.total_exonerations_annuelles.toFixed(2)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie</div></div></div>";h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.charges_patronales_normales.toFixed(2)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+r.charges_patronales_apres_exo.toFixed(2)+"</div><div class='lab'>Charges apres exo</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel</th><th class='num'>Annuel</th><th>Statut</th></tr>";var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"color:var(--green)":"color:var(--tx2)";h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.8em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"Applicable":"Non applicable")+"</td></tr>";}h+="</table>";h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Ratio SMIC: "+r.ratio_smic+" | Statut: "+r.statut_salarie+"</p>";document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMasse(){var p="brut_moyen="+gv("ms-brut")+"&effectif="+gv("ms-eff")+"&augmentation_pct="+gv("ms-aug")+"&inflation_pct="+gv("ms-infl")+"&frais_km_moyen="+gv("ms-km")+"&avantages_nature_moyen="+gv("ms-an")+"&primes_variables_pct="+gv("ms-primes")+"&turnover_pct="+gv("ms-turn");fetch("/api/simulation/masse-salariale?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+fmt(r.masse_actuelle)+"</div><div class='lab'>Masse actuelle</div></div><div class='sc amber'><div class='val'>"+fmt(r.masse_apres_augmentation)+"</div><div class='lab'>Apres augmentation</div></div><div class='sc'><div class='val'>"+fmt(r.cout_global_projete)+"</div><div class='lab'>Cout global projete</div></div><div class='sc "+(r.evolution_pct>0?"red":"green")+"'><div class='val'>"+(r.evolution_pct>0?"+":"")+r.evolution_pct+"%</div><div class='lab'>Evolution</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant annuel</th></tr>";h+="<tr><td>Masse actuelle (brut)</td><td class='num'>"+fmt(r.masse_actuelle)+"</td></tr>";h+="<tr><td>Charges patronales actuelles (45%)</td><td class='num'>"+fmt(r.charges_patronales_actuelles)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total actuel</td><td class='num'>"+fmt(r.cout_total_actuel)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Impact augmentation (+"+r.augmentation_pct+"%)</td></tr>";h+="<tr><td>Nouveau brut moyen</td><td class='num'>"+r.nouveau_brut_moyen.toFixed(2)+" EUR/mois</td></tr>";h+="<tr><td>Cout augmentation (brut)</td><td class='num'>"+fmt(r.cout_augmentation_brut)+"</td></tr>";h+="<tr><td>Charges supplementaires</td><td class='num'>"+fmt(r.cout_augmentation_charges)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total augmentation</td><td class='num'>"+fmt(r.cout_augmentation_total)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Autres postes</td></tr>";h+="<tr><td>Perte pouvoir achat (inflation "+r.augmentation_pct+"% vs "+gv("ms-infl")+"%)</td><td class='num'>"+fmt(r.perte_pouvoir_achat_inflation)+"</td></tr>";h+="<tr><td>Ecart augmentation/inflation</td><td class='num'>"+fmt(r.ecart_augmentation_inflation)+"</td></tr>";h+="<tr><td>Primes variables</td><td class='num'>"+fmt(r.primes_variables_total)+"</td></tr>";h+="<tr><td>Charges sur primes</td><td class='num'>"+fmt(r.charges_primes)+"</td></tr>";h+="<tr><td>Frais kilometriques (non soumis)</td><td class='num'>"+fmt(r.frais_km_total)+"</td></tr>";h+="<tr><td>Avantages en nature (soumis)</td><td class='num'>"+fmt(r.avantages_nature_total)+"</td></tr>";h+="<tr><td>Charges sur avantages</td><td class='num'>"+fmt(r.charges_avantages)+"</td></tr>";h+="<tr><td>Cout turnover estime</td><td class='num'>"+fmt(r.cout_turnover_estime)+"</td></tr>";h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT GLOBAL PROJETE</td><td class='num'>"+fmt(r.cout_global_projete)+"</td></tr></table>";document.getElementById("sim-masse-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simSeuils(){fetch("/api/simulation/seuils-effectif?effectif_actuel="+gv("se-eff")+"&masse_salariale_annuelle="+gv("se-masse")).then(safeJson).then(function(r){var h="";if(r.prochain_seuil){h+="<div class='g3'><div class='sc amber'><div class='val'>"+r.prochain_seuil+"</div><div class='lab'>Prochain seuil</div></div><div class='sc blue'><div class='val'>"+r.marge_avant_seuil+"</div><div class='lab'>Salaries avant seuil</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_prochain_seuil)+"</div><div class='lab'>Cout franchissement</div></div></div>";}h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.effectif_actuel+"</div><div class='lab'>Effectif actuel</div></div><div class='sc amber'><div class='val'>"+fmt(r.total_obligations_actuelles)+"</div><div class='lab'>Obligations actuelles</div></div></div>";var seuils=r.seuils||[];for(var i=0;i<seuils.length;i++){var s=seuils[i];var obligs=s.obligations||[];var franchi=obligs.length>0&&obligs[0].franchi;h+="<div style='margin-top:14px;padding:10px;border-radius:8px;background:"+(franchi?"var(--bg2)":"var(--bg1)")+";border:1px solid "+(franchi?"var(--green)":"var(--border)")+"'>";h+="<h3 style='margin:0 0 6px'>"+(franchi?"&#9989; ":"&#9898; ")+"Seuil "+s.seuil+" salaries</h3>";h+="<table style='margin:0'><tr><th>Obligation</th><th>Reference</th><th class='num'>Cout estime</th><th>Detail</th></tr>";for(var j=0;j<obligs.length;j++){var o=obligs[j];h+="<tr><td>"+o.nom+"</td><td style='font-size:.8em'>"+o.reference+"</td><td class='num'>"+fmt(o.cout_estime)+"</td><td style='font-size:.84em;color:var(--tx2)'>"+o.detail+"</td></tr>";}h+="</table></div>";}document.getElementById("sim-seuils-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simFinContrat(){var p="type_fin="+gv("fc-type")+"&salaire_brut="+gv("fc-brut")+"&anciennete_mois="+gv("fc-anc")+"&est_cadre="+gv("fc-cadre")+"&motif="+gv("fc-motif");fetch("/api/simulation/fin-contrat?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.type_fin.replace(/_/g," ")+"</div><div class='lab'>Type</div></div><div class='sc'><div class='val'>"+r.anciennete_ans+" ans</div><div class='lab'>Anciennete</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_total)+"</div><div class='lab'>Cout total</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";var skip={"type_fin":1,"salaire_brut":1,"anciennete_mois":1,"anciennete_ans":1,"cout_total":1,"reference":1,"motif":1,"note":1,"exceptions":1};for(var k in r){if(!skip[k]&&typeof r[k]==="number"){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+r[k].toFixed(2)+"</td></tr>";}}h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT TOTAL</td><td class='num'>"+r.cout_total.toFixed(2)+"</td></tr></table>";if(r.reference)h+="<p style='margin-top:8px;font-size:.82em;color:var(--tx2)'>Ref: "+r.reference+"</p>";if(r.note)h+="<p style='font-size:.82em;color:var(--amber)'>"+r.note+"</p>";if(r.exceptions)h+="<p style='font-size:.82em;color:var(--tx2)'>"+r.exceptions+"</p>";document.getElementById("sim-fc-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
@@ -7631,6 +7983,7 @@ for(var tp in colors){h+="<span style='display:inline-flex;align-items:center;ga
 h+="</div>";
 cal.innerHTML=h;});}
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
+function voirBulletinDoc(el){var bid=el.dataset.bid;if(bid)window.open("/api/rh/bulletins/"+bid+"/document","_blank");}
 
 function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ec-sal").value);fd.append("objet",document.getElementById("rh-ec-obj").value);fd.append("contenu",document.getElementById("rh-ec-txt").value);fd.append("type_echange",document.getElementById("rh-ec-type").value);fd.append("date_echange",document.getElementById("rh-ec-date").value);
 rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
@@ -7655,13 +8008,22 @@ if(a.delai_personnalise)h+="<p style='margin-top:4px;color:var(--p2)'>Delai de n
 h+="</div></div>";}
 h+="<style>.al-detail.show{display:block!important}</style>";
 el.innerHTML=h;});}
-function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("heures_sup",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences",document.getElementById("rh-bp-abs").value||"0");
+function prefillBulletin(cid){if(!cid)return;rhGet("/api/rh/contrats",function(list){for(var i=0;i<list.length;i++){var c=list[i];if(c.id===cid){document.getElementById("rh-bp-nom").value=c.nom_salarie||c.nom||"";document.getElementById("rh-bp-prenom").value=c.prenom_salarie||c.prenom||"";document.getElementById("rh-bp-brut").value=c.salaire_brut||"";if(c.duree_hebdo)document.getElementById("rh-bp-heures").value=(parseFloat(c.duree_hebdo)/35*151.67).toFixed(2);break;}}});}
+function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
 rhPost("/api/rh/bulletins/generer",fd,function(d){
-var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Bulletin genere pour <strong>"+d.mois+"</strong></span></div>";
+var h="";
+if(d.alertes&&d.alertes.length){for(var a=0;a<d.alertes.length;a++){h+="<div class='al "+(d.alertes[a].niveau==="haute"?"err":"warn")+"'><span class='ai'>&#9888;</span><span>"+d.alertes[a].message+"</span></div>";}}
+h+="<div class='al ok'><span class='ai'>&#9989;</span><span>Bulletin genere pour <strong>"+d.mois+"</strong> - "+(d.prenom_salarie||"")+" "+(d.nom_salarie||"")+"</span></div>";
 h+="<div class='card' style='background:var(--pl);margin-top:8px'>";
-h+="<div class='g3'><div class='sc blue'><div class='val'>"+(d.brut_total||0).toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+(d.net_a_payer||0).toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+(d.cout_employeur||0).toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div>";
+h+="<div class='g4'><div class='sc blue'><div class='val'>"+(d.brut_total||0).toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+(d.net_a_payer||0).toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+(d.cout_total_employeur||0).toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+(d.taux_horaire||0).toFixed(2)+" EUR/h</div><div class='lab'>Taux horaire</div></div></div>";
+h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin:10px 0;font-size:.84em'>";
+h+="<span><strong>Heures:</strong> "+(d.heures_travaillees||151.67)+"h</span>";
+h+="<span><strong>Base:</strong> "+(d.salaire_base||0).toFixed(2)+" EUR</span>";
+if(d.heures_supplementaires>0)h+="<span><strong>HS:</strong> "+d.heures_supplementaires+"h = "+(d.montant_hs||0).toFixed(2)+" EUR</span>";
+if(d.retenue_absences>0)h+="<span style='color:var(--r)'><strong>Absences:</strong> -"+(d.retenue_absences||0).toFixed(2)+" EUR</span>";
+h+="</div>";
 if(d.lignes){h+="<table style='margin-top:10px'><tr><th>Rubrique</th><th class='num'>Base</th><th class='num'>Taux sal.</th><th class='num'>Part sal.</th><th class='num'>Taux pat.</th><th class='num'>Part pat.</th></tr>";for(var i=0;i<d.lignes.length;i++){var l=d.lignes[i];h+="<tr><td>"+l.libelle+"</td><td class='num'>"+(l.base||0).toFixed(2)+"</td><td class='num'>"+(l.taux_salarial||0).toFixed(2)+"%</td><td class='num'>"+(l.montant_salarial||0).toFixed(2)+"</td><td class='num'>"+(l.taux_patronal||0).toFixed(2)+"%</td><td class='num'>"+(l.montant_patronal||0).toFixed(2)+"</td></tr>";}h+="</table>";}
-h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick='window.open("+JSON.stringify("/api/rh/bulletins/"+d.id+"/document")+","+JSON.stringify("_blank")+")'>Visualiser / Imprimer</button></div>";
+h+="<button class='btn btn-s btn-sm' style='margin-top:8px' data-bid='"+d.id+"' onclick='voirBulletinDoc(this)'>Visualiser / Imprimer</button></div>";
 document.getElementById("rh-bp-res").innerHTML=h;loadRHBulletins();});}
 function loadRHBulletins(){rhGet("/api/rh/bulletins",function(list){var el=document.getElementById("rh-bp-list");if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun bulletin.</p>";return;}
 var h="<table><tr><th>Mois</th><th>Salarie</th><th class='num'>Brut</th><th class='num'>Net</th><th>Actions</th></tr>";
