@@ -3196,7 +3196,7 @@ async def knowledge_base():
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.0", "build": "20260222b", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
+    return {"version": "3.8.0", "build": "20260222c", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
