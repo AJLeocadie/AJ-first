@@ -40,7 +40,7 @@ from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.7.0",
+    version="3.8.0",
 )
 
 app.add_middleware(
@@ -2948,6 +2948,148 @@ async def telecharger_tous_documents_demo(
 
 
 # ==============================
+# IDCC / CONVENTIONS COLLECTIVES
+# ==============================
+
+@app.get("/api/idcc/recherche")
+async def idcc_recherche(terme: str = Query("")):
+    from urssaf_analyzer.config.idcc_database import rechercher_idcc
+    return {"terme": terme, "resultats": rechercher_idcc(terme)}
+
+
+@app.get("/api/idcc/{idcc}")
+async def idcc_detail(idcc: str):
+    from urssaf_analyzer.config.idcc_database import get_ccn_par_idcc, get_prevoyance_par_idcc
+    ccn = get_ccn_par_idcc(idcc)
+    if not ccn:
+        raise HTTPException(404, f"IDCC {idcc} non trouve dans la base")
+    prev_cadre = get_prevoyance_par_idcc(idcc, est_cadre=True)
+    prev_nc = get_prevoyance_par_idcc(idcc, est_cadre=False)
+    return {"idcc": idcc, "ccn": ccn, "prevoyance_cadre": prev_cadre, "prevoyance_non_cadre": prev_nc}
+
+
+# ==============================
+# TAUX AT/MP
+# ==============================
+
+@app.get("/api/atmp/taux")
+async def atmp_taux(code_naf: str = Query("62.02"), effectif: int = Query(10)):
+    from urssaf_analyzer.config.taux_atmp import get_taux_atmp
+    return get_taux_atmp(code_naf, effectif)
+
+
+# ==============================
+# REGIMES SPECIAUX
+# ==============================
+
+@app.get("/api/regimes")
+async def regimes_liste():
+    from urssaf_analyzer.rules.regimes_speciaux import lister_regimes
+    return {"regimes": lister_regimes()}
+
+
+@app.get("/api/regimes/{code}")
+async def regime_detail(code: str):
+    from urssaf_analyzer.rules.regimes_speciaux import get_regime
+    regime = get_regime(code)
+    if not regime:
+        raise HTTPException(404, f"Regime {code} non trouve")
+    return regime
+
+
+@app.get("/api/regimes/detecter")
+async def regime_detecter(
+    code_naf: str = Query(""), departement: str = Query(""),
+    idcc: str = Query(""), texte: str = Query(""),
+):
+    from urssaf_analyzer.rules.regimes_speciaux import detecter_regime
+    codes = detecter_regime(code_naf, departement, idcc, texte)
+    return {"regimes_detectes": codes, "regime_general": True, "note": "Le regime general s applique toujours sauf substitution complete"}
+
+
+@app.get("/api/regimes/msa/cotisations")
+async def regime_msa_cotisations(brut_mensuel: float = Query(2000), effectif: int = Query(5)):
+    from urssaf_analyzer.rules.regimes_speciaux import calculer_cotisations_msa
+    return calculer_cotisations_msa(Decimal(str(brut_mensuel)), effectif)
+
+
+@app.get("/api/regimes/alsace-moselle/supplement")
+async def regime_alsace_supplement(brut_mensuel: float = Query(2500)):
+    from urssaf_analyzer.rules.regimes_speciaux import calculer_supplement_alsace_moselle
+    return calculer_supplement_alsace_moselle(Decimal(str(brut_mensuel)))
+
+
+# ==============================
+# TRAVAILLEURS DETACHES / ETRANGERS
+# ==============================
+
+@app.get("/api/detachement/reglementation")
+async def detachement_reglementation():
+    from urssaf_analyzer.rules.travailleurs_detaches import DETACHEMENT_UE
+    return DETACHEMENT_UE
+
+
+@app.get("/api/detachement/verifier")
+async def detachement_verifier(
+    nationalite: str = Query(""),
+    pays_employeur: str = Query(""),
+    a1_present: bool = Query(False),
+    sipsi_declare: bool = Query(False),
+    duree_mois: int = Query(6),
+    remuneration_brute: float = Query(0),
+    secteur_btp: bool = Query(False),
+    carte_btp: bool = Query(False),
+):
+    from urssaf_analyzer.rules.travailleurs_detaches import verifier_conformite_detachement
+    return verifier_conformite_detachement(
+        nationalite=nationalite, pays_employeur=pays_employeur,
+        a1_present=a1_present, sipsi_declare=sipsi_declare,
+        duree_mois=duree_mois, remuneration_brute=Decimal(str(remuneration_brute)),
+        secteur_btp=secteur_btp, carte_btp=carte_btp,
+    )
+
+
+@app.get("/api/detachement/regime-applicable")
+async def detachement_regime_applicable(
+    nationalite: str = Query(""),
+    pays_residence: str = Query(""),
+    pays_employeur: str = Query(""),
+    certificat_a1: bool = Query(False),
+    convention_bilaterale: bool = Query(False),
+):
+    from urssaf_analyzer.rules.travailleurs_detaches import determiner_regime_applicable
+    return determiner_regime_applicable(
+        nationalite=nationalite, pays_residence=pays_residence,
+        pays_employeur=pays_employeur, certificat_a1=certificat_a1,
+        convention_bilaterale=convention_bilaterale,
+    )
+
+
+@app.get("/api/detachement/conventions-bilaterales")
+async def detachement_conventions():
+    from urssaf_analyzer.rules.travailleurs_detaches import CONVENTIONS_BILATERALES
+    return CONVENTIONS_BILATERALES
+
+
+@app.get("/api/travailleurs-etrangers/reglementation")
+async def travailleurs_etrangers_reglementation():
+    from urssaf_analyzer.rules.travailleurs_detaches import TRAVAILLEURS_ETRANGERS
+    return TRAVAILLEURS_ETRANGERS
+
+
+# ==============================
+# ANALYSE MULTI-ANNUELLE
+# ==============================
+
+@app.get("/api/analyse/multi-annuelle")
+async def analyse_multi_annuelle():
+    from urssaf_analyzer.rules.analyse_multiannuelle import AnalyseMultiAnnuelle
+    analyseur = AnalyseMultiAnnuelle()
+    analyseur.alimenter_depuis_knowledge(_biblio_knowledge)
+    return analyseur.analyser()
+
+
+# ==============================
 # VEILLE
 # ==============================
 
@@ -3054,7 +3196,7 @@ async def knowledge_base():
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.7.0", "build": "20260222", "audit_checks": 63}
+    return {"version": "3.8.0", "build": "20260222", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
