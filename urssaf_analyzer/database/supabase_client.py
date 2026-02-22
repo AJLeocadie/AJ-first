@@ -561,6 +561,24 @@ CREATE TABLE IF NOT EXISTS ua_alertes (
     date_traitement TIMESTAMPTZ
 );
 
+-- Veille : textes juridiques suivis (equivalent de veille_textes SQLite)
+CREATE TABLE IF NOT EXISTS ua_veille_textes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    titre TEXT NOT NULL,
+    resume TEXT DEFAULT '',
+    url TEXT DEFAULT '',
+    date_publication DATE,
+    date_effet DATE,
+    annee_reference INTEGER,
+    categorie TEXT DEFAULT '',
+    impact TEXT DEFAULT '',
+    texte_complet TEXT DEFAULT '',
+    actif BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
 -- ==============================================
 -- INDEX
 -- ==============================================
@@ -576,6 +594,7 @@ CREATE INDEX IF NOT EXISTS idx_ua_plafonds_annee ON ua_plafonds_historique(annee
 CREATE INDEX IF NOT EXISTS idx_ua_reglementation_annee ON ua_reglementation(annee_effet);
 CREATE INDEX IF NOT EXISTS idx_ua_alertes_profil ON ua_alertes(profil_id);
 CREATE INDEX IF NOT EXISTS idx_ua_independants_profil ON ua_profils_independants(profil_id);
+CREATE INDEX IF NOT EXISTS idx_ua_veille_textes_annee ON ua_veille_textes(annee_reference);
 
 -- ==============================================
 -- RLS (Row Level Security)
@@ -588,6 +607,7 @@ ALTER TABLE ua_profils_independants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_analyses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_alertes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ua_veille_textes ENABLE ROW LEVEL SECURITY;
 
 -- Les baremes/plafonds/reglementation sont publics en lecture
 ALTER TABLE ua_baremes_historique ENABLE ROW LEVEL SECURITY;
@@ -598,6 +618,7 @@ ALTER TABLE ua_reglementation ENABLE ROW LEVEL SECURITY;
 CREATE POLICY IF NOT EXISTS "baremes_public_read" ON ua_baremes_historique FOR SELECT USING (true);
 CREATE POLICY IF NOT EXISTS "plafonds_public_read" ON ua_plafonds_historique FOR SELECT USING (true);
 CREATE POLICY IF NOT EXISTS "reglementation_public_read" ON ua_reglementation FOR SELECT USING (true);
+CREATE POLICY IF NOT EXISTS "veille_textes_public_read" ON ua_veille_textes FOR SELECT USING (true);
 """
 
 

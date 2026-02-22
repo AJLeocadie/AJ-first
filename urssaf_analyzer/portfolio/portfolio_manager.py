@@ -127,9 +127,15 @@ class PortfolioManager:
     def modifier_entreprise(self, entreprise_id: str, **kwargs) -> Optional[dict]:
         """Modifie les champs specifies d'une entreprise."""
         champs_autorises = {
-            "raison_sociale", "forme_juridique", "code_naf", "effectif",
-            "taux_at", "convention_collective", "adresse", "code_postal",
-            "ville", "notes",
+            "raison_sociale", "nom_commercial", "forme_juridique",
+            "forme_juridique_code", "code_naf", "activite_principale",
+            "effectif", "tranche_effectif", "capital_social",
+            "taux_at", "taux_versement_mobilite",
+            "convention_collective", "convention_collective_idcc",
+            "convention_collective_titre",
+            "adresse", "code_postal", "ville", "pays",
+            "objet_social", "date_immatriculation", "date_cloture_exercice",
+            "regime_tva", "notes",
         }
         updates = {k: v for k, v in kwargs.items() if k in champs_autorises}
         if not updates:
