@@ -3196,7 +3196,7 @@ async def knowledge_base():
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.0", "build": "20260222c", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
+    return {"version": "3.8.1", "build": "20260222d", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -3714,8 +3714,8 @@ async def knowledge_audit():
     # 32. Detection travail dissimule - indicateurs (L.8221-1 CT)
     indicateurs_td = []
     # Indicateur 1: salaries sans DPAE importee
-    if _employees_found and not has_dpae:
-        indicateurs_td.append(f"{len(_employees_found)} salarie(s) sans accuse DPAE importe")
+    if ks["nb_salaries_connus"] > 0 and nb_dpae == 0:
+        indicateurs_td.append(f"{ks['nb_salaries_connus']} salarie(s) sans accuse DPAE importe")
     # Indicateur 2: contrats non verifies
     nb_non_verifies = sum(1 for c in _rh_contrats if not c.get("verifie", True))
     if nb_non_verifies > 0:
@@ -7110,7 +7110,7 @@ APP_HTML += """
 <input type="checkbox" id="chk-integrer" checked style="width:auto;margin:0">
 <label for="chk-integrer" style="margin:0;font-weight:500;color:var(--p);font-size:.86em;cursor:pointer">Integrer les documents dans la bibliotheque</label>
 </div>
-<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button><button class="btn btn-s" onclick="genererDemo()" title="Generer des documents fictifs pour tester">&#128295; Documents de test</button><button class="btn btn-s" onclick="telechargerDemo()" title="Telecharger les documents de test au format ZIP">&#128229; Telecharger ZIP test</button></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button></div>
 <div class="prg" id="prg-az"><div class="prg-bar"><div class="prg-fill" id="pf-az"></div></div><div class="prg-txt" id="pt-az">Import...</div></div>
 </div>
 <div id="res-analyse" style="display:none">
@@ -7753,25 +7753,6 @@ function addF(files){for(var i=0;i<files.length;i++){var f=files[i];var dup=fals
 function renderF(){var el=document.getElementById("fl-analyse");var h="";for(var i=0;i<fichiers.length;i++){h+="<div class='fi'><span class='nm'>"+fichiers[i].name+"</span><span style='color:var(--tx2);font-size:.8em'>"+(fichiers[i].size/1024).toFixed(1)+" Ko</span><button class='rm' onclick='rmF("+i+")'>&times;</button></div>";}el.innerHTML=h;document.getElementById("btn-az").disabled=fichiers.length===0;}
 function rmF(i){fichiers.splice(i,1);renderF();}
 
-function genererDemo(){
-fetch("/api/simulation/demo-documents?type_demo=complet&avec_anomalies=true").then(safeJson).then(function(r){
-var docs=r.documents||[];if(!docs.length){toast("Aucun document genere.");return;}
-for(var i=0;i<docs.length;i++){var d=docs[i];var content=d.contenu.replace(/\\n/g,"\\n");var blob=new Blob([content],{type:"text/plain"});var f=new File([blob],d.nom,{type:d.type||"text/plain"});fichiers.push(f);}
-renderF();
-var msg=r.nb_documents+" documents de test generes";
-var anomMsg="";for(var i=0;i<docs.length;i++){var an=docs[i].anomalies_attendues||[];if(an.length)anomMsg+=docs[i].nom+": "+an.join(", ")+". ";}
-if(anomMsg)msg+=" avec anomalies volontaires. "+anomMsg;
-toast(msg,"ok");
-}).catch(function(e){toast("Erreur: "+e.message);});}
-
-function telechargerDemo(){
-toast("Preparation du ZIP...");
-fetch("/api/simulation/demo-documents/telecharger-tout?type_demo=complet&avec_anomalies=true").then(function(resp){
-if(!resp.ok)throw new Error("Erreur "+resp.status);return resp.blob();
-}).then(function(blob){
-var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="normacheck_documents_test.zip";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
-toast("ZIP telecharge ! Decompressez et importez les fichiers.","ok");
-}).catch(function(e){toast("Erreur: "+e.message);});}
 
 function lancerAnalyse(){
 if(!fichiers.length)return;
