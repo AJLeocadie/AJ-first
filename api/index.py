@@ -1113,7 +1113,8 @@ async def analyser_documents(
                         "motif_cdd": "",
                         "statut": "actif",
                         "nir": nir,
-                        "source": "analyse_automatique (" + emp_info["source"] + ")",
+                        "verifie": False,
+                        "source": "deduit_analyse (" + emp_info["source"] + ")",
                         "date_creation": datetime.now().isoformat(),
                     }
                     _rh_contrats.append(contrat)
@@ -1299,12 +1300,17 @@ async def analyser_documents(
             "integration": {
                 "compta_ecritures_paie": nb_ecr_paie,
                 "compta_ecritures_facture": nb_ecr_facture,
-                "rh_contrats_crees": nb_rh_new,
+                "rh_fiches_deduites": nb_rh_new,
                 "rh_contrats_maj": nb_rh_updated,
                 "rh_planning_crees": nb_planning_new,
                 "alertes_rh": _rh_alertes,
                 "documents_detectes": sorted(_doc_types_found),
                 "salaries_uniques": len(_employees_found),
+                "salaries_deduits": [
+                    {"id": c["id"], "nom": c["nom_salarie"], "prenom": c["prenom_salarie"],
+                     "poste": c["poste"], "brut": c["salaire_brut"], "verifie": c.get("verifie", True)}
+                    for c in _rh_contrats if not c.get("verifie", True)
+                ],
                 "log": _integration_log,
             },
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
@@ -3918,6 +3924,33 @@ async def detail_contrat(contrat_id: str):
         if c["id"] == contrat_id:
             return c
     raise HTTPException(404, "Contrat non trouve")
+
+
+@app.post("/api/rh/contrats/{contrat_id}/modifier")
+async def modifier_contrat(contrat_id: str, request: Request):
+    """Modifie un contrat/fiche salarie existant."""
+    form = await request.form()
+    contrat = None
+    for c in _rh_contrats:
+        if c["id"] == contrat_id:
+            contrat = c
+            break
+    if not contrat:
+        raise HTTPException(404, "Contrat non trouve")
+    champs_modifiables = [
+        "nom_salarie", "prenom_salarie", "poste", "type_contrat",
+        "date_debut", "date_fin", "salaire_brut", "nir",
+        "convention_collective", "temps_travail", "duree_hebdo",
+        "periode_essai_jours", "motif_cdd", "statut",
+    ]
+    for champ in champs_modifiables:
+        if champ in form:
+            contrat[champ] = form[champ]
+    if "verifie" in form:
+        contrat["verifie"] = form["verifie"] in ("true", "True", "1")
+    contrat["date_modification"] = datetime.now().isoformat()
+    log_action("utilisateur", "modification_contrat", f"{contrat.get('prenom_salarie','')} {contrat.get('nom_salarie','')} ({contrat_id})")
+    return contrat
 
 
 @app.get("/api/rh/contrats/{contrat_id}/document")
@@ -7194,14 +7227,19 @@ if(n==="biblio"){loadBiblio();loadKnowledge();}if(n==="equipe")loadEquipe();
 if(n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
 if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
 if(n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();loadRHAlertes();}
+if(n==="analyse"&&analysisData){document.getElementById("res-analyse").style.display="block";showJsonResults(analysisData);}
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
 if(n==="config"){loadEntete();loadAlertConfigs();}
 }
+
+function goToRH(){showS('rh');}
+function goToRHContrats(){showS('rh');setTimeout(function(){showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
 
 /* === DASHBOARD === */
 var analysisData=null;
+try{var _saved=sessionStorage.getItem("nc_analysis");if(_saved){analysisData=JSON.parse(_saved);}}catch(e){}
 function loadDash(){
 if(!analysisData)return;
 var d=analysisData,s=d.synthese||{};
@@ -7288,7 +7326,7 @@ var modeAz=document.getElementById("mode-analyse").value;
 fetch("/api/analyze?format_rapport=json&integrer="+integ+"&mode_analyse="+modeAz,{method:"POST",body:fd}).then(function(resp){
 clearInterval(iv);fill.style.width="100%";txt.textContent="Termine !";
 if(!resp.ok)return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});
-return resp.json().then(function(data){analysisData=data;showJsonResults(data);});
+return resp.json().then(function(data){analysisData=data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(data));}catch(e){}showJsonResults(data);});
 }).then(function(){setTimeout(function(){prg.style.display="none";},800);document.getElementById("res-analyse").style.display="block";}).catch(function(e){clearInterval(iv);prg.style.display="none";toast(e.message);btn.disabled=false;});
 }
 
@@ -7324,7 +7362,7 @@ function toggleDetail(id){var el=document.getElementById(id);if(el)el.style.disp
 function toggleDetailAttr(src){var id=src.dataset.toggle;if(id)toggleDetail(id);}
 function toggleNextRow(tr){var next=tr.nextElementSibling;if(next)next.style.display=next.style.display==="none"?"":"none";}
 function scrollToEl(src){var id=src.dataset.scroll;var el=id?document.getElementById(id):null;if(el)el.scrollIntoView({behavior:"smooth"});}
-function resetAz(){fichiers=[];analysisData=null;renderF();document.getElementById("res-analyse").style.display="none";document.getElementById("az-audit-card").style.display="none";document.getElementById("az-integration-card").style.display="none";document.getElementById("btn-az").disabled=false;toast("Pret pour une nouvelle analyse.","ok");}
+function resetAz(){fichiers=[];analysisData=null;try{sessionStorage.removeItem("nc_analysis");sessionStorage.removeItem("nc_integration");}catch(e){}renderF();document.getElementById("res-analyse").style.display="none";document.getElementById("az-audit-card").style.display="none";document.getElementById("az-integration-card").style.display="none";document.getElementById("btn-az").disabled=false;toast("Pret pour une nouvelle analyse.","ok");}
 
 /* === BIBLIOTHEQUE === */
 function loadKnowledge(){
@@ -7807,31 +7845,48 @@ var ig=data.integration;
 if(!ig){card.style.display="none";return;}
 card.style.display="block";
 var h="<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px'>";
-var np=ig.compta_ecritures_paie||0;var nf=ig.compta_ecritures_facture||0;var nr=ig.rh_contrats_crees||0;var nu=ig.rh_contrats_maj||0;var npl=ig.rh_planning_crees||0;
+var np=ig.compta_ecritures_paie||0;var nf=ig.compta_ecritures_facture||0;var nr=ig.rh_fiches_deduites||ig.rh_contrats_crees||0;var nu=ig.rh_contrats_maj||0;var npl=ig.rh_planning_crees||0;var nsal=ig.salaries_uniques||0;
+h+="<div class='sc "+(nsal>0?"blue":"amber")+"'><div class='val'>"+nsal+"</div><div class='lab'>Salaries identifies</div></div>";
 h+="<div class='sc "+(np>0?"green":"amber")+"'><div class='val'>"+np+"</div><div class='lab'>Ecritures paie</div></div>";
 h+="<div class='sc "+(nf>0?"green":"amber")+"'><div class='val'>"+nf+"</div><div class='lab'>Ecritures facture</div></div>";
-h+="<div class='sc "+(nr>0?"green":"amber")+"'><div class='val'>"+nr+"</div><div class='lab'>Contrats RH crees</div></div>";
-if(nu>0)h+="<div class='sc blue'><div class='val'>"+nu+"</div><div class='lab'>Contrats maj</div></div>";
-if(npl>0)h+="<div class='sc blue'><div class='val'>"+npl+"</div><div class='lab'>Planning crees</div></div>";
+if(nr>0)h+="<div class='sc amber'><div class='val'>"+nr+"</div><div class='lab'>Fiches deduites</div></div>";
+if(nu>0)h+="<div class='sc blue'><div class='val'>"+nu+"</div><div class='lab'>Fiches mises a jour</div></div>";
 h+="</div>";
-if(np>0||nf>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Comptabilite :</strong> "+np+" ecriture(s) de paie"+(nf>0?" + "+nf+" facture(s)":"")+" generee(s) automatiquement. Consultez l onglet Comptabilite pour les visualiser.</span></div>";}
+if(np>0||nf>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Comptabilite :</strong> "+np+" ecriture(s) de paie"+(nf>0?" + "+nf+" facture(s)":"")+" generee(s) automatiquement.</span></div>";}
 else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Comptabilite :</strong> Aucune ecriture generee. Les documents ne contiennent pas suffisamment de donnees exploitables.</span></div>";}
-if(nr>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Ressources humaines :</strong> "+nr+" contrat(s) cree(s)"+(npl>0?", "+npl+" creneaux planning":"")+ ". Consultez l onglet RH pour les visualiser.</span></div>";}
-else if(nu>0){h+="<div class='al info'><span class='ai'>&#128260;</span><span><strong>Ressources humaines :</strong> "+nu+" contrat(s) existant(s) mis a jour avec les nouvelles donnees.</span></div>";}
-else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Ressources humaines :</strong> Aucun salarie identifie dans les documents.</span></div>";}
-var alRH=ig.alertes_rh||[];if(alRH.length>0){h+="<div style='margin-top:12px'><h4 style='color:var(--r);margin-bottom:8px'>&#9888; "+alRH.length+" alerte(s) de conformite</h4>";
+if(nr>0){
+var sals=ig.salaries_deduits||[];
+h+="<div class='al warn' style='border-left:4px solid var(--p)'><span class='ai'>&#128100;</span><span><strong>"+nr+" fiche(s) salarie(s) deduite(s)</strong> des documents importes.<br>";
+h+="<em style='color:var(--tx2)'>Ces fiches ont ete pre-remplies a partir des informations detectees. Elles sont <strong>a verifier et completer</strong> par vos soins.</em></span></div>";
+if(sals.length>0){
+h+="<div style='margin:8px 0;overflow-x:auto'><table class='tb' style='font-size:.88em'><thead><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Brut</th><th>Statut</th></tr></thead><tbody>";
+for(var si=0;si<sals.length;si++){var s=sals[si];
+h+="<tr><td><strong>"+s.nom+"</strong></td><td>"+s.prenom+"</td><td>"+s.poste+"</td><td class='num'>"+(parseFloat(s.brut)||0).toFixed(2)+" EUR</td>";
+h+="<td><span class='badge badge-amber'>A verifier</span></td></tr>";}
+h+="</tbody></table></div>";}
+h+="<div style='display:flex;gap:8px;flex-wrap:wrap;margin:10px 0'>";
+h+="<button class='btn btn-blue btn-sm' onclick='goToRH()'>Consulter et modifier dans RH</button>";
+h+="</div>";
+}
+else if(nu>0){h+="<div class='al info'><span class='ai'>&#128260;</span><span><strong>Ressources humaines :</strong> "+nu+" fiche(s) existante(s) mise(s) a jour avec les nouvelles donnees.</span></div>";}
+else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Ressources humaines :</strong> Aucun salarie identifie dans les documents importes.</span></div>";}
+var alRH=ig.alertes_rh||[];if(alRH.length>0){h+="<div style='margin-top:14px'><h4 style='margin-bottom:8px'>Documents obligatoires manquants</h4>";
 for(var ai=0;ai<alRH.length;ai++){var al=alRH[ai];var alcls=al.severite==="haute"?"err":(al.severite==="moyenne"?"warn":"info");
+var actionBtn="";
+if(al.titre&&al.titre.indexOf("DPAE")>=0)actionBtn="<br><button class='btn btn-s btn-sm' style='margin-top:6px' onclick='goToRHContrats()'>Completer les contrats pour generer la DPAE</button>";
+if(al.titre&&al.titre.indexOf("Registre")>=0)actionBtn="<br><button class='btn btn-s btn-sm' style='margin-top:6px' onclick='genererRegistre()'>Generer le registre du personnel (modifiable)</button>";
+if(al.titre&&al.titre.indexOf("Contrat de travail")>=0)actionBtn="<br><button class='btn btn-s btn-sm' style='margin-top:6px' onclick='goToRHContrats()'>Verifier et completer les contrats</button>";
 h+="<div class='al "+alcls+"' style='margin-bottom:6px'><span class='ai'>"+(al.severite==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+al.titre+"</strong> - "+al.description;
 if(al.reference_legale)h+="<br><em style='font-size:.85em;color:var(--tx2)'>"+al.reference_legale+"</em>";
-h+="</span></div>";}h+="</div>";}
+h+=actionBtn+"</span></div>";}h+="</div>";}
 if(ig.documents_detectes&&ig.documents_detectes.length>0){h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128196;</span><span><strong>Types de documents detectes :</strong> "+ig.documents_detectes.join(", ")+"</span></div>";}
-if(ig.salaries_uniques>0){h+="<div class='al info' style='margin-top:6px'><span class='ai'>&#128100;</span><span><strong>"+ig.salaries_uniques+" salarie(s) unique(s)</strong> identifie(s) (dedupliques par NIR ou nom).</span></div>";}
 var log=ig.log||[];if(log.length>0){
 h+="<details style='margin-top:8px'><summary style='cursor:pointer;color:var(--tx2);font-size:.85em'>Detail du traitement ("+log.length+" etapes)</summary>";
 h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin-top:6px;font-family:monospace;font-size:.8em;max-height:200px;overflow-y:auto'>";
 for(var li=0;li<log.length;li++){var cls=(log[li].indexOf("ERREUR")>=0)?"color:var(--r)":(log[li].indexOf("OK")>=0?"color:var(--g)":"color:var(--tx2)");h+="<div style='"+cls+"'>"+log[li]+"</div>";}
 h+="</div></details>";}
-el.innerHTML=h;}
+el.innerHTML=h;
+try{sessionStorage.setItem("nc_integration",JSON.stringify(ig));}catch(e){}}
 
 function showAuditChecks(data){
 var mode=data.mode_analyse||document.getElementById("mode-analyse").value;
@@ -7983,33 +8038,119 @@ function loadRHSalaries(){
 rhGet("/api/rh/contrats",function(list){
 var el=document.getElementById("rh-sal-list");
 if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun salarie detecte. Importez des bulletins de paie, DSN ou contrats dans l onglet Import / Analyse.</p>";return;}
+var nbNonVerif=0;for(var i=0;i<list.length;i++){if(list[i].verifie===false)nbNonVerif++;}
 var h="<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px'>";
 h+="<div class='sc blue'><div class='val'>"+list.length+"</div><div class='lab'>Salaries</div></div>";
 var actifs=0;var totalBrut=0;for(var i=0;i<list.length;i++){if(list[i].statut==="actif")actifs++;totalBrut+=parseFloat(list[i].salaire_brut||0);}
 h+="<div class='sc green'><div class='val'>"+actifs+"</div><div class='lab'>Actifs</div></div>";
 h+="<div class='sc'><div class='val'>"+totalBrut.toFixed(0)+" EUR</div><div class='lab'>Masse brute</div></div>";
+if(nbNonVerif>0)h+="<div class='sc amber'><div class='val'>"+nbNonVerif+"</div><div class='lab'>A verifier</div></div>";
 h+="</div>";
-h+="<table><thead><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Type contrat</th><th>Date debut</th><th class='num'>Brut mensuel</th><th>NIR</th><th>Statut</th><th>Source</th></tr></thead><tbody>";
+if(nbNonVerif>0){h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>"+nbNonVerif+" fiche(s) deduite(s) automatiquement</strong> des documents importes. Cliquez sur <em>Modifier</em> pour verifier et completer les informations.</span></div>";}
+h+="<table class='tb'><thead><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Type</th><th>Debut</th><th class='num'>Brut</th><th>NIR</th><th>Statut</th><th>Source</th><th>Actions</th></tr></thead><tbody>";
 for(var i=0;i<list.length;i++){var c=list[i];
-var cls=c.statut==="actif"?"badge-green":(c.statut==="suspendu"?"badge-amber":"badge-red");
-var nirAff=c.nir?(c.nir.length>5?c.nir.substring(0,5)+"...":c.nir):"-";
-var src=(c.source||"").replace("analyse_automatique","Auto");
-h+="<tr><td><strong>"+c.nom_salarie+"</strong></td><td>"+c.prenom_salarie+"</td><td>"+c.poste+"</td>";
+var isDeduced=(c.verifie===false);
+var cls=isDeduced?"badge-amber":(c.statut==="actif"?"badge-green":(c.statut==="suspendu"?"badge-amber":"badge-red"));
+var statutLabel=isDeduced?"A verifier":c.statut;
+var nirAff=c.nir?(c.nir.length>5?c.nir.substring(0,5)+"...":c.nir):"<em style='color:var(--tx2)'>non renseigne</em>";
+var src=(c.source||"").replace("deduit_analyse","Deduit").replace("analyse_automatique","Auto");
+var rowStyle=isDeduced?"background:rgba(245,158,11,0.08)":"";
+h+="<tr style='"+rowStyle+"'><td><strong>"+c.nom_salarie+"</strong></td><td>"+c.prenom_salarie+"</td><td>"+c.poste+"</td>";
 h+="<td><span class='badge badge-blue'>"+c.type_contrat+"</span></td>";
 h+="<td>"+c.date_debut+"</td>";
 h+="<td class='num'>"+parseFloat(c.salaire_brut||0).toFixed(2)+" EUR</td>";
 h+="<td style='font-size:.8em'>"+nirAff+"</td>";
-h+="<td><span class='badge "+cls+"'>"+c.statut+"</span></td>";
-h+="<td style='font-size:.78em;color:var(--tx2)'>"+src+"</td></tr>";}
+h+="<td><span class='badge "+cls+"'>"+statutLabel+"</span></td>";
+h+="<td style='font-size:.78em;color:var(--tx2)'>"+src+"</td>";
+h+="<td><button class='btn btn-s btn-sm' data-action='edit' data-id='"+c.id+"'>Modifier</button></td></tr>";}
 h+="</tbody></table>";
-el.innerHTML=h;});
+el.innerHTML=h;
+el.querySelectorAll("[data-action=edit]").forEach(function(b){b.onclick=function(){editSalarie(this.dataset.id);};});
+});
 }
 
 function loadRHContrats(){rhGet("/api/rh/contrats",function(list){
 var el=document.getElementById("rh-ctr-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun contrat.</p>";return;}
-var h="<table><tr><th>ID</th><th>Type</th><th>Salarie</th><th>Poste</th><th>Debut</th><th>Fin</th><th class='num'>Brut</th></tr>";
-for(var i=0;i<list.length;i++){var c=list[i];h+="<tr><td style='font-size:.78em'>"+c.id+"</td><td><span class='badge badge-blue'>"+c.type_contrat+"</span></td><td>"+c.prenom_salarie+" "+c.nom_salarie+"</td><td>"+c.poste+"</td><td>"+c.date_debut+"</td><td>"+(c.date_fin||"-")+"</td><td class='num'>"+parseFloat(c.salaire_brut).toFixed(2)+"</td></tr>";}
-h+="</table>";el.innerHTML=h;});}
+var h="<table class='tb'><thead><tr><th>Type</th><th>Salarie</th><th>Poste</th><th>Debut</th><th>Fin</th><th class='num'>Brut</th><th>Statut</th><th>Actions</th></tr></thead><tbody>";
+for(var i=0;i<list.length;i++){var c=list[i];
+var isDeduced=(c.verifie===false);var cls=isDeduced?"badge-amber":"badge-green";var label=isDeduced?"A verifier":"Verifie";
+var rowStyle=isDeduced?"background:rgba(245,158,11,0.08)":"";
+h+="<tr style='"+rowStyle+"'><td><span class='badge badge-blue'>"+c.type_contrat+"</span></td><td>"+c.prenom_salarie+" "+c.nom_salarie+"</td><td>"+c.poste+"</td><td>"+c.date_debut+"</td><td>"+(c.date_fin||"-")+"</td><td class='num'>"+parseFloat(c.salaire_brut).toFixed(2)+" EUR</td>";
+h+="<td><span class='badge "+cls+"'>"+label+"</span></td>";
+h+="<td><button class='btn btn-s btn-sm' data-action='edit' data-id='"+c.id+"'>Modifier</button>"+(isDeduced?" <button class='btn btn-blue btn-sm' data-action='validate' data-id='"+c.id+"'>Valider</button>":"")+"</td></tr>";}
+h+="</tbody></table>";
+el.innerHTML=h;
+el.querySelectorAll("[data-action=edit]").forEach(function(b){b.onclick=function(){editSalarie(this.dataset.id);};});
+el.querySelectorAll("[data-action=validate]").forEach(function(b){b.onclick=function(){validerFiche(this.dataset.id);};});
+});}
+
+function editSalarie(id){
+rhGet("/api/rh/contrats/"+id,function(c){
+if(!c||c.detail){toast("Fiche introuvable.");return;}
+var h="<div class='card' style='background:var(--pl);border:2px solid var(--p);margin:12px 0'>";
+h+="<h3 style='margin-bottom:12px'>Modifier la fiche de "+c.prenom_salarie+" "+c.nom_salarie+"</h3>";
+h+="<div class='g2'>";
+h+="<div><label>Nom</label><input id='ed-nom' value='"+c.nom_salarie+"'></div>";
+h+="<div><label>Prenom</label><input id='ed-prenom' value='"+c.prenom_salarie+"'></div>";
+h+="<div><label>Poste</label><input id='ed-poste' value='"+c.poste+"'></div>";
+h+="<div><label>Type contrat</label><select id='ed-type'><option"+(c.type_contrat==="CDI"?" selected":"")+">CDI</option><option"+(c.type_contrat==="CDD"?" selected":"")+">CDD</option><option"+(c.type_contrat==="Alternance"?" selected":"")+">Alternance</option><option"+(c.type_contrat==="Stage"?" selected":"")+">Stage</option></select></div>";
+h+="<div><label>Date debut</label><input type='date' id='ed-debut' value='"+c.date_debut+"'></div>";
+h+="<div><label>Date fin</label><input type='date' id='ed-fin' value='"+(c.date_fin||"")+"'></div>";
+h+="<div><label>Salaire brut mensuel</label><input type='number' step='0.01' id='ed-brut' value='"+c.salaire_brut+"'></div>";
+h+="<div><label>NIR (Securite sociale)</label><input id='ed-nir' value='"+(c.nir||"")+"' maxlength='15'></div>";
+h+="<div><label>Convention collective</label><input id='ed-ccn' value='"+(c.convention_collective||"")+"'></div>";
+h+="<div><label>Temps de travail</label><select id='ed-temps'><option value='temps_complet'"+(c.temps_travail==="temps_complet"?" selected":"")+">Temps complet</option><option value='temps_partiel'"+(c.temps_travail==="temps_partiel"?" selected":"")+">Temps partiel</option></select></div>";
+h+="</div>";
+h+="<div style='display:flex;gap:8px;margin-top:14px'>";
+h+="<button class='btn btn-blue' id='btn-sauver-sal'>Enregistrer et valider</button>";
+h+="<button class='btn btn-s' onclick='loadRHSalaries()'>Annuler</button>";
+h+="</div></div>";
+document.getElementById("rh-sal-list").innerHTML+=h;
+document.getElementById("btn-sauver-sal").onclick=function(){sauverSalarie(id);};
+document.getElementById("ed-nom").scrollIntoView({behavior:"smooth"});
+});}
+
+function sauverSalarie(id){
+var fd=new FormData();
+fd.append("nom_salarie",document.getElementById("ed-nom").value);
+fd.append("prenom_salarie",document.getElementById("ed-prenom").value);
+fd.append("poste",document.getElementById("ed-poste").value);
+fd.append("type_contrat",document.getElementById("ed-type").value);
+fd.append("date_debut",document.getElementById("ed-debut").value);
+fd.append("date_fin",document.getElementById("ed-fin").value);
+fd.append("salaire_brut",document.getElementById("ed-brut").value);
+fd.append("nir",document.getElementById("ed-nir").value);
+fd.append("convention_collective",document.getElementById("ed-ccn").value);
+fd.append("temps_travail",document.getElementById("ed-temps").value);
+fd.append("verifie","true");
+rhPost("/api/rh/contrats/"+id+"/modifier",fd,function(){toast("Fiche mise a jour et validee.","ok");loadRHSalaries();loadRHContrats();});}
+
+function validerFiche(id){
+var fd=new FormData();fd.append("verifie","true");
+rhPost("/api/rh/contrats/"+id+"/modifier",fd,function(){toast("Fiche validee.","ok");loadRHSalaries();loadRHContrats();});}
+
+function genererRegistre(){
+rhGet("/api/rh/contrats",function(list){
+if(!list.length){toast("Aucun salarie pour generer le registre.");return;}
+var h="<div style='margin:16px 0'><h3>Registre unique du personnel (modifiable)</h3>";
+h+="<div class='al info' style='margin:8px 0'><span class='ai'>&#128196;</span><span>Ce registre est genere automatiquement a partir des fiches salaries. Vous pouvez le modifier, l imprimer ou l exporter.</span></div>";
+h+="<div id='registre-content' contenteditable='true' style='overflow-x:auto;margin:12px 0;border:1px solid var(--brd);border-radius:8px;padding:12px;background:#fff'>";
+h+="<table class='tb' style='font-size:.88em'><thead><tr><th>N</th><th>Nom</th><th>Prenom</th><th>Date naissance</th><th>NIR</th><th>Nationalite</th><th>Emploi</th><th>Qualification</th><th>Date entree</th><th>Date sortie</th><th>Type contrat</th></tr></thead><tbody>";
+for(var i=0;i<list.length;i++){var c=list[i];
+h+="<tr><td>"+(i+1)+"</td><td>"+c.nom_salarie+"</td><td>"+c.prenom_salarie+"</td><td>-</td><td>"+(c.nir||"-")+"</td><td>-</td><td>"+c.poste+"</td><td>"+c.poste+"</td><td>"+c.date_debut+"</td><td>"+(c.date_fin||"-")+"</td><td>"+c.type_contrat+"</td></tr>";}
+h+="</tbody></table></div>";
+h+="<div style='display:flex;gap:8px'><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer le registre</button><button class='btn btn-s btn-sm' onclick='exportRegistreCSV()'>Exporter CSV</button></div></div>";
+var target=document.getElementById("rh-sal-list");
+target.innerHTML+=h;
+toast("Registre du personnel genere. Vous pouvez le modifier directement.","ok");
+});}
+
+function exportRegistreCSV(){
+rhGet("/api/rh/contrats",function(list){
+var csv="N;Nom;Prenom;NIR;Emploi;Date entree;Date sortie;Type contrat\\n";
+for(var i=0;i<list.length;i++){var c=list[i];csv+=(i+1)+";"+c.nom_salarie+";"+c.prenom_salarie+";"+(c.nir||"")+";"+c.poste+";"+c.date_debut+";"+(c.date_fin||"")+";"+c.type_contrat+"\\n";}
+var blob=new Blob([csv.replace(/\\n/g,"\\n")],{type:"text/csv"});var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="registre_personnel.csv";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+toast("Registre exporte en CSV.","ok");});}
 
 function creerAvenant(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-av-ctr").value);fd.append("type_avenant",document.getElementById("rh-av-type").value);fd.append("description",document.getElementById("rh-av-desc").value);fd.append("date_effet",document.getElementById("rh-av-date").value);fd.append("nouvelles_conditions",document.getElementById("rh-av-desc").value);
 rhPost("/api/rh/avenants",fd,function(){toast("Avenant enregistre.","ok");loadRHAvenants();});}
