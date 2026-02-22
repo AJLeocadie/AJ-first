@@ -51,7 +51,8 @@ CTP_MAPPING = {
 }
 
 # Pattern pour les lignes DSN en format texte structure
-DSN_LINE_PATTERN = re.compile(r"^S(\d{2})\.G(\d{2})\.(\d{2})\.(\d{3})\s+'([^']*)'", re.MULTILINE)
+# Accepte virgule ou espace comme separateur entre cle et valeur
+DSN_LINE_PATTERN = re.compile(r"^S(\d{2})\.G(\d{2})\.(\d{2})\.(\d{3})[,\s]+'([^']*)'", re.MULTILINE)
 
 
 class DSNParser(BaseParser):
@@ -147,21 +148,39 @@ class DSNParser(BaseParser):
                     total += c.base_brute
             declaration.masse_salariale_brute = total
 
+        # Ajouter type_document pour reconnaissance
+        declaration.metadata = getattr(declaration, "metadata", {}) or {}
+        declaration.metadata["type_document"] = "declaration_dsn"
+
+        # S89 - Total versement OPS (totaux declares)
+        s89_totaux = self._extraire_totaux_s89(donnees)
+        if s89_totaux:
+            declaration.reference = declaration.reference or ""
+            declaration.metadata["s89_total_cotisations"] = float(s89_totaux.get("total_cotisations", 0))
+            declaration.metadata["s89_total_brut"] = float(s89_totaux.get("total_brut", 0))
+
         return [declaration]
 
     def _extraire_employeur_texte(self, donnees: dict, doc_id: str) -> Employeur | None:
-        """Extrait l'employeur depuis les blocs S20/S21."""
+        """Extrait l'employeur depuis les blocs S10/S20/S21."""
         emp = Employeur(source_document_id=doc_id)
 
-        # S20.G00.05.001 = SIREN
-        siren = self._get_val(donnees, "S20.G00.05.001")
-        if siren:
+        # S10.G00.01.001 = SIREN de l'emetteur
+        siren = self._get_val(donnees, "S10.G00.01.001")
+        if siren and len(siren) == 9:
             emp.siren = siren
 
-        # S21.G00.06.001 = NIC (pour SIRET = SIREN + NIC)
-        nic = self._get_val(donnees, "S21.G00.06.001")
-        if siren and nic:
-            emp.siret = siren + nic
+        # S21.G00.06.001 = SIRET de l'etablissement (14 caracteres)
+        siret = self._get_val(donnees, "S21.G00.06.001")
+        if siret and len(siret) >= 14:
+            emp.siret = siret
+            if not emp.siren:
+                emp.siren = siret[:9]
+
+        # S21.G00.06.002 = Raison sociale
+        raison = self._get_val(donnees, "S21.G00.06.002")
+        if raison:
+            emp.raison_sociale = raison
 
         # S21.G00.11.001 = Effectif
         effectif = self._get_val(donnees, "S21.G00.11.001")
@@ -174,75 +193,133 @@ class DSNParser(BaseParser):
         return emp if emp.siren or emp.siret else None
 
     def _extraire_employes_texte(self, donnees: dict, doc_id: str) -> list[Employe]:
-        """Extrait les employes depuis les blocs S30."""
+        """Extrait les employes depuis les blocs S21.G00.30 ou S30.G00.30."""
         employes = []
-        # S30.G00.30.001 = NIR
-        nirs = donnees.get("S30.G00.30.001", [])
-        noms = donnees.get("S30.G00.30.002", [])
-        prenoms = donnees.get("S30.G00.30.004", [])
+        nirs_vus = set()
 
-        for i, nir in enumerate(nirs):
-            emp = Employe(
-                nir=nir,
-                nom=noms[i] if i < len(noms) else "",
-                prenom=prenoms[i] if i < len(prenoms) else "",
-                source_document_id=doc_id,
-            )
-            employes.append(emp)
+        # Chercher dans les deux prefixes possibles (S21 puis S30)
+        for prefix in ("S21.G00.30", "S30.G00.30"):
+            nirs = donnees.get(f"{prefix}.001", [])
+            noms = donnees.get(f"{prefix}.002", [])
+            prenoms = donnees.get(f"{prefix}.004", [])
+            dates_naissance = donnees.get(f"{prefix}.006", [])
+
+            for i, nir in enumerate(nirs):
+                if nir and nir not in nirs_vus:
+                    nirs_vus.add(nir)
+                    emp = Employe(
+                        nir=nir,
+                        nom=noms[i] if i < len(noms) else "",
+                        prenom=prenoms[i] if i < len(prenoms) else "",
+                        source_document_id=doc_id,
+                    )
+                    if i < len(dates_naissance) and dates_naissance[i]:
+                        emp.date_naissance = parser_date(dates_naissance[i])
+                    employes.append(emp)
+
         return employes
 
     def _extraire_cotisations_texte(self, donnees: dict, doc_id: str) -> list[Cotisation]:
-        """Extrait les cotisations depuis les blocs S81 ou S78/S79."""
+        """Extrait les cotisations depuis les blocs S81/S21.G00.81 ou S78/S79."""
         cotisations = []
 
-        # S81.G00.81.001 = Code cotisation
-        codes = donnees.get("S81.G00.81.001", [])
-        bases = donnees.get("S81.G00.81.003", [])
-        taux = donnees.get("S81.G00.81.004", [])
-        montants = donnees.get("S81.G00.81.005", [])
+        # Chercher dans les deux prefixes possibles (S21 puis S81)
+        for prefix in ("S21.G00.81", "S81.G00.81"):
+            codes = donnees.get(f"{prefix}.001", [])
+            bases = donnees.get(f"{prefix}.003", [])
+            taux_list = donnees.get(f"{prefix}.004", [])
+            montants = donnees.get(f"{prefix}.005", [])
 
-        for i in range(max(len(codes), len(bases), len(montants))):
-            c = Cotisation(source_document_id=doc_id)
-
-            if i < len(codes):
-                c.type_cotisation = CTP_MAPPING.get(codes[i], ContributionType.MALADIE)
-            if i < len(bases):
-                c.base_brute = parser_montant(bases[i])
-                c.assiette = c.base_brute
-            if i < len(taux):
-                t = parser_montant(taux[i])
-                if t > 1:
-                    t = t / 100
-                c.taux_patronal = t
-            if i < len(montants):
-                c.montant_patronal = parser_montant(montants[i])
-
-            if c.base_brute > 0 or c.montant_patronal > 0:
-                cotisations.append(c)
-
-        # Si pas de S81, essayer S78 (bases assujetties)
-        if not cotisations:
-            codes_78 = donnees.get("S78.G00.78.001", [])
-            bases_78 = donnees.get("S78.G00.78.004", [])
-            for i in range(min(len(codes_78), len(bases_78))):
+            max_len = max(len(codes), len(bases), len(taux_list), len(montants), 0)
+            for i in range(max_len):
                 c = Cotisation(source_document_id=doc_id)
-                c.type_cotisation = CTP_MAPPING.get(codes_78[i], ContributionType.MALADIE)
-                c.base_brute = parser_montant(bases_78[i])
-                c.assiette = c.base_brute
-                if c.base_brute > 0:
+
+                if i < len(codes) and codes[i]:
+                    c.type_cotisation = CTP_MAPPING.get(codes[i], ContributionType.MALADIE)
+                if i < len(bases) and bases[i]:
+                    c.base_brute = parser_montant(bases[i])
+                    c.assiette = c.base_brute
+                if i < len(taux_list) and taux_list[i]:
+                    t = parser_montant(taux_list[i])
+                    if t > 1:
+                        t = t / 100
+                    c.taux_patronal = t
+                if i < len(montants) and montants[i]:
+                    c.montant_patronal = parser_montant(montants[i])
+
+                if c.base_brute > 0 or c.montant_patronal > 0:
                     cotisations.append(c)
+
+            if cotisations:
+                break  # Ne pas doubler si on a trouve dans S21
+
+        # Si pas de S81/S21.G00.81, essayer S78 (bases assujetties)
+        if not cotisations:
+            for prefix in ("S21.G00.78", "S78.G00.78"):
+                codes_78 = donnees.get(f"{prefix}.001", [])
+                bases_78 = donnees.get(f"{prefix}.004", [])
+                for i in range(min(len(codes_78), len(bases_78))):
+                    c = Cotisation(source_document_id=doc_id)
+                    c.type_cotisation = CTP_MAPPING.get(codes_78[i], ContributionType.MALADIE)
+                    c.base_brute = parser_montant(bases_78[i])
+                    c.assiette = c.base_brute
+                    if c.base_brute > 0:
+                        cotisations.append(c)
+                if cotisations:
+                    break
+
+        # Extraire remuneration depuis S21.G00.51 si pas de cotisations
+        # mais qu'il y a un brut declare
+        if not cotisations:
+            bruts = donnees.get("S21.G00.51.001", [])
+            for brut_str in bruts:
+                if brut_str:
+                    c = Cotisation(source_document_id=doc_id)
+                    c.base_brute = parser_montant(brut_str)
+                    c.assiette = c.base_brute
+                    c.type_cotisation = ContributionType.MALADIE
+                    if c.base_brute > 0:
+                        cotisations.append(c)
 
         return cotisations
 
+    def _extraire_totaux_s89(self, donnees: dict) -> dict | None:
+        """Extrait les totaux declares dans le bloc S89 (Total versement OPS)."""
+        # S89.G00.89.001 = Montant total des cotisations
+        # S89.G00.89.002 = Montant total du brut
+        total_cot_str = self._get_val(donnees, "S89.G00.89.001")
+        total_brut_str = self._get_val(donnees, "S89.G00.89.002")
+        if total_cot_str or total_brut_str:
+            return {
+                "total_cotisations": float(parser_montant(total_cot_str)) if total_cot_str else 0,
+                "total_brut": float(parser_montant(total_brut_str)) if total_brut_str else 0,
+            }
+        return None
+
     def _extraire_periode_texte(self, donnees: dict) -> DateRange | None:
         """Extrait la periode de la declaration."""
-        # S20.G00.05.005 = Date debut exercice
-        # S21.G00.06.003 = Mois de la declaration
+        import calendar
+
+        # Essayer S20.G00.05.002 = Periode au format AAAAMM
+        periode_str = self._get_val(donnees, "S20.G00.05.002")
+        if periode_str and len(periode_str) == 6:
+            try:
+                annee = int(periode_str[:4])
+                mois_num = int(periode_str[4:6])
+                if 1 <= mois_num <= 12:
+                    dernier_jour = calendar.monthrange(annee, mois_num)[1]
+                    return DateRange(
+                        debut=date(annee, mois_num, 1),
+                        fin=date(annee, mois_num, dernier_jour),
+                    )
+            except (ValueError, OverflowError):
+                pass
+
+        # Fallback: S21.G00.06.003 = Mois de la declaration
         mois = self._get_val(donnees, "S21.G00.06.003")
         if mois:
             d = parser_date(mois)
             if d:
-                import calendar
                 dernier_jour = calendar.monthrange(d.year, d.month)[1]
                 return DateRange(
                     debut=date(d.year, d.month, 1),

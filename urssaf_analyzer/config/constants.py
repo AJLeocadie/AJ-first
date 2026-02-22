@@ -129,6 +129,10 @@ class ContributionType(str, Enum):
     EXONERATION_ZFU = "exoneration_zfu"
     LOI_FILLON = "loi_fillon"
 
+    # --- Avantages en nature / Divers ---
+    AVANTAGE_NATURE = "avantage_nature"
+    AUTRE = "autre"
+
 
 # ===================================================================
 # TAUX DE COTISATIONS 2026 (REGIME GENERAL)
@@ -193,22 +197,22 @@ TAUX_COTISATIONS_2026 = {
     ContributionType.CSG_DEDUCTIBLE: {
         "taux": Decimal("0.068"),                 # 6.80%
         "assiette_pct": Decimal("0.9825"),        # 98.25% du brut (abattement 1.75%)
-        "assiette": "98.25% brut",
-        "ref": "CSS art. L136-2, CGI art. 154 quinquies II",
+        "assiette": "98.25% brut + prevoyance/mutuelle patronale (sans abattement)",
+        "ref": "CSS art. L136-1-1, L136-2, CGI art. 154 quinquies II",
     },
 
     ContributionType.CSG_NON_DEDUCTIBLE: {
         "taux": Decimal("0.024"),                 # 2.40%
         "assiette_pct": Decimal("0.9825"),
-        "assiette": "98.25% brut",
-        "ref": "CSS art. L136-8",
+        "assiette": "98.25% brut + prevoyance/mutuelle patronale (sans abattement)",
+        "ref": "CSS art. L136-1-1, L136-8",
     },
 
     ContributionType.CRDS: {
         "taux": Decimal("0.005"),                 # 0.50%
         "assiette_pct": Decimal("0.9825"),
-        "assiette": "98.25% brut",
-        "ref": "Ordonnance 96-50 art. 14",
+        "assiette": "98.25% brut + prevoyance/mutuelle patronale (sans abattement)",
+        "ref": "CSS art. L136-1-1, Ordonnance 96-50 art. 14",
     },
 
     # --- CONTRIBUTIONS URSSAF ---
@@ -358,9 +362,9 @@ TAUX_COTISATIONS_2026 = {
     },
 
     ContributionType.APEC: {
-        "patronal": Decimal("0.000036"),          # 0.036%
-        "salarial": Decimal("0.000024"),          # 0.024%
-        "total": Decimal("0.00006"),              # 0.060%
+        "patronal": Decimal("0.00036"),           # 0.036%
+        "salarial": Decimal("0.00024"),           # 0.024%
+        "total": Decimal("0.0006"),               # 0.060%
         "plafond_multiple_pass": Decimal("4"),
         "assiette": "tranche_a_b",
         "ref": "Convention collective nationale des cadres",
@@ -456,4 +460,17 @@ SUPPORTED_EXTENSIONS = {
     ".xls": "excel",
     ".xml": "xml",
     ".dsn": "dsn",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".png": "image",
+    ".bmp": "image",
+    ".tiff": "image",
+    ".tif": "image",
+    ".gif": "image",
+    ".webp": "image",
+    ".heic": "image",
+    ".heif": "image",
+    ".txt": "texte",
+    ".docx": "word",
+    ".doc": "word",
 }

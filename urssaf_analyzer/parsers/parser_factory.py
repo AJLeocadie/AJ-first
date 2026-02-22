@@ -10,6 +10,9 @@ from urssaf_analyzer.parsers.excel_parser import ExcelParser
 from urssaf_analyzer.parsers.pdf_parser import PDFParser
 from urssaf_analyzer.parsers.xml_parser import XMLParser
 from urssaf_analyzer.parsers.dsn_parser import DSNParser
+from urssaf_analyzer.parsers.image_parser import ImageParser
+from urssaf_analyzer.parsers.text_parser import TextParser
+from urssaf_analyzer.parsers.docx_parser import DocxParser
 
 
 class ParserFactory:
@@ -20,7 +23,10 @@ class ParserFactory:
             DSNParser(),    # DSN en priorite (peut traiter certains XML)
             CSVParser(),
             ExcelParser(),
+            DocxParser(),   # Word (.docx) avant PDF
             PDFParser(),
+            ImageParser(),  # Images (JPEG, PNG, etc.) via OCR
+            TextParser(),   # Fichiers texte brut (.txt)
             XMLParser(),    # XML en dernier (generique)
         ]
 

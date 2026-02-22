@@ -23,6 +23,8 @@ class FileType(str, Enum):
     EXCEL = "excel"
     XML = "xml"
     DSN = "dsn"
+    IMAGE = "image"
+    TEXTE = "texte"
 
 
 @dataclass
@@ -110,6 +112,7 @@ class Declaration:
     masse_salariale_brute: Decimal = Decimal("0")
     effectif_declare: int = 0
     source_document_id: str = ""
+    metadata: dict = field(default_factory=dict)
 
 
 # --- Constats (Findings) ---

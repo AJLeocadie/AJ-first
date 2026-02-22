@@ -183,6 +183,7 @@ class ContributionRules:
     def calculer_assiette(
         self, type_cotisation: ContributionType,
         brut_mensuel: Decimal,
+        prevoyance_patronale: Decimal = Decimal("0"),
     ) -> Decimal:
         """Calcule l'assiette de cotisation apres plafonnement.
 
@@ -191,13 +192,16 @@ class ContributionRules:
         - Plafonnee au PASS mensuel (Tranche 1)
         - Plafonnee a 4 PASS (chomage, AGS)
         - Tranche 2 : entre 1 et 8 PASS
-        - 98.25% du brut (CSG/CRDS)
+        - 98.25% du brut + prevoyance patronale (CSG/CRDS)
+
+        Pour CSG/CRDS, prevoyance_patronale correspond aux cotisations
+        patronales prevoyance/mutuelle ajoutees sans abattement (art. L136-1-1 CSS).
         """
         taux = TAUX_COTISATIONS_2026.get(type_cotisation, {})
 
-        # CSG/CRDS : assiette = 98.25% du brut
+        # CSG/CRDS : assiette = 98.25% du brut + prevoyance/mutuelle patronale (sans abattement)
         if "assiette_pct" in taux:
-            return (brut_mensuel * taux["assiette_pct"]).quantize(
+            return (brut_mensuel * taux["assiette_pct"] + prevoyance_patronale).quantize(
                 Decimal("0.01"), ROUND_HALF_UP
             )
 
@@ -402,7 +406,12 @@ class ContributionRules:
         self, type_cotisation: ContributionType, taux_constate: Decimal,
         salaire_brut: Decimal = Decimal("0"), est_patronal: bool = True,
     ) -> tuple[bool, Optional[Decimal]]:
-        """Verifie si un taux est conforme. Retourne (conforme, taux_attendu)."""
+        """Verifie si un taux est conforme. Retourne (conforme, taux_attendu).
+
+        Pour les cotisations a taux reduit conditionnel (maladie, AF),
+        accepte a la fois le taux standard (affiche sur bulletin de paie)
+        et le taux reduit (applique en DSN apres reduction generale).
+        """
         if est_patronal:
             taux_attendu = self.get_taux_attendu_patronal(type_cotisation, salaire_brut)
         else:
@@ -412,8 +421,25 @@ class ContributionRules:
             return True, None
 
         ecart = abs(taux_constate - taux_attendu)
-        conforme = ecart <= TOLERANCE_TAUX
-        return conforme, taux_attendu
+        if ecart <= TOLERANCE_TAUX:
+            return True, taux_attendu
+
+        # Pour maladie et AF patronal, accepter aussi le taux standard
+        # (les bulletins de paie affichent le taux plein, la reduction
+        # etant appliquee separement via la reduction generale / RGDU)
+        if est_patronal and type_cotisation in (
+            ContributionType.MALADIE,
+            ContributionType.ALLOCATIONS_FAMILIALES,
+        ):
+            taux_data = TAUX_COTISATIONS_2026.get(type_cotisation, {})
+            taux_standard = taux_data.get("patronal")
+            taux_reduit = taux_data.get("patronal_reduit")
+            if taux_standard is not None and abs(taux_constate - taux_standard) <= TOLERANCE_TAUX:
+                return True, taux_standard
+            if taux_reduit is not None and abs(taux_constate - taux_reduit) <= TOLERANCE_TAUX:
+                return True, taux_reduit
+
+        return False, taux_attendu
 
     def verifier_plafonnement(
         self, type_cotisation: ContributionType,
@@ -565,3 +591,303 @@ class ContributionRules:
             "net_a_payer_avant_ir": float(net_a_payer),
             "assiette_pas": float(net_imposable),  # Assiette prelevement a la source
         }
+
+    # =================================================================
+    # TEMPS PARTIEL - PRORATISATION
+    # Ref: CSS art. L241-13, Circ. DSS/5B n°2012/60
+    # =================================================================
+
+    def calculer_bulletin_temps_partiel(
+        self, brut_mensuel: Decimal, heures_mensuelles: Decimal,
+        est_cadre: bool = False,
+    ) -> dict:
+        """Calcule un bulletin avec proratisation temps partiel.
+
+        Le PASS et les seuils SMIC sont proratas au rapport
+        heures_mensuelles / 151.67h. Cela affecte :
+        - Le plafonnement (PASS) pour vieillesse plafonnee, prevoyance
+        - Les seuils de reduction (maladie, AF, RGDU)
+        - Les tranches AGIRC-ARRCO
+        """
+        if heures_mensuelles <= 0 or heures_mensuelles >= HEURES_MENSUELLES_LEGALES:
+            return self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+
+        ratio = heures_mensuelles / HEURES_MENSUELLES_LEGALES
+
+        # Calcul avec plafonds proratas
+        bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+        bulletin["temps_partiel"] = {
+            "heures_mensuelles": float(heures_mensuelles),
+            "heures_legales": float(HEURES_MENSUELLES_LEGALES),
+            "ratio": float(ratio),
+            "pass_mensuel_proratise": float(
+                (PASS_MENSUEL * ratio).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            ),
+            "smic_mensuel_proratise": float(
+                (SMIC_MENSUEL_BRUT * ratio).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            ),
+        }
+        return bulletin
+
+    def calculer_rgdu_temps_partiel(
+        self, salaire_brut_annuel: Decimal, heures_annuelles: Decimal,
+    ) -> Decimal:
+        """Calcule la RGDU pour un salarie a temps partiel.
+
+        Le SMIC de reference est proratise :
+        SMIC proratis = SMIC horaire * heures annuelles reelles.
+        """
+        if heures_annuelles <= 0 or salaire_brut_annuel <= 0:
+            return Decimal("0")
+
+        smic_horaire = SMIC_ANNUEL_BRUT / (HEURES_MENSUELLES_LEGALES * 12)
+        smic_proratise = smic_horaire * heures_annuelles
+        seuil = smic_proratise * RGDU_SEUIL_SMIC_MULTIPLE
+
+        if salaire_brut_annuel >= seuil:
+            return Decimal("0")
+
+        t_max = RGDU_TAUX_MAX_50_PLUS if self.effectif >= SEUIL_EFFECTIF_50 else RGDU_TAUX_MAX_MOINS_50
+        coeff = (t_max / Decimal("0.6")) * ((seuil / salaire_brut_annuel) - 1)
+        coeff = min(coeff, t_max)
+        coeff = max(coeff, Decimal("0"))
+
+        return (salaire_brut_annuel * coeff).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+    # =================================================================
+    # EXONERATIONS SPECIFIQUES
+    # Ref: CSS art. L241-17 (ACRE), L6243-2 CT (apprentis)
+    # =================================================================
+
+    def calculer_exoneration_acre(
+        self, brut_mensuel: Decimal,
+    ) -> dict:
+        """Calcule l'exoneration ACRE (Aide a la Creation/Reprise d'Entreprise).
+
+        L'ACRE permet une exoneration de cotisations patronales et salariales
+        pendant 12 mois. Taux reduit de ~50% sur les cotisations SS
+        pour les revenus <= 1.2 SMIC. Degressive entre 1.2 et 1.6 SMIC.
+        Au-dela de 1.6 SMIC : pas d'exoneration.
+        """
+        seuil_bas = SMIC_MENSUEL_BRUT * Decimal("1.2")
+        seuil_haut = SMIC_MENSUEL_BRUT * Decimal("1.6")
+
+        if brut_mensuel <= 0:
+            return {"eligible": False, "exoneration_mensuelle": 0.0, "motif": "brut nul"}
+
+        if brut_mensuel > seuil_haut:
+            return {
+                "eligible": False,
+                "exoneration_mensuelle": 0.0,
+                "motif": f"Salaire > 1.6 SMIC ({float(seuil_haut):.2f} EUR)",
+            }
+
+        # Cotisations exonerables : maladie, vieillesse, AF, AT/MP, CSA
+        cotisations_exonerables = [
+            ContributionType.MALADIE,
+            ContributionType.VIEILLESSE_PLAFONNEE,
+            ContributionType.VIEILLESSE_DEPLAFONNEE,
+            ContributionType.ALLOCATIONS_FAMILIALES,
+            ContributionType.ACCIDENT_TRAVAIL,
+            ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE,
+        ]
+        total_exonerable = Decimal("0")
+        for ct in cotisations_exonerables:
+            total_exonerable += self.calculer_montant_patronal(ct, brut_mensuel)
+
+        if brut_mensuel <= seuil_bas:
+            taux_exo = Decimal("1")  # 100% exoneration
+        else:
+            # Degressif lineaire entre 1.2 SMIC et 1.6 SMIC
+            taux_exo = (seuil_haut - brut_mensuel) / (seuil_haut - seuil_bas)
+            taux_exo = max(taux_exo, Decimal("0"))
+
+        exoneration = (total_exonerable * taux_exo).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+        return {
+            "eligible": True,
+            "exoneration_mensuelle": float(exoneration),
+            "taux_exoneration": float(taux_exo),
+            "seuil_bas_1_2_smic": float(seuil_bas),
+            "seuil_haut_1_6_smic": float(seuil_haut),
+            "cotisations_exonerables": float(total_exonerable),
+            "ref": "CSS art. L131-6-4 / L241-17",
+        }
+
+    def calculer_exoneration_apprenti(
+        self, brut_mensuel: Decimal, annee_apprentissage: int = 1,
+    ) -> dict:
+        """Calcule les exonerations pour un contrat d'apprentissage.
+
+        Depuis 2019, les apprentis beneficient de l'exoneration de
+        cotisations salariales sur la part <= 79% du SMIC.
+        Les cotisations patronales beneficient de la reduction
+        generale (RGDU) de droit commun.
+        """
+        seuil_79_smic = SMIC_MENSUEL_BRUT * Decimal("0.79")
+
+        # Exoneration salariale : pas de cotisations salariales sur
+        # la tranche <= 79% du SMIC
+        assiette_exoneree = min(brut_mensuel, seuil_79_smic)
+
+        # Cotisations salariales sur la tranche exoneree
+        cotisations_salariales_ss = [
+            ContributionType.VIEILLESSE_PLAFONNEE,
+            ContributionType.VIEILLESSE_DEPLAFONNEE,
+            ContributionType.RETRAITE_COMPLEMENTAIRE_T1,
+            ContributionType.CEG_T1,
+            ContributionType.CET,
+        ]
+        exo_salariale = Decimal("0")
+        for ct in cotisations_salariales_ss:
+            taux_s = self.get_taux_attendu_salarial(ct) or Decimal("0")
+            exo_salariale += (assiette_exoneree * taux_s).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+        # Pas de CSG/CRDS sur la part <= 79% SMIC
+        taux_csg_crds = Decimal("0.098")  # 6.8% + 2.4% - deduction + 0.5% CRDS = ~9.7%
+        exo_csg_crds = (assiette_exoneree * Decimal("0.9825") * taux_csg_crds).quantize(
+            Decimal("0.01"), ROUND_HALF_UP
+        )
+
+        # RGDU patronale (reduction generale de droit commun)
+        salaire_annuel = brut_mensuel * 12
+        rgdu = self.calculer_rgdu(salaire_annuel)
+        rgdu_mensuelle = (rgdu / 12).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+        return {
+            "eligible": True,
+            "annee_apprentissage": annee_apprentissage,
+            "seuil_79_smic": float(seuil_79_smic),
+            "exoneration_salariale_mensuelle": float(exo_salariale + exo_csg_crds),
+            "exoneration_salariale_detail": {
+                "cotisations_ss": float(exo_salariale),
+                "csg_crds": float(exo_csg_crds),
+            },
+            "rgdu_patronale_mensuelle": float(rgdu_mensuelle),
+            "ref": "CT art. L6243-2, CSS art. L241-13",
+        }
+
+    # =================================================================
+    # CONVENTIONS COLLECTIVES
+    # Prevoyance et complementaire selon CCN
+    # =================================================================
+
+    # Table des principales CCN et leurs taux prevoyance/mutuelle
+    CCN_PREVOYANCE = {
+        "syntec": {
+            "idcc": "1486",
+            "nom": "SYNTEC (Bureaux etudes techniques)",
+            "prevoyance_cadre_patronal": Decimal("0.015"),    # 1.50% T1
+            "prevoyance_non_cadre_patronal": Decimal("0.006"),  # 0.60%
+            "mutuelle_patronal_min": Decimal("0.50"),  # 50% minimum
+        },
+        "metallurgie": {
+            "idcc": "3248",
+            "nom": "Metallurgie",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.010"),  # 1.00%
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+        "commerce": {
+            "idcc": "2216",
+            "nom": "Commerce de detail et de gros",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.005"),  # 0.50%
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+        "batiment": {
+            "idcc": "1597",
+            "nom": "Batiment ouvriers (jusqu a 10 salaries)",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.0175"),  # 1.75% (conge intemperies inclus)
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+        "restauration": {
+            "idcc": "1979",
+            "nom": "Hotels cafes restaurants (HCR)",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.008"),  # 0.80%
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+        "transport": {
+            "idcc": "0016",
+            "nom": "Transports routiers",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.012"),  # 1.20%
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+        "proprete": {
+            "idcc": "3043",
+            "nom": "Entreprises de proprete",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.010"),
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+        "pharmacie": {
+            "idcc": "1996",
+            "nom": "Pharmacie d officine",
+            "prevoyance_cadre_patronal": Decimal("0.015"),
+            "prevoyance_non_cadre_patronal": Decimal("0.009"),  # 0.90%
+            "mutuelle_patronal_min": Decimal("0.50"),
+        },
+    }
+
+    def get_prevoyance_ccn(
+        self, ccn_code: str, est_cadre: bool = False,
+    ) -> dict:
+        """Retourne les taux de prevoyance selon la convention collective.
+
+        Si la CCN n est pas reconnue, retourne les minimums legaux
+        (ANI 2013 / ANI 2016).
+        """
+        ccn = self.CCN_PREVOYANCE.get(ccn_code.lower())
+
+        if ccn:
+            taux_prev = ccn["prevoyance_cadre_patronal"] if est_cadre else ccn["prevoyance_non_cadre_patronal"]
+            return {
+                "ccn_connue": True,
+                "idcc": ccn["idcc"],
+                "nom_ccn": ccn["nom"],
+                "taux_prevoyance_patronal": float(taux_prev),
+                "mutuelle_part_employeur_min_pct": float(ccn["mutuelle_patronal_min"]) * 100,
+                "est_cadre": est_cadre,
+            }
+
+        # Minimum legal : ANI 2013 (prevoyance cadre 1.50%) / ANI 2016 (mutuelle 50%)
+        return {
+            "ccn_connue": False,
+            "idcc": None,
+            "nom_ccn": "Convention non identifiee - minimums legaux appliques",
+            "taux_prevoyance_patronal": float(Decimal("0.015") if est_cadre else Decimal("0")),
+            "mutuelle_part_employeur_min_pct": 50.0,
+            "est_cadre": est_cadre,
+            "note": "Prevoyance non-cadre : pas de minimum legal general. Verifier la CCN applicable.",
+        }
+
+    def identifier_ccn(self, texte_ccn: str) -> Optional[str]:
+        """Tente d identifier une CCN a partir d un texte (nom, IDCC, mots-cles).
+
+        Retourne le code interne (syntec, metallurgie, etc.) ou None.
+        """
+        texte = texte_ccn.lower()
+
+        ccn_keywords = {
+            "syntec": ["syntec", "bureaux d etudes", "1486", "ingenierie", "conseil"],
+            "metallurgie": ["metallurgie", "3248", "uimm", "forge", "fonderie"],
+            "commerce": ["commerce de detail", "commerce de gros", "2216", "grande distribution"],
+            "batiment": ["batiment", "btp", "1597", "travaux publics", "construction"],
+            "restauration": ["hotel", "restaurant", "hcr", "1979", "cafe", "debit de boisson"],
+            "transport": ["transport routier", "0016", "conducteur", "logistique"],
+            "proprete": ["proprete", "nettoyage", "3043"],
+            "pharmacie": ["pharmacie", "officine", "1996"],
+        }
+
+        best_match = None
+        best_score = 0
+        for code, keywords in ccn_keywords.items():
+            score = sum(1 for kw in keywords if kw in texte)
+            if score > best_score:
+                best_score = score
+                best_match = code
+
+        return best_match if best_score >= 1 else None
