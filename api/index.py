@@ -21,7 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -40,6 +40,14 @@ from urssaf_analyzer.veille.legifrance_client import get_legislation_par_annee, 
 from urssaf_analyzer.comptabilite.plan_comptable import PlanComptable
 from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, TypeJournal
 from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
+
+from auth import (
+    create_user, authenticate, get_user, generate_token,
+    set_auth_cookie, clear_auth_cookie,
+    get_current_user, get_optional_user, require_role,
+    save_dashboard, load_dashboard, list_users_by_tenant, set_user_tenant,
+    jwt_decode,
+)
 
 # --- Detection environnement ---
 _IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
@@ -79,6 +87,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --- Middleware authentification (protege /api/* sauf whitelist) ---
+_AUTH_WHITELIST = {"/api/auth/login", "/api/auth/register", "/api/auth/logout",
+                   "/api/health", "/api/version", "/api/collaboration/valider",
+                   "/api/collaboration/finaliser"}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Verifie l'authentification pour toutes les routes /api/* protegees."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in _AUTH_WHITELIST:
+        token = request.cookies.get("nc_token")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        if not token:
+            return JSONResponse({"detail": "Non authentifie"}, status_code=401)
+        payload = jwt_decode(token)
+        if not payload:
+            return JSONResponse({"detail": "Session expiree"}, status_code=401)
+    response = await call_next(request)
+    return response
 
 
 # --- Middleware auto-persistance (OVHcloud) ---
@@ -290,9 +323,24 @@ async def legal_mentions():
 # ==============================
 
 @app.post("/api/auth/login")
-async def auth_login(email: str = Form("admin"), mot_de_passe: str = Form("admin")):
-    log_action(email, "connexion")
-    return {"status": "ok", "email": email, "role": "admin"}
+async def auth_login(request: Request, email: str = Form(""), mot_de_passe: str = Form("")):
+    if not email or not mot_de_passe:
+        raise HTTPException(400, "Email et mot de passe requis")
+    user = authenticate(email, mot_de_passe)
+    if not user:
+        raise HTTPException(401, "Email ou mot de passe incorrect")
+    token = generate_token(user)
+    log_action(user["email"], "connexion")
+    response = JSONResponse({
+        "status": "ok",
+        "email": user["email"],
+        "role": user["role"],
+        "nom": user["nom"],
+        "prenom": user["prenom"],
+        "tenant_id": user.get("tenant_id", ""),
+    })
+    set_auth_cookie(response, token)
+    return response
 
 
 @app.post("/api/auth/register")
@@ -300,10 +348,47 @@ async def auth_register(
     nom: str = Form(...), prenom: str = Form(...),
     email: str = Form(...), mot_de_passe: str = Form(...)
 ):
-    if len(mot_de_passe) < 6:
-        raise HTTPException(400, "Mot de passe trop court (min. 6 caracteres)")
-    log_action(email, "inscription", f"{prenom} {nom}")
-    return {"status": "ok", "email": email}
+    try:
+        user = create_user(email, mot_de_passe, nom, prenom, role="admin")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = generate_token(user)
+    log_action(user["email"], "inscription", f"{prenom} {nom}")
+    response = JSONResponse({"status": "ok", "email": user["email"], "role": user["role"]})
+    set_auth_cookie(response, token)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    response = JSONResponse({"status": "ok"})
+    clear_auth_cookie(response)
+    return response
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = get_optional_user(request)
+    if not user:
+        raise HTTPException(401, "Non authentifie")
+    return user
+
+
+@app.post("/api/dashboard/save")
+async def dashboard_save(request: Request):
+    user = get_current_user(request)
+    body = await request.json()
+    save_dashboard(user["email"], body)
+    return {"status": "ok"}
+
+
+@app.get("/api/dashboard/load")
+async def dashboard_load(request: Request):
+    user = get_current_user(request)
+    entry = load_dashboard(user["email"])
+    if not entry:
+        return {"status": "empty"}
+    return {"status": "ok", "data": entry["data"], "saved_at": entry["saved_at"]}
 
 
 # ==============================
@@ -689,11 +774,14 @@ def _get_knowledge_summary() -> dict:
 
 @app.post("/api/analyze")
 async def analyser_documents(
+    request: Request,
     fichiers: list[UploadFile] = File(...),
     format_rapport: str = Query("json"),
     integrer: bool = Query(True),
     mode_analyse: str = Query("complet"),
 ):
+    user = get_optional_user(request)
+    user_email = user["email"] if user else "utilisateur"
     if len(fichiers) > _MAX_FILES:
         raise HTTPException(400, f"Maximum {_MAX_FILES} fichiers par analyse.")
 
@@ -779,7 +867,7 @@ async def analyser_documents(
                     "actions": [{"action": "import+analyse", "par": "utilisateur", "date": datetime.now().isoformat()}],
                     "erreurs_corrigees": [],
                 })
-            log_action("utilisateur", "analyse", f"{len(fichiers)} fichiers")
+            log_action(user_email, "analyse", f"{len(fichiers)} fichiers")
             # Sauvegarder fichiers sur disque (OVHcloud)
             if _persist:
                 analysis_id = str(uuid.uuid4())[:8]
@@ -3330,10 +3418,80 @@ async def knowledge_base():
     }
 
 
+@app.post("/api/export/pdf")
+async def export_pdf(request: Request):
+    """Genere un vrai PDF telechargeable a partir des donnees d'analyse."""
+    user = get_current_user(request)
+    body = await request.json()
+    data = body.get("data") or {}
+    synthese = data.get("synthese", {})
+    constats = data.get("constats", [])
+    recommandations = data.get("recommandations", [])
+    mode = data.get("mode_analyse", "complet")
+    titres_mode = {"simple": "Rapport d analyse", "social": "Audit social", "fiscal": "Audit fiscal", "complet": "Audit complet"}
+    titre = titres_mode.get(mode, "Rapport NormaCheck")
+    nb_fichiers = synthese.get("nb_fichiers", 0)
+    impact = synthese.get("impact_financier_total", 0)
+    score_risque = synthese.get("score_risque_global", 0)
+    conformite = max(0, 100 - score_risque)
+    ent = dict(_entete_config)
+    date_str = datetime.now().strftime("%d/%m/%Y")
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{titre}</title>
+<style>body{{font-family:Helvetica,Arial,sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#1e293b;font-size:11pt}}
+h1{{color:#1e40af;text-align:center}}h2{{color:#1e40af;border-bottom:1px solid #e2e8f0;padding-bottom:6px;margin-top:24px}}
+table{{width:100%;border-collapse:collapse;margin:10px 0}}th{{background:#1e40af;color:#fff;padding:8px;text-align:left;font-size:9pt}}
+td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
+.badge{{display:inline-block;padding:2px 8px;border-radius:10px;font-size:8pt;font-weight:700}}
+.high{{background:#fef2f2;color:#dc2626}}.med{{background:#fffbeb;color:#d97706}}.low{{background:#eff6ff;color:#2563eb}}
+.score{{text-align:center;padding:16px;border:2px solid #e2e8f0;border-radius:10px;margin:16px 0}}
+.footer{{text-align:center;font-size:8pt;color:#94a3b8;margin-top:30px;border-top:1px solid #e2e8f0;padding-top:10px}}</style></head><body>"""
+    if ent.get("nom_entreprise"):
+        html += f"""<div style="text-align:center;border-bottom:2px solid #1e40af;padding-bottom:12px;margin-bottom:16px">
+<h1 style="margin:0">{ent.get("nom_entreprise","")}</h1>
+<p style="color:#64748b;font-size:9pt">{ent.get("forme_juridique","")} - {ent.get("adresse","")}</p>
+<p style="color:#64748b;font-size:9pt">SIRET: {ent.get("siret","")} | {ent.get("telephone","")}</p></div>"""
+    html += f"<h1>{titre}</h1>"
+    html += f'<p style="text-align:center;color:#64748b">Date: {date_str} | {nb_fichiers} fichier(s) | Operateur: {user.get("prenom","")} {user.get("nom","")}</p>'
+    html += f'<div class="score"><div style="font-size:2.5em;font-weight:800;color:#1e40af">{conformite}%</div><div>Score de conformite</div></div>'
+    html += f"<h2>Synthese</h2><table><tr><th>Indicateur</th><th>Valeur</th></tr>"
+    html += f"<tr><td>Anomalies detectees</td><td>{len(constats)}</td></tr>"
+    html += f"<tr><td>Impact financier total</td><td>{impact:.2f} EUR</td></tr>"
+    html += f"<tr><td>Score de conformite</td><td>{conformite}%</td></tr>"
+    html += f"<tr><td>Fichiers analyses</td><td>{nb_fichiers}</td></tr></table>"
+    if constats:
+        html += "<h2>Anomalies detectees</h2><table><tr><th>Titre</th><th>Severite</th><th>Impact</th><th>Categorie</th></tr>"
+        for c in constats:
+            sev = c.get("severite", "basse")
+            cls = "high" if sev == "haute" else ("med" if sev == "moyenne" else "low")
+            html += f'<tr><td>{c.get("titre","")}</td><td><span class="badge {cls}">{sev}</span></td>'
+            html += f'<td style="text-align:right">{abs(c.get("montant_impact",0)):.2f} EUR</td><td>{c.get("categorie","")}</td></tr>'
+        html += "</table>"
+        html += "<h2>Detail des anomalies</h2>"
+        for i, c in enumerate(constats):
+            html += f'<div style="border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0">'
+            html += f'<strong>{i+1}. {c.get("titre","")}</strong>'
+            html += f'<p style="color:#64748b;margin:4px 0">{c.get("description","")}</p>'
+            if c.get("reference_legale"):
+                html += f'<p style="font-size:9pt;color:#64748b"><em>Ref: {c["reference_legale"]}</em></p>'
+            if c.get("recommandation"):
+                html += f'<p style="color:#1e40af"><em>Action: {c["recommandation"]}</em></p>'
+            html += "</div>"
+    if recommandations:
+        html += "<h2>Recommandations</h2><ol>"
+        for r in recommandations:
+            html += f'<li>{r.get("description", r.get("titre", ""))}</li>'
+        html += "</ol>"
+    html += f'<div class="footer">Document genere par NormaCheck v3.8.1 le {date_str} - Non opposable aux administrations (art. L.243-6-3 CSS)</div>'
+    html += "</body></html>"
+    return HTMLResponse(content=html, headers={
+        "Content-Disposition": f'attachment; filename="normacheck_rapport_{datetime.now().strftime("%Y%m%d")}.html"',
+    })
+
+
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.1", "build": "20260222e", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB}
+    return {"version": "3.8.1", "build": "20260222f", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB, "auth": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -4219,9 +4377,13 @@ async def corriger_document(
 
 @app.post("/api/collaboration/inviter")
 async def inviter_collaborateur(
+    request: Request,
     email_invite: str = Form(...),
     role: str = Form("collaborateur"),
 ):
+    current = get_optional_user(request)
+    inviter_email = current["email"] if current else "utilisateur"
+    inviter_tenant = current.get("tenant_id", "") if current else ""
     token = str(uuid.uuid4())[:12]
     inv = {
         "id": str(uuid.uuid4())[:8],
@@ -4230,10 +4392,11 @@ async def inviter_collaborateur(
         "token": token,
         "statut": "en_attente",
         "date": datetime.now().isoformat(),
-        "invite_par": "utilisateur",
+        "invite_par": inviter_email,
+        "tenant_id": inviter_tenant,
     }
     _invitations.append(inv)
-    log_action("utilisateur", "invitation", f"{email_invite} ({role})")
+    log_action(inviter_email, "invitation", f"{email_invite} ({role})")
     return {
         "status": "ok",
         "email": email_invite,
@@ -4271,11 +4434,26 @@ async def finaliser_invitation(
 ):
     for inv in _invitations:
         if inv["token"] == token:
+            if inv["statut"] == "active":
+                return HTMLResponse("<h2>Ce lien a deja ete utilise.</h2>", 400)
+            try:
+                user = create_user(
+                    inv["email"], mot_de_passe,
+                    nom=inv.get("email", "").split("@")[0],
+                    prenom="",
+                    role=inv["role"],
+                    tenant_id=inv.get("tenant_id", ""),
+                )
+            except ValueError as e:
+                return HTMLResponse(f"<h2>Erreur : {e}</h2>", 400)
             inv["statut"] = "active"
             log_action(inv["email"], "activation_compte", f"role={inv['role']}")
-            return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+            jwt_token = generate_token(user)
+            response = HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>NormaCheck - Compte active</title></head><body style="font-family:-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f8fafc">
 <div style="text-align:center"><h2 style="color:#16a34a">Compte active !</h2><p>Vous pouvez maintenant <a href="/app">acceder a NormaCheck</a>.</p></div></body></html>""")
+            set_auth_cookie(response, jwt_token)
+            return response
     raise HTTPException(404, "Token invalide")
 
 
@@ -6798,8 +6976,8 @@ NormaCheck v3.8.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 </footer>
 <script>
 function showAT(t){document.querySelectorAll(".auth-tab").forEach(function(b,i){b.classList.toggle("active",i===(t==="login"?0:1))});document.getElementById("form-login").classList.toggle("active",t==="login");document.getElementById("form-register").classList.toggle("active",t==="register");document.getElementById("amsg").className="msg";}
-function doLogin(){var fd=new FormData();fd.append("email",document.getElementById("le").value);fd.append("mot_de_passe",document.getElementById("lp").value);fetch("/api/auth/login",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
-function doReg(){if(document.getElementById("rpw").value!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Mots de passe differents.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var fd=new FormData();fd.append("nom",document.getElementById("rn").value);fd.append("prenom",document.getElementById("rp2").value);fd.append("email",document.getElementById("re").value);fd.append("mot_de_passe",document.getElementById("rpw").value);fetch("/api/auth/register",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function doLogin(){var fd=new FormData();fd.append("email",document.getElementById("le").value);fd.append("mot_de_passe",document.getElementById("lp").value);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function doReg(){if(document.getElementById("rpw").value!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Mots de passe differents.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var fd=new FormData();fd.append("nom",document.getElementById("rn").value);fd.append("prenom",document.getElementById("rp2").value);fd.append("email",document.getElementById("re").value);fd.append("mot_de_passe",document.getElementById("rpw").value);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
 </script>
 </body>
 </html>"""
@@ -7186,7 +7364,8 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="nl" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
 <div class="nl" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
 <div class="spacer"></div>
-<div class="logout" onclick="window.location.href='/'"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
+<div style="padding:10px 18px;font-size:.78em;color:#94a3b8" id="sidebar-user"></div>
+<div class="logout" onclick="doLogout()"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
 <div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
@@ -7786,9 +7965,14 @@ APP_HTML += """
 
 APP_HTML += """
 <script>
+/* === AUTH CHECK === */
+var _ncUser=null;
+(function(){fetch("/api/auth/me",{credentials:"same-origin"}).then(function(r){if(!r.ok){window.location.href="/";return null;}return r.json();}).then(function(u){if(!u)return;_ncUser=u;var su=document.getElementById("sidebar-user");if(su)su.textContent=(u.prenom||"")+" "+(u.nom||"")+" ("+u.role+")";}).catch(function(){window.location.href="/";});})();
+function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
+
 /* === INIT === */
 var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration"};
-function safeJson(r){if(!r.ok)throw new Error("Erreur serveur ("+r.status+")");return r.json();}
+function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
 function gv(id){return document.getElementById(id).value;}
 function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
 document.getElementById("topbar-date").textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
@@ -7825,8 +8009,10 @@ document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[
 /* === DASHBOARD === */
 var analysisData=null;
 try{var _saved=sessionStorage.getItem("nc_analysis");if(_saved){analysisData=JSON.parse(_saved);}}catch(e){}
+function saveDashServer(data){fetch("/api/dashboard/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),credentials:"same-origin"}).catch(function(){});}
+function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();}}).catch(function(){});}
 function loadDash(){
-if(!analysisData)return;
+if(!analysisData){loadDashServer();return;}
 var d=analysisData,s=d.synthese||{};
 var impact=s.impact_financier_total||0;
 var constats=d.constats||[];
@@ -7903,7 +8089,7 @@ var modeAz=document.getElementById("mode-analyse").value;
 fetch("/api/analyze?format_rapport=json&integrer="+integ+"&mode_analyse="+modeAz,{method:"POST",body:fd}).then(function(resp){
 clearInterval(iv);fill.style.width="100%";txt.textContent="Termine !";
 if(!resp.ok)return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});
-return resp.json().then(function(data){analysisData=data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(data));}catch(e){}showJsonResults(data);});
+return resp.json().then(function(data){analysisData=data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(data));}catch(e){}saveDashServer(data);showJsonResults(data);});
 }).then(function(){setTimeout(function(){prg.style.display="none";},800);document.getElementById("res-analyse").style.display="block";}).catch(function(e){clearInterval(iv);prg.style.display="none";toast(e.message);btn.disabled=false;});
 }
 
@@ -8591,6 +8777,7 @@ for(var i=0;i<scoreData.details.length;i++){var d=scoreData.details[i];html+="<t
 html+="</table></div>";
 html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.8 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
+function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
 /* === RH MODULE === */
 function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");

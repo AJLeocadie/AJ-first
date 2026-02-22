@@ -25,10 +25,11 @@ LABEL maintainer="NormaCheck" \
       version="3.8.1" \
       description="NormaCheck - Audit social, fiscal et conformite"
 
-# Runtime dependencies only (no compiler)
+# Runtime dependencies only (no compiler) + Tesseract OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2 libxslt1.1 libjpeg62-turbo libpng16-16 \
     curl sqlite3 \
+    tesseract-ocr tesseract-ocr-fra \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r normacheck && useradd -r -g normacheck -d /app normacheck
 
@@ -39,6 +40,8 @@ COPY --from=builder /install /usr/local
 WORKDIR /app
 COPY urssaf_analyzer/ ./urssaf_analyzer/
 COPY api/ ./api/
+COPY auth.py ./
+COPY persistence.py ./
 COPY setup.py ./
 COPY requirements.txt ./
 
