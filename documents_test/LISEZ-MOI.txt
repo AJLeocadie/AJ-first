@@ -1,0 +1,32 @@
+Documents de test NormaCheck
+============================
+
+1. bulletin_paie_detail_202601.csv - Bulletin CONFORME (format detaille rubrique par rubrique)
+   -> Salaire 2850 EUR, cotisations correctes, prevoyance cadre incluse
+   -> Assiette CSG = 98.25% x 2850 + 42.75 (prevoyance pat.) = 2842.44 EUR
+
+2. bulletin_anomalies_202601.csv - Bulletin AVEC ANOMALIES
+   -> Anomalie 1 : Salaire de base 1650 EUR < SMIC (1823.03 EUR)
+   -> Anomalie 2 : Taux maladie salarial 8.50% (devrait etre 0% depuis 2018)
+   -> Anomalie 3 : FNAL 0.50% (devrait etre 0.10% si effectif < 50 salaries)
+
+3. recap_salaires_202601.csv - Format RECAPITULATIF simplifie (style Excel)
+   -> 3 employes : DUPONT, MARTIN, PETIT
+   -> Anomalie : PETIT Lucas a un brut de 1500 EUR < SMIC
+   -> Format : Nom / Salaire brut / Cotisations / Net a payer / Avantage
+
+4. dsn_202601.dsn - DSN CONFORME
+   -> 1 salarie (DUPONT Jean), NIR valide, montants coherents
+
+5. dsn_anomalies_202601.dsn - DSN AVEC ANOMALIES
+   -> Anomalie 1 : NIR invalide (cle de controle incorrecte)
+   -> Anomalie 2 : Net fiscal (3100) > Brut (2850) = incoherent
+   -> Anomalie 3 : CTP vide (Code Type Personnel obligatoire)
+
+6. factures_202601.csv - Factures AVEC ANOMALIE
+   -> Anomalie : FA-2026-002 a un taux TVA de 25% (500/2000) - taux inexistant en France
+
+COMMENT TESTER :
+- Importez un ou plusieurs fichiers dans NormaCheck > Import > Analyse
+- Lancez l'analyse en mode "Audit complet"
+- Verifiez que les anomalies listees ci-dessus sont bien detectees
