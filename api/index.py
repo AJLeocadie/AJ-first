@@ -2687,6 +2687,25 @@ async def generer_documents_demo(
             ] if avec_anomalies else [],
         })
 
+    # --- Recapitulatif salaires format Excel simplifie (CSV) ---
+    if type_demo in ("complet", "mixte"):
+        recap_csv = "Nom;Salaire brut;Cotisations;Net a payer;Avantage\\n"
+        recap_csv += "DUPONT Jean;3000.00;700.00;2300.00;Voiture 500\\n"
+        recap_csv += "MARTIN Claire;2200.00;500.00;1700.00;Logement 300\\n"
+        if avec_anomalies:
+            recap_csv += "PETIT Lucas;1500.00;400.00;1100.00;\\n"  # brut < SMIC
+        else:
+            recap_csv += "PETIT Lucas;2500.00;580.00;1920.00;\\n"
+        documents.append({
+            "nom": "recap_salaires_202601.csv",
+            "type": "text/csv",
+            "contenu": recap_csv,
+            "description": "Recapitulatif salaires format simplifie (type Excel)" + (" - salaire sous SMIC" if avec_anomalies else ""),
+            "anomalies_attendues": [
+                "Salaire inferieur au SMIC pour PETIT Lucas" if avec_anomalies else None,
+            ] if avec_anomalies else [],
+        })
+
     # --- Facture fictive (CSV) ---
     if type_demo in ("complet", "mixte"):
         fact_csv = "Type;Date;Numero;Tiers;HT;TVA;TTC\\n"
@@ -2733,6 +2752,39 @@ async def telecharger_document_demo(
     content = doc["contenu"].replace("\\n", "\n")
     return Response(content=content, media_type="text/plain",
                     headers={"Content-Disposition": f'attachment; filename="{doc["nom"]}"'})
+
+
+@app.get("/api/simulation/demo-documents/telecharger-tout")
+async def telecharger_tous_documents_demo(
+    type_demo: str = Query("complet"),
+    avec_anomalies: bool = Query(True),
+):
+    """Telecharge tous les documents demo dans un ZIP."""
+    import zipfile
+    import io
+    result = await generer_documents_demo(type_demo, avec_anomalies)
+    docs = result["documents"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        readme = "Documents de test NormaCheck\\n============================\\n\\n"
+        for i, doc in enumerate(docs):
+            content = doc["contenu"].replace("\\n", "\n")
+            zf.writestr(doc["nom"], content)
+            readme += f"{i+1}. {doc['nom']} - {doc['description']}\\n"
+            anomalies = doc.get("anomalies_attendues", [])
+            if anomalies:
+                for a in anomalies:
+                    readme += f"   -> Anomalie attendue : {a}\\n"
+            readme += "\\n"
+        readme += "\\nImportez ces fichiers dans NormaCheck via Import > Analyse\\n"
+        zf.writestr("LISEZ-MOI.txt", readme.replace("\\n", "\n"))
+    buf.seek(0)
+    from fastapi.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="normacheck_documents_test.zip"'},
+    )
 
 
 # ==============================
@@ -6577,7 +6629,7 @@ APP_HTML += """
 <input type="checkbox" id="chk-integrer" checked style="width:auto;margin:0">
 <label for="chk-integrer" style="margin:0;font-weight:500;color:var(--p);font-size:.86em;cursor:pointer">Integrer les documents dans la bibliotheque</label>
 </div>
-<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button><button class="btn btn-s" onclick="genererDemo()" title="Generer des documents fictifs pour tester">&#128295; Documents de test</button></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button><button class="btn btn-s" onclick="genererDemo()" title="Generer des documents fictifs pour tester">&#128295; Documents de test</button><button class="btn btn-s" onclick="telechargerDemo()" title="Telecharger les documents de test au format ZIP">&#128229; Telecharger ZIP test</button></div>
 <div class="prg" id="prg-az"><div class="prg-bar"><div class="prg-fill" id="pf-az"></div></div><div class="prg-txt" id="pt-az">Import...</div></div>
 </div>
 <div id="res-analyse" style="display:none">
@@ -7213,6 +7265,15 @@ var msg=r.nb_documents+" documents de test generes";
 var anomMsg="";for(var i=0;i<docs.length;i++){var an=docs[i].anomalies_attendues||[];if(an.length)anomMsg+=docs[i].nom+": "+an.join(", ")+". ";}
 if(anomMsg)msg+=" avec anomalies volontaires. "+anomMsg;
 toast(msg,"ok");
+}).catch(function(e){toast("Erreur: "+e.message);});}
+
+function telechargerDemo(){
+toast("Preparation du ZIP...");
+fetch("/api/simulation/demo-documents/telecharger-tout?type_demo=complet&avec_anomalies=true").then(function(resp){
+if(!resp.ok)throw new Error("Erreur "+resp.status);return resp.blob();
+}).then(function(blob){
+var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="normacheck_documents_test.zip";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+toast("ZIP telecharge ! Decompressez et importez les fichiers.","ok");
 }).catch(function(e){toast("Erreur: "+e.message);});}
 
 function lancerAnalyse(){
