@@ -129,6 +129,10 @@ class ContributionType(str, Enum):
     EXONERATION_ZFU = "exoneration_zfu"
     LOI_FILLON = "loi_fillon"
 
+    # --- Avantages en nature / Divers ---
+    AVANTAGE_NATURE = "avantage_nature"
+    AUTRE = "autre"
+
 
 # ===================================================================
 # TAUX DE COTISATIONS 2026 (REGIME GENERAL)
