@@ -7756,7 +7756,7 @@ function rmF(i){fichiers.splice(i,1);renderF();}
 function genererDemo(){
 fetch("/api/simulation/demo-documents?type_demo=complet&avec_anomalies=true").then(safeJson).then(function(r){
 var docs=r.documents||[];if(!docs.length){toast("Aucun document genere.");return;}
-for(var i=0;i<docs.length;i++){var d=docs[i];var content=d.contenu.replace(/\\n/g,"\n");var blob=new Blob([content],{type:"text/plain"});var f=new File([blob],d.nom,{type:d.type||"text/plain"});fichiers.push(f);}
+for(var i=0;i<docs.length;i++){var d=docs[i];var content=d.contenu.replace(/\\n/g,"\\n");var blob=new Blob([content],{type:"text/plain"});var f=new File([blob],d.nom,{type:d.type||"text/plain"});fichiers.push(f);}
 renderF();
 var msg=r.nb_documents+" documents de test generes";
 var anomMsg="";for(var i=0;i<docs.length;i++){var an=docs[i].anomalies_attendues||[];if(an.length)anomMsg+=docs[i].nom+": "+an.join(", ")+". ";}
