@@ -641,6 +641,13 @@ async def analyser_documents(
         findings = result.findings
         constats = []
         for f in findings:
+            # Parse details_technique JSON for period/rubrique/document
+            dt = {}
+            if f.details_technique:
+                try:
+                    dt = json.loads(f.details_technique)
+                except (json.JSONDecodeError, TypeError):
+                    dt = {}
             constats.append({
                 "id": f.id,
                 "categorie": f.categorie.value,
@@ -651,6 +658,13 @@ async def analyser_documents(
                 "score_risque": f.score_risque,
                 "recommandation": f.recommandation,
                 "reference_legale": f.reference_legale,
+                "valeur_attendue": f.valeur_attendue or "",
+                "valeur_constatee": f.valeur_constatee or "",
+                "documents_concernes": f.documents_concernes or [],
+                "periode": dt.get("periode", dt.get("annee", "")),
+                "rubrique": dt.get("rubrique", ""),
+                "document_source": dt.get("document", ""),
+                "detecte_par": f.detecte_par or "",
             })
         recommandations = orchestrator.report_generator._generer_recommandations(findings)
 
@@ -1029,7 +1043,6 @@ async def analyser_documents(
         # (avec nom ou NIR). On genere des ALERTES pour les documents manquants.
         nb_rh_new = 0
         nb_rh_updated = 0
-        nb_planning_new = 0
         _rh_alertes = []
         # Track document types found for alert generation
         _doc_types_found = set()
@@ -1119,26 +1132,7 @@ async def analyser_documents(
                     }
                     _rh_contrats.append(contrat)
                     nb_rh_new += 1
-                    _integration_log.append(f"  -> RH nouveau: {prenom} {nom} brut={brut:.2f}")
-                    # Auto-creer planning (lun-ven semaine courante) - check if already exists
-                    today = date.today()
-                    lundi = today - timedelta(days=today.weekday())
-                    nom_planning = f"{prenom} {nom}".strip()
-                    existing_planning = any(p.get("salarie_id") == contrat["id"] for p in _rh_planning)
-                    if not existing_planning:
-                        for j in range(5):
-                            d_planning = lundi + timedelta(days=j)
-                            _rh_planning.append({
-                                "id": str(uuid.uuid4())[:8],
-                                "salarie_id": contrat["id"],
-                                "salarie_nom": nom_planning,
-                                "date": d_planning.strftime("%Y-%m-%d"),
-                                "heure_debut": "09:00",
-                                "heure_fin": "17:00",
-                                "type_poste": "normal",
-                                "note": "Planning auto (analyse)",
-                            })
-                            nb_planning_new += 1
+                    _integration_log.append(f"  -> Fiche salarie deduite: {prenom} {nom} brut={brut:.2f} (a verifier)")
                 else:
                     # Update existing contract with new info
                     c = existing[0]
@@ -1161,9 +1155,9 @@ async def analyser_documents(
                 _rh_alertes.append({
                     "type": "absence_document",
                     "severite": "haute",
-                    "titre": "DPAE absente",
-                    "description": f"Aucune DPAE (Declaration Prealable a l Embauche) n a ete trouvee pour {len(_employees_found)} salarie(s) detecte(s). La DPAE est obligatoire avant toute embauche (art. L.1221-10 Code du travail).",
-                    "reference_legale": "Art. L.1221-10 et R.1221-1 Code du travail",
+                    "titre": "DPAE non importee",
+                    "description": f"Aucun accuse de reception DPAE n a ete importe pour {len(_employees_found)} salarie(s) identifie(s). Importez les accuses de reception URSSAF pour verifier la conformite. La DPAE est obligatoire avant toute embauche.",
+                    "reference_legale": "Art. L.1221-10 et R.1221-1 Code du travail - Amende 1097 EUR/salarie",
                 })
             if _employees_found and not has_contrat:
                 _rh_alertes.append({
@@ -1197,7 +1191,7 @@ async def analyser_documents(
                 if not any(a.get("titre") == alerte["titre"] for a in kb["alertes_contextuelles"]):
                     kb["alertes_contextuelles"].append(alerte)
 
-            _integration_log.append(f"RH: {nb_rh_new} nouveaux contrats, {nb_rh_updated} mis a jour, {nb_planning_new} creneaux planning, {len(_rh_alertes)} alertes")
+            _integration_log.append(f"RH: {nb_rh_new} fiche(s) deduite(s), {nb_rh_updated} mise(s) a jour, {len(_rh_alertes)} alerte(s)")
         except Exception as e:
             _integration_log.append(f"ERREUR RH GLOBALE: {e}\\n{traceback.format_exc()}")
 
@@ -1302,7 +1296,7 @@ async def analyser_documents(
                 "compta_ecritures_facture": nb_ecr_facture,
                 "rh_fiches_deduites": nb_rh_new,
                 "rh_contrats_maj": nb_rh_updated,
-                "rh_planning_crees": nb_planning_new,
+                "rh_planning_crees": 0,
                 "alertes_rh": _rh_alertes,
                 "documents_detectes": sorted(_doc_types_found),
                 "salaries_uniques": len(_employees_found),
@@ -2906,13 +2900,15 @@ async def knowledge_audit():
     # --- AUDIT SOCIAL (CSS + CT) ---
     social_checks = []
 
-    # 1. DPAE (L.1221-10 CT)
+    # 1. DPAE (L.1221-10 CT) - Controle de presence uniquement
+    nb_dpae_docs = len([d for d in _doc_library if d.get("nature") == "dpae"])
     social_checks.append(_audit_check(
         "DPAE (Declaration prealable a l embauche)",
         "Art. L.1221-10 CT",
-        ks["nb_contrats_rh"] > 0,
-        "Contrats RH enregistres avec DPAE generees automatiquement" if ks["nb_contrats_rh"] > 0 else "Aucun contrat enregistre dans le module RH",
-        "Registre des DPAE, accuses de reception URSSAF",
+        nb_dpae_docs > 0 or ks["nb_contrats_rh"] == 0,
+        f"{nb_dpae_docs} accuse(s) de reception DPAE importe(s) pour {ks['nb_contrats_rh']} salarie(s)" if nb_dpae_docs > 0 else ("Non applicable (aucun salarie)" if ks["nb_contrats_rh"] == 0 else f"Aucun accuse de reception DPAE importe pour {ks['nb_contrats_rh']} salarie(s) - importez les AR URSSAF"),
+        "Accuses de reception DPAE delivres par l URSSAF",
+        incidence="Amende 1097 EUR par salarie. Travail dissimule si absence deliberee (delit penal).",
     ))
 
     # 2. Contrats de travail (L.1221-1 CT)
@@ -3376,6 +3372,98 @@ async def knowledge_audit():
         "Non applicable (effectif < 50)" if nb_actifs < 50 else ("Accord de participation importe" if "accord_participation" in kb["pieces_justificatives"] else "Accord de participation non importe - obligatoire >= 50 salaries"),
         "Accord de participation, PV de negociation",
         incidence="Perte des exonerations sociales et fiscales sur l epargne salariale" if nb_actifs >= 50 else "",
+    ))
+
+    # 31. Prescription travail dissimule - couverture N a N-5 (L.8223-1 CT)
+    annee_courante = datetime.now().year
+    annees_prescrites = set(range(annee_courante - 5, annee_courante + 1))
+    annees_couvertes = set()
+    for per in kb["periodes_couvertes"]:
+        try:
+            an = int(str(per)[:4])
+            annees_couvertes.add(an)
+        except (ValueError, TypeError):
+            pass
+    annees_manquantes = sorted(annees_prescrites - annees_couvertes)
+    couverture_ok = len(annees_manquantes) == 0
+    if annees_couvertes:
+        couv_detail = f"Annees couvertes: {', '.join(str(a) for a in sorted(annees_couvertes))}."
+        if annees_manquantes:
+            couv_detail += f" MANQUANTES dans la periode de prescription: {', '.join(str(a) for a in annees_manquantes)}"
+        else:
+            couv_detail += f" Couverture complete N-5 a N ({annee_courante-5}-{annee_courante})"
+    else:
+        couv_detail = f"Aucune periode analysee. Pour un controle complet, importez les documents de {annee_courante-5} a {annee_courante}"
+    social_checks.append(_audit_check(
+        f"Couverture prescription travail dissimule ({annee_courante-5}-{annee_courante})",
+        "Art. L.8223-1 CT - Art. L.244-3 CSS (5 ans)",
+        couverture_ok,
+        couv_detail,
+        f"Documents sociaux de {annee_courante-5} a {annee_courante} (bulletins, DSN, contrats, DPAE)",
+        incidence="En cas de travail dissimule, la prescription est de 5 ans (redressement URSSAF, sanctions penales). Tous les documents sur cette periode doivent etre conserves et verifiables.",
+    ))
+
+    # 32. Detection travail dissimule - indicateurs (L.8221-1 CT)
+    indicateurs_td = []
+    # Indicateur 1: salaries sans DPAE importee
+    if _employees_found and not has_dpae:
+        indicateurs_td.append(f"{len(_employees_found)} salarie(s) sans accuse DPAE importe")
+    # Indicateur 2: contrats non verifies
+    nb_non_verifies = sum(1 for c in _rh_contrats if not c.get("verifie", True))
+    if nb_non_verifies > 0:
+        indicateurs_td.append(f"{nb_non_verifies} contrat(s) non verifie(s)")
+    # Indicateur 3: ecart masse salariale BS vs DSN
+    for e in ecarts:
+        if e.get("ecart_pct", 0) > 5:
+            indicateurs_td.append(f"Ecart masse salariale > 5% en {e['periode']} ({e['source1']} vs {e['source2']})")
+    # Indicateur 4: NIR invalides detectes
+    nb_nir_invalides = sum(1 for a in kb["anomalies_detectees"] if "nir" in a.get("titre", "").lower() or "nir" in a.get("description", "").lower())
+    if nb_nir_invalides > 0:
+        indicateurs_td.append(f"{nb_nir_invalides} anomalie(s) NIR detectee(s)")
+
+    td_ok = len(indicateurs_td) == 0
+    td_detail = "Aucun indicateur de travail dissimule detecte" if td_ok else "INDICATEURS DETECTES: " + " ; ".join(indicateurs_td)
+    social_checks.append(_audit_check(
+        "Detection travail dissimule - Indicateurs",
+        "Art. L.8221-1 a L.8221-5 CT",
+        td_ok,
+        td_detail,
+        "DPAE, contrats, DSN, bulletins, NIR",
+        incidence="Travail dissimule: 3 ans emprisonnement + 45 000 EUR amende (personne physique), 225 000 EUR (personne morale). Redressement forfaitaire 6 mois de salaire/salarie.",
+        alerte=len(indicateurs_td) > 0,
+    ))
+
+    # 33. Coherence inter-annuelle des effectifs
+    effectifs_par_annee = {}
+    for per in kb["periodes_couvertes"]:
+        try:
+            an = int(str(per)[:4])
+            effectifs_par_annee.setdefault(an, 0)
+            effectifs_par_annee[an] = max(effectifs_par_annee[an], kb["effectifs"].get(str(per), kb["effectifs"].get(per, 0)))
+        except (ValueError, TypeError):
+            pass
+    variation_anormale = False
+    detail_eff = ""
+    annees_eff = sorted(effectifs_par_annee.keys())
+    if len(annees_eff) >= 2:
+        for i in range(1, len(annees_eff)):
+            prev = effectifs_par_annee[annees_eff[i-1]]
+            curr = effectifs_par_annee[annees_eff[i]]
+            if prev > 0 and abs(curr - prev) / prev > 0.5:
+                variation_anormale = True
+                detail_eff += f"Variation anormale {annees_eff[i-1]}->{annees_eff[i]}: {prev}->{curr} salaries. "
+        if not variation_anormale:
+            detail_eff = f"Effectifs stables sur {len(annees_eff)} annee(s): " + ", ".join(f"{a}={effectifs_par_annee[a]}" for a in annees_eff)
+    else:
+        detail_eff = "Insuffisant - au moins 2 annees necessaires pour l analyse inter-annuelle"
+    social_checks.append(_audit_check(
+        "Coherence inter-annuelle des effectifs",
+        "Art. L.130-1 CSS",
+        not variation_anormale and len(annees_eff) >= 2,
+        detail_eff,
+        "DSN mensuelles sur plusieurs annees",
+        incidence="Variation brusque d effectif peut indiquer embauche/licenciement non declares" if variation_anormale else "",
+        alerte=variation_anormale,
     ))
 
     # --- AUDIT FISCAL (CGI) ---
@@ -3864,26 +3952,14 @@ async def creer_contrat(
     except (ValueError, TypeError):
         pass
 
-    # 3. Planning initial (Lun-Ven premiere semaine)
-    try:
-        dd = date.fromisoformat(date_debut)
-        from datetime import timedelta
-        for i in range(5):
-            jour = dd + timedelta(days=i)
-            if jour.weekday() < 5:
-                entry = {
-                    "id": str(uuid.uuid4())[:8],
-                    "salarie_id": salarie_id,
-                    "date": jour.isoformat(),
-                    "heure_debut": "09:00",
-                    "heure_fin": "17:00",
-                    "type_poste": "normal",
-                    "date_creation": datetime.now().isoformat(),
-                }
-                _rh_planning.append(entry)
-                cascading["planning"].append(entry["date"])
-    except (ValueError, TypeError):
-        pass
+    # 3. Planning : suggestion sans auto-creation
+    # Le planning doit etre cree manuellement par l'utilisateur
+    # en respectant le temps_travail et duree_hebdo du contrat
+    cascading["planning_suggestion"] = {
+        "temps_travail": temps_travail,
+        "duree_hebdo": duree_hebdo,
+        "message": f"Pensez a creer le planning de {prenom_salarie} {nom_salarie} ({temps_travail}, {duree_hebdo}h/sem) dans l onglet RH > Planning.",
+    }
 
     # 4. Ecriture comptable provision salaire
     try:
@@ -7263,23 +7339,34 @@ document.getElementById("dd-guso").textContent=byDest["GUSO"].toFixed(0)+" EUR";
 
 function renderAnomalies(id,constats){
 var el=document.getElementById(id);if(!constats.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune anomalie detectee.</p>";return;}
-var h="";constats.slice(0,30).forEach(function(c){
+var h="<div style='margin-bottom:8px;font-size:.86em;color:var(--tx2)'>"+constats.length+" anomalie(s) detectee(s). Cliquez sur chaque ligne pour voir le detail.</div>";
+constats.forEach(function(c){
 var impact=c.montant_impact||0;var neg=impact>0;
-var sev=Math.abs(impact)>5000?"high":(Math.abs(impact)>1000?"med":"low");
+var sevCls=c.severite==="haute"?"high":(c.severite==="moyenne"?"med":"low");
 var dest=categToDest(c.categorie||"");
 var destCls={"URSSAF":"badge-blue","Fiscal":"badge-purple","France Travail":"badge-amber","GUSO":"badge-teal"}[dest]||"badge-blue";
-h+="<div class='anomalie sev-"+sev+"' data-toggle='1'><div class='head'><div><span class='title'>"+(c.titre||"Ecart")+"</span>";
-h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+(neg?"badge-red":"badge-green")+"'>"+(neg?"Risque":"Favorable")+"</span></div>";
-h+="<div class='montant "+(neg?"neg":"pos")+"'>"+(neg?"+":"-")+Math.abs(impact).toFixed(2)+" EUR</div></div>";
+var sevBadge=c.severite==="haute"?"badge-red":(c.severite==="moyenne"?"badge-amber":"badge-green");
+h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'><div class='head'><div><span class='title'>"+(c.titre||"Ecart")+"</span> ";
+h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+c.severite+"</span>";
+if(c.periode)h+=" <span class='badge' style='background:#e0e7ff;color:#3730a3'>"+c.periode+"</span>";
+h+="</div>";
+if(neg)h+="<div class='montant neg'>+"+Math.abs(impact).toFixed(2)+" EUR</div>";
+h+="</div>";
+h+="<div class='detail'>";
+h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:10px;font-size:.9em'>";
+h+="<div><strong>Categorie :</strong> "+(c.categorie||"-")+"</div>";
+h+="<div><strong>Periode :</strong> "+(c.periode||"Non precisee")+"</div>";
+h+="<div><strong>Document(s) source :</strong> "+(c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"Non precise"))+"</div>";
+h+="<div><strong>Rubrique :</strong> "+(c.rubrique||"Generale")+"</div>";
+if(c.valeur_constatee)h+="<div><strong>Valeur constatee :</strong> <span style='color:var(--r);font-weight:600'>"+c.valeur_constatee+"</span></div>";
+if(c.valeur_attendue)h+="<div><strong>Valeur attendue :</strong> <span style='color:var(--g);font-weight:600'>"+c.valeur_attendue+"</span></div>";
+if(neg)h+="<div><strong>Impact financier :</strong> <span style='color:var(--r);font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
+h+="<div><strong>Detecte par :</strong> "+(c.detecte_par||"-")+"</div>";
+h+="</div>";
 var desc=(c.description||"").replace(/\\n/g,"<br>");
-h+="<div class='detail'><p><strong>Nature :</strong> "+desc+"</p>";
-h+="<p><strong>Categorie :</strong> "+(c.categorie||"-")+"</p>";
-h+="<p><strong>Periode :</strong> "+(c.annee||c.periode||"-")+"</p>";
-h+="<p><strong>Documents :</strong> "+(c.source||c.document||"-")+"</p>";
-h+="<p><strong>Rubriques :</strong> "+(c.rubrique||c.libelle||"-")+"</p>";
-h+="<p><strong>Incidence :</strong> "+Math.abs(impact).toFixed(2)+" EUR</p>";
-if(c.recommandation)h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128161;</span><span>"+c.recommandation+"</span></div>";
-if(c.reference_legale)h+="<div style='margin-top:6px;font-size:.8em;color:var(--tx2)'><em>Ref: "+c.reference_legale+"</em></div>";
+h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin:8px 0'><strong>Explication :</strong> "+desc+"</div>";
+if(c.recommandation)h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128161;</span><span><strong>Action recommandee :</strong> "+c.recommandation+"</span></div>";
+if(c.reference_legale)h+="<div style='margin-top:6px;font-size:.85em;color:var(--tx2)'><em>Base legale : "+c.reference_legale+"</em></div>";
 h+="</div></div>";});el.innerHTML=h;}
 
 function categToDest(cat){var c=cat.toLowerCase();if(c.indexOf("fiscal")>=0||c.indexOf("impot")>=0)return"Fiscal";if(c.indexOf("france travail")>=0||c.indexOf("chomage")>=0)return"France Travail";if(c.indexOf("guso")>=0||c.indexOf("spectacle")>=0)return"GUSO";return"URSSAF";}
@@ -7834,7 +7921,7 @@ if(data.declarations.length>1){var totMasse=0;var totSal=0;for(var j=0;j<data.de
 h+="<tr style='font-weight:bold;background:var(--pl)'><td colspan='4'>TOTAL</td><td class='num'>"+totSal+"</td><td></td><td class='num'>"+totMasse.toFixed(2)+" EUR</td></tr>";}
 h+="</table>";
 for(var k=0;k<data.declarations.length;k++){var dk=data.declarations[k];if(dk.s89_total_brut&&dk.masse_salariale_brute){var ecS89=Math.abs(dk.s89_total_brut-dk.masse_salariale_brute);if(ecS89>10){h+="<div class='al warn' style='margin-top:6px'><span class='ai'>&#9888;</span><span><strong>Ecart S89 :</strong> Total brut declare (S89) = "+dk.s89_total_brut.toFixed(2)+" EUR vs masse salariale calculee = "+dk.masse_salariale_brute.toFixed(2)+" EUR (ecart: "+ecS89.toFixed(2)+" EUR)</span></div>";}}}
-if(data.knowledge_summary){var ks=data.knowledge_summary;h+="<div class='al info' style='margin-top:10px'><span class='ai'>&#128218;</span><span><strong>Donnees integrees :</strong> "+ks.nb_salaries_connus+" salarie(s), "+ks.nb_cotisations_analysees+" cotisation(s), masse salariale "+ks.total_masse_salariale.toFixed(2)+" EUR"+(ks.nb_contrats_rh>0?" | "+ks.nb_contrats_rh+" contrat(s) RH cree(s)":"")+"</span></div>";
+if(data.knowledge_summary){var ks=data.knowledge_summary;h+="<div class='al info' style='margin-top:10px'><span class='ai'>&#128218;</span><span><strong>Donnees integrees :</strong> "+ks.nb_salaries_connus+" salarie(s) identifie(s), "+ks.nb_cotisations_analysees+" cotisation(s), masse salariale "+ks.total_masse_salariale.toFixed(2)+" EUR"+(ks.nb_contrats_rh>0?" | "+ks.nb_contrats_rh+" fiche(s) RH (a verifier)":"")+"</span></div>";
 var kctx=ks.contexte_entreprise||{};if(kctx.convention_collective||kctx.code_naf){h+="<div class='al info' style='margin-top:6px'><span class='ai'>&#127970;</span><span><strong>Contexte :</strong>"+(kctx.convention_collective?" CCN: "+kctx.convention_collective:"")+(kctx.code_naf?" | NAF: "+kctx.code_naf:"")+(kctx.effectif_moyen>0?" | Effectif: "+kctx.effectif_moyen:"")+"</span></div>";}
 var kaccords=(kctx.accords_entreprise||[]);if(kaccords.length>0){h+="<div class='al info' style='margin-top:6px'><span class='ai'>&#128220;</span><span><strong>"+kaccords.length+" accord(s) entreprise</strong> detecte(s) et integre(s) a la base de connaissances.</span></div>";}}
 fl.innerHTML=h;}
@@ -7845,12 +7932,12 @@ var ig=data.integration;
 if(!ig){card.style.display="none";return;}
 card.style.display="block";
 var h="<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px'>";
-var np=ig.compta_ecritures_paie||0;var nf=ig.compta_ecritures_facture||0;var nr=ig.rh_fiches_deduites||ig.rh_contrats_crees||0;var nu=ig.rh_contrats_maj||0;var npl=ig.rh_planning_crees||0;var nsal=ig.salaries_uniques||0;
+var np=ig.compta_ecritures_paie||0;var nf=ig.compta_ecritures_facture||0;var nr=ig.rh_fiches_deduites||0;var nu=ig.rh_contrats_maj||0;var nsal=ig.salaries_uniques||0;
 h+="<div class='sc "+(nsal>0?"blue":"amber")+"'><div class='val'>"+nsal+"</div><div class='lab'>Salaries identifies</div></div>";
-h+="<div class='sc "+(np>0?"green":"amber")+"'><div class='val'>"+np+"</div><div class='lab'>Ecritures paie</div></div>";
-h+="<div class='sc "+(nf>0?"green":"amber")+"'><div class='val'>"+nf+"</div><div class='lab'>Ecritures facture</div></div>";
-if(nr>0)h+="<div class='sc amber'><div class='val'>"+nr+"</div><div class='lab'>Fiches deduites</div></div>";
+if(nr>0)h+="<div class='sc amber'><div class='val'>"+nr+"</div><div class='lab'>Fiches a verifier</div></div>";
 if(nu>0)h+="<div class='sc blue'><div class='val'>"+nu+"</div><div class='lab'>Fiches mises a jour</div></div>";
+h+="<div class='sc "+(np>0?"green":"amber")+"'><div class='val'>"+np+"</div><div class='lab'>Ecritures paie</div></div>";
+if(nf>0)h+="<div class='sc "+(nf>0?"green":"amber")+"'><div class='val'>"+nf+"</div><div class='lab'>Ecritures facture</div></div>";
 h+="</div>";
 if(np>0||nf>0){h+="<div class='al ok'><span class='ai'>&#9989;</span><span><strong>Comptabilite :</strong> "+np+" ecriture(s) de paie"+(nf>0?" + "+nf+" facture(s)":"")+" generee(s) automatiquement.</span></div>";}
 else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Comptabilite :</strong> Aucune ecriture generee. Les documents ne contiennent pas suffisamment de donnees exploitables.</span></div>";}
@@ -7873,7 +7960,7 @@ else{h+="<div class='al warn'><span class='ai'>&#9888;</span><span><strong>Resso
 var alRH=ig.alertes_rh||[];if(alRH.length>0){h+="<div style='margin-top:14px'><h4 style='margin-bottom:8px'>Documents obligatoires manquants</h4>";
 for(var ai=0;ai<alRH.length;ai++){var al=alRH[ai];var alcls=al.severite==="haute"?"err":(al.severite==="moyenne"?"warn":"info");
 var actionBtn="";
-if(al.titre&&al.titre.indexOf("DPAE")>=0)actionBtn="<br><button class='btn btn-s btn-sm' style='margin-top:6px' onclick='goToRHContrats()'>Completer les contrats pour generer la DPAE</button>";
+if(al.titre&&al.titre.indexOf("DPAE")>=0)actionBtn="<br><em style='font-size:.85em'>Importez les accuses de reception DPAE pour validation de conformite.</em>";
 if(al.titre&&al.titre.indexOf("Registre")>=0)actionBtn="<br><button class='btn btn-s btn-sm' style='margin-top:6px' onclick='genererRegistre()'>Generer le registre du personnel (modifiable)</button>";
 if(al.titre&&al.titre.indexOf("Contrat de travail")>=0)actionBtn="<br><button class='btn btn-s btn-sm' style='margin-top:6px' onclick='goToRHContrats()'>Verifier et completer les contrats</button>";
 h+="<div class='al "+alcls+"' style='margin-bottom:6px'><span class='ai'>"+(al.severite==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+al.titre+"</strong> - "+al.description;
@@ -8027,9 +8114,9 @@ rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
 var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
 h+="<button class='btn btn-s btn-sm' style='margin:8px 4px 0 0' onclick='voirContrat("+JSON.stringify(d.id)+")'>Visualiser le contrat</button>";
 var eff=d.cascading_effects;if(eff){h+="<div style='margin-top:12px;padding:10px;background:var(--pl);border-radius:8px'><strong>Effets en cascade :</strong><ul style='margin:6px 0 0 16px;font-size:.86em'>";
-if(eff.dpae)h+="<li>&#9989; DPAE generee (ref: "+eff.dpae.reference+")</li>";
+if(eff.dpae)h+="<li>&#9888; Rappel : effectuez la DPAE sur net-entreprises.fr avant embauche (ref contrat: "+d.id+")</li>";
 if(eff.visite_medicale)h+="<li>&#128197; Visite medicale programmee avant le "+eff.visite_medicale.echeance+"</li>";
-if(eff.planning&&eff.planning.length)h+="<li>&#128197; "+eff.planning.length+" creneaux planning crees (1ere semaine)</li>";
+if(eff.planning_suggestion)h+="<li>&#128197; "+eff.planning_suggestion.message+"</li>";
 if(eff.ecriture_comptable)h+="<li>&#128181; Ecriture comptable provisionnee ("+eff.ecriture_comptable.libelle+")</li>";
 h+="</ul></div>";}
 document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});}
