@@ -636,6 +636,16 @@ _KW_LETTRE_MISSION = [
     "honoraires de l expert", "responsabilite de l expert",
 ]
 
+_KW_DSN = [
+    "declaration sociale nominative", "déclaration sociale nominative",
+    "dsn mensuelle", "dsn evenementielle", "dsn événementielle",
+    "norme neodes", "norme néodès", "bloc s21",
+    "s21.g00", "s20.g00", "declaration dsn",
+    "dsn phase 3", "dsn signalement", "arret de travail",
+    "fin de contrat", "reprise anticipee",
+    "cahier technique dsn", "numero de declaration",
+]
+
 
 # ============================================================
 # EXTRACTION REGEX PATTERNS
@@ -873,7 +883,7 @@ class PDFParser(BaseParser):
                           "avenant", "bilan_social", "rupture_conventionnelle",
                           "cse", "france_travail", "medecine_travail",
                           "epargne_salariale", "licenciement", "formation",
-                          "mutuelle_prevoyance"):
+                          "mutuelle_prevoyance", "dsn"):
             return self._parser_social_rh(texte_complet, document, doc_type)
         # --- Juridique ---
         elif doc_type in ("statuts", "kbis", "bail", "assurance", "lettre_mission"):
@@ -934,6 +944,7 @@ class PDFParser(BaseParser):
             "licenciement": _KW_LICENCIEMENT,
             "formation": _KW_FORMATION,
             "mutuelle_prevoyance": _KW_MUTUELLE_PREVOYANCE,
+            "dsn": _KW_DSN,
             # Juridique
             "statuts": _KW_STATUTS,
             "kbis": _KW_KBIS,
@@ -994,6 +1005,7 @@ class PDFParser(BaseParser):
             "licenciement": ["licenciement", "lettre_licenciement", "pse_"],
             "formation": ["formation_", "cpf_", "plan_formation", "attestation_form"],
             "mutuelle_prevoyance": ["mutuelle_", "prevoyance_", "complementaire_sante"],
+            "dsn": ["dsn_", "dsn_mensuelle", "dsn_event", "declaration_sociale"],
             # Juridique
             "statuts": ["statuts", "statut_"],
             "kbis": ["kbis", "k_bis", "extrait_rcs"],
@@ -2012,6 +2024,35 @@ class PDFParser(BaseParser):
             if emp.nom or emp.nir:
                 employes.append(emp)
 
+        elif doc_type == "dsn":
+            texte_lower = texte.lower()
+            dsn_type = "dsn_mensuelle"
+            if "evenementielle" in texte_lower or "événementielle" in texte_lower or "signalement" in texte_lower:
+                dsn_type = "dsn_evenementielle"
+            elif "fin de contrat" in texte_lower:
+                dsn_type = "dsn_fin_contrat"
+            elif "arret" in texte_lower or "arrêt" in texte_lower:
+                dsn_type = "dsn_arret_travail"
+            metadata["sous_type"] = dsn_type
+            # Extract DSN period
+            m = re.search(r"(?:periode|période|mois)\s*[:\s]*(\d{1,2}[/.-]\d{2,4})", texte, re.IGNORECASE)
+            if m:
+                metadata["periode"] = m.group(1)
+            # Extract block references S21.G00
+            blocs = re.findall(r"(S2[01]\.G\d{2}\.\d{2}\.\d{3})", texte)
+            if blocs:
+                metadata["blocs_dsn"] = list(set(blocs))[:20]
+            # Extract effectif
+            m = re.search(r"(?:effectif|salaries|salariés)\s*[:\s]*(\d+)", texte, re.IGNORECASE)
+            if m:
+                metadata["effectif"] = int(m.group(1))
+            # Extract NIRs
+            nirs = list(_RE_NIR.finditer(texte))
+            for m_nir in nirs[:50]:
+                emp = Employe(nir=m_nir.group(1).replace(" ", ""), source_document_id=doc_id)
+                employes.append(emp)
+            metadata["nb_salaries_dsn"] = len(employes)
+
         elif doc_type == "mutuelle_prevoyance":
             texte_lower = texte.lower()
             mp_type = "mutuelle"
@@ -2546,7 +2587,7 @@ class PDFParser(BaseParser):
                                 break
                     if c.base_brute > 0 or c.montant_patronal > 0:
                         cotisations.append(c)
-                except Exception:
+                except (ValueError, TypeError, IndexError):
                     continue
         return cotisations
 

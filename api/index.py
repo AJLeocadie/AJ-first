@@ -40,7 +40,7 @@ from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.6.0",
+    version="3.7.0",
 )
 
 app.add_middleware(
@@ -287,6 +287,14 @@ def _alimenter_knowledge(result):
             ccn_accord = meta.get("convention_collective", "")
             if ccn_accord and not ctx.get("convention_collective"):
                 ctx["convention_collective"] = ccn_accord
+                # Try to identify CCN code for prevoyance rules
+                try:
+                    from urssaf_analyzer.rules.contribution_rules import ContributionRules as _CRccn
+                    ccn_code = _CRccn().identifier_ccn(ccn_accord)
+                    if ccn_code:
+                        ctx["ccn_code"] = ccn_code
+                except Exception:
+                    pass
             kb["contexte_entreprise"] = ctx
         elif fmt == "pv_ag" or doc_type.startswith("pv_ag"):
             if "pv_ag" not in kb["pieces_justificatives"]:
@@ -336,7 +344,7 @@ def _alimenter_knowledge(result):
                       "avenant", "bilan_social", "note_frais",
                       "rupture_conventionnelle", "cse", "france_travail",
                       "medecine_travail", "epargne_salariale", "licenciement",
-                      "formation", "mutuelle_prevoyance") or \
+                      "formation", "mutuelle_prevoyance", "dsn") or \
              doc_type in ("dpae", "registre_personnel", "duerp", "reglement_interieur",
                           "avenant", "bilan_social", "note_frais",
                           "rupture_conventionnelle", "cse", "france_travail",
@@ -347,7 +355,9 @@ def _alimenter_knowledge(result):
                           "visite_embauche", "visite_reprise", "vip",
                           "pee", "perco", "per", "due_mutuelle",
                           "attestation_formation", "plan_formation",
-                          "bilan_competences", "vae"):
+                          "bilan_competences", "vae",
+                          "dsn", "dsn_mensuelle", "dsn_evenementielle",
+                          "dsn_fin_contrat", "dsn_arret_travail"):
             cat = "social_rh"
             if cat not in kb["pieces_justificatives"]:
                 kb["pieces_justificatives"][cat] = []
@@ -795,6 +805,11 @@ async def analyser_documents(
                 "mutuelle": "Contrat mutuelle obligatoire",
                 "prevoyance": "Contrat prevoyance",
                 "due_mutuelle": "DUE mutuelle obligatoire",
+                "dsn": "Declaration sociale nominative (DSN)",
+                "dsn_mensuelle": "DSN mensuelle",
+                "dsn_evenementielle": "DSN evenementielle",
+                "dsn_fin_contrat": "DSN fin de contrat",
+                "dsn_arret_travail": "DSN arret de travail",
                 "avis_imposition": "Avis d imposition",
                 "bordereau_urssaf": "Bordereau URSSAF / Appel cotisations",
                 # Juridique
@@ -1277,6 +1292,10 @@ async def analyser_documents(
                     "rapport_cac": "Rapport CAC", "rapport_gestion": "Rapport de gestion", "budget": "Budget",
                     # Social/RH
                     "declaration_dsn": "DSN (Declaration Sociale Nominative)",
+                    "dsn": "DSN", "dsn_mensuelle": "DSN mensuelle",
+                    "dsn_evenementielle": "DSN evenementielle",
+                    "dsn_fin_contrat": "DSN fin de contrat",
+                    "dsn_arret_travail": "DSN arret de travail",
                     "dpae": "DPAE", "registre_personnel": "Registre du personnel",
                     "duerp": "DUERP", "reglement_interieur": "Reglement interieur",
                     "avenant": "Avenant", "bilan_social": "Bilan social", "note_frais": "Note de frais",
@@ -1944,10 +1963,15 @@ async def sim_exonerations(
 
     # 2. Exoneration apprenti
     if statut_salarie == "apprenti":
-        exo_app = round(brut * 0.3194, 2)
+        from urssaf_analyzer.rules.contribution_rules import ContributionRules as _CR2
+        calc_app = _CR2(effectif_entreprise=effectif)
+        detail_app = calc_app.calculer_exoneration_apprenti(Decimal(str(brut)))
+        exo_app = round(detail_app["exoneration_salariale_mensuelle"] + detail_app["rgdu_patronale_mensuelle"], 2)
         exonerations.append({"nom": "Exoneration apprenti", "reference": "Art. L.6243-2 CT",
             "montant_mensuel": exo_app, "montant_annuel": round(exo_app * 12, 2),
-            "conditions": "Contrat d apprentissage - exo totale part patronale", "applicable": True})
+            "conditions": f"Exo salariale <= 79% SMIC ({detail_app['seuil_79_smic']:.0f} EUR) + RGDU patronale",
+            "applicable": True,
+            "detail": detail_app})
         total_exo += exo_app
 
     # 3. Aide embauche jeune (-26 ans)
@@ -2087,13 +2111,17 @@ async def sim_exonerations(
 
     # 14. ACRE (Aide aux Createurs et Repreneurs d Entreprise)
     if statut_salarie == "acre":
-        exo_acre = round(brut * 0.261, 2)
+        from urssaf_analyzer.rules.contribution_rules import ContributionRules as _CR3
+        calc_acre = _CR3(effectif_entreprise=effectif)
+        detail_acre = calc_acre.calculer_exoneration_acre(Decimal(str(brut)))
+        exo_acre = round(detail_acre["exoneration_mensuelle"], 2)
         exonerations.append({
             "nom": "ACRE (Aide aux Createurs/Repreneurs)",
-            "reference": "Art. L.131-6-4 CSS",
+            "reference": detail_acre.get("ref", "Art. L.131-6-4 CSS"),
             "montant_mensuel": exo_acre, "montant_annuel": round(exo_acre * 12, 2),
-            "applicable": True,
-            "conditions": "Exoneration partielle cotisations pendant 12 mois. Plafond 130% SMIC.",
+            "applicable": detail_acre["eligible"],
+            "conditions": f"Exoneration {detail_acre.get('taux_exoneration', 0)*100:.0f}% cotisations patronales SS. Seuil bas: {detail_acre.get('seuil_bas_1_2_smic', 0):.0f} EUR, haut: {detail_acre.get('seuil_haut_1_6_smic', 0):.0f} EUR.",
+            "detail": detail_acre,
         })
         total_exo += exo_acre
 
@@ -2111,6 +2139,69 @@ async def sim_exonerations(
         "charges_patronales_apres_exo": charges_apres_exo,
         "economie_pct": round(total_exo / charges_normales * 100, 2) if charges_normales > 0 else 0,
     }
+
+
+# --- Simulation : Temps partiel ---
+@app.get("/api/simulation/temps-partiel")
+async def sim_temps_partiel(
+    brut_mensuel: float = Query(1500),
+    heures_mensuelles: float = Query(104),
+    effectif: int = Query(10),
+    est_cadre: bool = Query(False),
+):
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    calc = ContributionRules(effectif_entreprise=effectif)
+    res = calc.calculer_bulletin_temps_partiel(
+        Decimal(str(brut_mensuel)), Decimal(str(heures_mensuelles)), est_cadre=est_cadre,
+    )
+    return res
+
+
+# --- Simulation : Convention collective ---
+@app.get("/api/simulation/ccn")
+async def sim_ccn(
+    ccn: str = Query("syntec"),
+    brut_mensuel: float = Query(3000),
+    est_cadre: bool = Query(False),
+    effectif: int = Query(10),
+):
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    calc = ContributionRules(effectif_entreprise=effectif)
+    prevoyance = calc.get_prevoyance_ccn(ccn, est_cadre=est_cadre)
+    bulletin = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
+
+    # Ajouter le cout prevoyance CCN
+    taux_prev = Decimal(str(prevoyance["taux_prevoyance_patronal"]))
+    cout_prev = round(float(Decimal(str(brut_mensuel)) * taux_prev), 2)
+
+    return {
+        "ccn": prevoyance,
+        "bulletin": {
+            "brut_mensuel": bulletin["brut_mensuel"],
+            "total_patronal": bulletin["total_patronal"],
+            "total_salarial": bulletin["total_salarial"],
+            "net_avant_impot": bulletin["net_avant_impot"],
+            "cout_total_employeur": bulletin["cout_total_employeur"],
+        },
+        "prevoyance_ccn": {
+            "taux": float(taux_prev),
+            "montant_mensuel": cout_prev,
+            "montant_annuel": round(cout_prev * 12, 2),
+        },
+        "ccn_disponibles": list(ContributionRules.CCN_PREVOYANCE.keys()),
+    }
+
+
+# --- Simulation : Identification CCN ---
+@app.get("/api/simulation/identifier-ccn")
+async def sim_identifier_ccn(texte: str = Query("")):
+    from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    calc = ContributionRules()
+    code = calc.identifier_ccn(texte)
+    if code:
+        prevoyance = calc.get_prevoyance_ccn(code)
+        return {"identifie": True, "code": code, "detail": prevoyance}
+    return {"identifie": False, "code": None, "suggestion": "CCN non reconnue. CCN disponibles: " + ", ".join(ContributionRules.CCN_PREVOYANCE.keys())}
 
 
 # --- Simulation : Cout total employeur ---
@@ -2469,7 +2560,7 @@ async def sim_optimisation(
     })
 
     # Scenario 3: Maximum dividendes
-    sal_min = 12 * 1801.80  # SMIC annuel
+    sal_min = 12 * 1823.03  # SMIC annuel 2026
     charges_min = sal_min * 0.42
     net_min = sal_min - sal_min * 0.22
     is_base_3 = max(0, benefice_net - sal_min - charges_min)
@@ -2963,7 +3054,7 @@ async def knowledge_base():
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.6.0", "build": "20260222", "audit_checks": 63}
+    return {"version": "3.7.0", "build": "20260222", "audit_checks": 63}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -3204,7 +3295,7 @@ async def knowledge_audit():
     # 6. Plafonnement PASS (L.241-3 CSS)
     social_checks.append(_audit_check(
         "Plafonnement PASS (vieillesse plafonnee, FNAL)",
-        "Art. L.241-3 CSS - PASS 2026: 47 100 EUR",
+        "Art. L.241-3 CSS - PASS 2026: 48 060 EUR",
         ks["has_bulletins"] and ks["nb_cotisations_analysees"] > 0,
         f"{ks['nb_cotisations_analysees']} lignes de cotisations analysees" if ks["nb_cotisations_analysees"] > 0 else "Aucune cotisation analysee",
         "Bulletins avec lignes vieillesse plafonnee",
@@ -3592,7 +3683,7 @@ async def knowledge_audit():
         has_cse or nb_actifs_cse < 11,
         "Document(s) CSE importe(s)" if has_cse else ("Non applicable (effectif < 11)" if nb_actifs_cse < 11 else "Aucun document CSE importe - obligatoire >= 11 salaries"),
         "PV elections CSE, PV reunions, budget, rapport activites",
-        incidence="Delit d entrave (L.2317-1 CT): 1 an emprisonnement + 3750 EUR amende" if not has_cse and nb_actifs_cse >= 11 else "",
+        incidence="Delit d entrave (L.2317-1 CT): 1 an emprisonnement + 7500 EUR amende" if not has_cse and nb_actifs_cse >= 11 else "",
     ))
 
     # 39. Bordereau URSSAF / suivi cotisations

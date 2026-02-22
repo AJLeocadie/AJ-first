@@ -362,9 +362,9 @@ TAUX_COTISATIONS_2026 = {
     },
 
     ContributionType.APEC: {
-        "patronal": Decimal("0.000036"),          # 0.036%
-        "salarial": Decimal("0.000024"),          # 0.024%
-        "total": Decimal("0.00006"),              # 0.060%
+        "patronal": Decimal("0.00036"),           # 0.036%
+        "salarial": Decimal("0.00024"),           # 0.024%
+        "total": Decimal("0.0006"),               # 0.060%
         "plafond_multiple_pass": Decimal("4"),
         "assiette": "tranche_a_b",
         "ref": "Convention collective nationale des cadres",
