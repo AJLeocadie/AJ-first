@@ -170,6 +170,12 @@ class DSNParser(BaseParser):
         if siren and len(siren) == 9:
             emp.siren = siren
 
+        # S20.G00.05.001 = SIREN de l'entreprise (fallback)
+        if not emp.siren:
+            siren_s20 = self._get_val(donnees, "S20.G00.05.001")
+            if siren_s20 and len(siren_s20) == 9:
+                emp.siren = siren_s20
+
         # S21.G00.06.001 = SIRET de l'etablissement (14 caracteres)
         siret = self._get_val(donnees, "S21.G00.06.001")
         if siret and len(siret) >= 14:
@@ -177,8 +183,10 @@ class DSNParser(BaseParser):
             if not emp.siren:
                 emp.siren = siret[:9]
 
-        # S21.G00.06.002 = Raison sociale
+        # S20.G00.05.002 = Raison sociale (S20) ou S21.G00.06.002 (S21)
         raison = self._get_val(donnees, "S21.G00.06.002")
+        if not raison:
+            raison = self._get_val(donnees, "S20.G00.05.002")
         if raison:
             emp.raison_sociale = raison
 

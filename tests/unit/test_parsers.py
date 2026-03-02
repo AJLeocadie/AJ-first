@@ -41,7 +41,7 @@ class TestParserFactory:
         import pytest
         from urssaf_analyzer.core.exceptions import UnsupportedFormatError
         with pytest.raises(UnsupportedFormatError):
-            self.factory.get_parser(Path("test.doc"))
+            self.factory.get_parser(Path("test.xyz"))
 
 
 class TestCSVParser:
