@@ -546,6 +546,24 @@ CREATE TABLE IF NOT EXISTS ua_patches_log (
     details JSONB DEFAULT '{}'
 );
 
+-- Veille : textes juridiques suivis
+CREATE TABLE IF NOT EXISTS ua_veille_textes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    titre TEXT NOT NULL,
+    resume TEXT DEFAULT '',
+    url TEXT DEFAULT '',
+    date_publication DATE,
+    date_effet DATE,
+    annee_reference INTEGER,
+    categorie TEXT DEFAULT '',
+    impact TEXT DEFAULT '',
+    texte_complet TEXT DEFAULT '',
+    actif BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
 -- Veille : alertes
 CREATE TABLE IF NOT EXISTS ua_alertes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -574,6 +592,7 @@ CREATE INDEX IF NOT EXISTS idx_ua_analyses_date ON ua_analyses(created_at);
 CREATE INDEX IF NOT EXISTS idx_ua_baremes_annee ON ua_baremes_historique(annee);
 CREATE INDEX IF NOT EXISTS idx_ua_plafonds_annee ON ua_plafonds_historique(annee);
 CREATE INDEX IF NOT EXISTS idx_ua_reglementation_annee ON ua_reglementation(annee_effet);
+CREATE INDEX IF NOT EXISTS idx_ua_veille_textes_annee ON ua_veille_textes(annee_reference);
 CREATE INDEX IF NOT EXISTS idx_ua_alertes_profil ON ua_alertes(profil_id);
 CREATE INDEX IF NOT EXISTS idx_ua_independants_profil ON ua_profils_independants(profil_id);
 
@@ -587,6 +606,7 @@ ALTER TABLE ua_portefeuille ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_profils_independants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_analyses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ua_veille_textes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ua_alertes ENABLE ROW LEVEL SECURITY;
 
 -- Les baremes/plafonds/reglementation sont publics en lecture
