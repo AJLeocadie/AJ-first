@@ -3198,9 +3198,15 @@ async def idcc_detail(idcc: str):
 # ==============================
 
 @app.get("/api/atmp/taux")
-async def atmp_taux(code_naf: str = Query("62.02"), effectif: int = Query(10)):
+async def atmp_taux(
+    code_naf: str = Query(None),
+    naf: str = Query(None),
+    effectif: int = Query(10),
+):
     from urssaf_analyzer.config.taux_atmp import get_taux_atmp
-    return get_taux_atmp(code_naf, effectif)
+    # Accept both 'code_naf' and 'naf' as parameter names for the NAF code
+    effective_naf = code_naf or naf or "62.02"
+    return get_taux_atmp(effective_naf, effectif)
 
 
 # ==============================
@@ -9015,7 +9021,7 @@ function creerAvenant(){var fd=new FormData();fd.append("contrat_id",document.ge
 rhPost("/api/rh/avenants",fd,function(){toast("Avenant enregistre.","ok");loadRHAvenants();});}
 function loadRHAvenants(){rhGet("/api/rh/avenants",function(list){var el=document.getElementById("rh-av-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Contrat</th><th>Type</th><th>Date effet</th><th>Description</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.contrat_id+"</td><td><span class='badge badge-blue'>"+a.type_avenant+"</span></td><td>"+a.date_effet+"</td><td>"+a.description+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregConge(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-cg-sal").value);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
+function enregConge(){var fd=new FormData();fd.append("nom_salarie",document.getElementById("rh-cg-sal").value);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
 rhPost("/api/rh/conges",fd,function(){toast("Conge enregistre.","ok");loadRHConges();});}
 function loadRHConges(){rhGet("/api/rh/conges",function(list){var el=document.getElementById("rh-cg-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun conge enregistre.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Jours</th><th>Statut</th></tr>";for(var i=0;i<list.length;i++){var c=list[i];var cls=c.statut==="valide"?"badge-green":(c.statut==="refuse"?"badge-red":"badge-amber");h+="<tr><td>"+c.salarie_id+"</td><td>"+c.type_conge+"</td><td>"+c.date_debut+"</td><td>"+c.date_fin+"</td><td class='num'>"+c.nb_jours+"</td><td><span class='badge "+cls+"'>"+c.statut+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
 
