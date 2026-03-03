@@ -3353,13 +3353,18 @@ async def ajouter_entreprise(
     effectif: int = Form(0), ville: str = Form(""),
 ):
     pm = PortfolioManager(get_db())
-    ent = pm.ajouter_entreprise(
-        siret=siret, raison_sociale=raison_sociale,
-        forme_juridique=forme_juridique, code_naf=code_naf,
-        effectif=effectif, ville=ville,
-    )
+    try:
+        ent = pm.ajouter_entreprise(
+            siret=siret, raison_sociale=raison_sociale,
+            forme_juridique=forme_juridique, code_naf=code_naf,
+            effectif=effectif, ville=ville,
+        )
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(409, "Entreprise avec ce SIRET deja existante")
+        raise
     log_action("utilisateur", "ajout_entreprise", f"{raison_sociale} ({siret})")
-    return {"id": ent.id, "siret": ent.siret, "raison_sociale": ent.raison_sociale}
+    return {"id": ent["id"], "siret": ent["siret"], "raison_sociale": ent["raison_sociale"]}
 
 
 @app.get("/api/entreprises")
@@ -4925,8 +4930,8 @@ async def generer_bulletin(
         # Deduction forfaitaire patronale : 1.50 EUR par heure (entreprises < 250 sal)
         exo_tepa_patronale = round(float(hs) * 1.50, 2)
 
-    net_avant_impot = float(bulletin_data.get("net_avant_impot", brut_total * Decimal("0.78")))
-    cout_employeur = float(bulletin_data.get("cout_total_employeur", brut_total * Decimal("1.45")))
+    net_avant_impot = float(bulletin_data.get("net_avant_impot", brut_total * 0.78))
+    cout_employeur = float(bulletin_data.get("cout_total_employeur", brut_total * 1.45))
 
     bulletin = {
         "id": str(uuid.uuid4())[:8],
@@ -5270,7 +5275,8 @@ async def liste_avenants():
 
 @app.post("/api/rh/conges")
 async def enregistrer_conge(
-    salarie_id: str = Form(...),
+    nom_salarie: str = Form(""),
+    salarie_id: str = Form(""),
     type_conge: str = Form(...),
     date_debut: str = Form(...),
     date_fin: str = Form(...),
@@ -5278,6 +5284,9 @@ async def enregistrer_conge(
     statut: str = Form("demande"),
 ):
     """Enregistre une demande ou un conge (art. L.3141-1 et suivants CT)."""
+    # Accept nom_salarie as an alias for salarie_id
+    effective_salarie_id = salarie_id or nom_salarie
+
     types_valides = ("cp", "rtt", "maladie", "maternite", "paternite", "sans_solde", "familial", "formation")
     if type_conge not in types_valides:
         raise HTTPException(400, f"Type de conge invalide. Valeurs acceptees: {', '.join(types_valides)}")
@@ -5302,7 +5311,9 @@ async def enregistrer_conge(
 
     conge = {
         "id": conge_id,
-        "salarie_id": salarie_id,
+        "salarie_id": effective_salarie_id,
+        "nom_salarie": nom_salarie,
+        "type": type_conge,
         "type_conge": type_conge,
         "date_debut": date_debut,
         "date_fin": date_fin,
@@ -5313,7 +5324,7 @@ async def enregistrer_conge(
     }
 
     _rh_conges.append(conge)
-    log_action("utilisateur", "enregistrement_conge", f"{type_conge} salarie {salarie_id} du {date_debut} au {date_fin}")
+    log_action("utilisateur", "enregistrement_conge", f"{type_conge} salarie {effective_salarie_id} du {date_debut} au {date_fin}")
     return conge
 
 

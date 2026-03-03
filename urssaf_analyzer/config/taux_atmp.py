@@ -282,6 +282,7 @@ def get_taux_atmp(code_naf: str, effectif: int = 0) -> dict:
     return {
         "code_naf": code_naf,
         "naf_match": naf_match,
+        "taux": float(taux),
         "taux_collectif": float(taux),
         "taux_collectif_pct": f"{float(taux) * 100:.2f}%",
         "mode_tarification": mode,

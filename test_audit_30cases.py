@@ -220,7 +220,7 @@ def test_16():
     sup = calculer_supplement_alsace_moselle(Decimal("3000"))
     ok = (
         sup.get("montant_salarial_mensuel", 0) > 0 and
-        sup.get("taux_salarial") == Decimal("0.013")
+        float(sup.get("taux_salarial", 0)) == 0.013
     )
     return {"ok": ok, "detail": f"montant={sup.get('montant_salarial_mensuel')}, taux={sup.get('taux_salarial')}"}
 run_test(16, "Alsace-Moselle supplement (3000 EUR)", test_16)
