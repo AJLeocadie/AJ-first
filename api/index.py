@@ -8074,7 +8074,7 @@ function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-or
 /* === INIT === */
 var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration"};
 function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
-function gv(id){return document.getElementById(id).value;}
+function gv(id){var el=document.getElementById(id);return el?el.value:"";}
 function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
 document.getElementById("topbar-date").textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
 
@@ -8085,11 +8085,12 @@ function closeSidebar(){document.getElementById("sidebar").classList.remove("ope
 /* === NAV === */
 function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
 function showS(n,el){
+try{
 closeSidebar();
 document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
 document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove("active")});
 var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
-if(el)el.classList.add("active");
+if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
 document.getElementById("page-title").textContent=titles[n]||n;
 if(n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
 if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
@@ -8099,7 +8100,9 @@ if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
 if(n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();loadRHAlertes();}
 if(n==="analyse"&&analysisData){document.getElementById("res-analyse").style.display="block";showJsonResults(analysisData);}
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
+if(n==="veille"){loadVeille();}
 if(n==="config"){loadEntete();loadAlertConfigs();}
+}catch(e){console.error("showS error:",n,e);}
 }
 
 function goToRH(){showS('rh');}
@@ -8113,6 +8116,7 @@ try{var _saved=sessionStorage.getItem("nc_analysis");if(_saved){analysisData=JSO
 function saveDashServer(data){fetch("/api/dashboard/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),credentials:"same-origin"}).catch(function(){});}
 function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();}}).catch(function(){});}
 function loadDash(){
+try{
 if(!analysisData){loadDashServer();return;}
 var d=analysisData,s=d.synthese||{};
 var impact=s.impact_financier_total||0;
@@ -8131,6 +8135,7 @@ document.getElementById("dd-urssaf").textContent=byDest["URSSAF"].toFixed(0)+" E
 document.getElementById("dd-fiscal").textContent=byDest["Fiscal"].toFixed(0)+" EUR";
 document.getElementById("dd-ft").textContent=byDest["France Travail"].toFixed(0)+" EUR";
 document.getElementById("dd-guso").textContent=byDest["GUSO"].toFixed(0)+" EUR";
+}catch(e){console.error("loadDash",e);}
 }
 
 function renderAnomalies(id,constats){
@@ -8308,7 +8313,7 @@ var fd=new FormData();fd.append("champ",champ);fd.append("ancienne_valeur",ancie
 fetch("/api/documents/bibliotheque/"+docId+"/corriger",{method:"POST",body:fd}).then(function(r){if(!r.ok)throw new Error("Erreur");return r.json();}).then(function(){toast("Correction enregistree.","ok");loadBiblio();}).catch(function(e){toast(e.message);});}
 
 /* === FACTURES === */
-function showFT(n,el){document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}
+function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
 
 var factFile=null;
 document.getElementById("fi-fact").addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});
@@ -8468,13 +8473,15 @@ h+="</table>";el.innerHTML=h;}).catch(function(){});}
 
 /* === COMPTABILITE === */
 function showCT(n,el){
+try{
 document.querySelectorAll("#compta-tabs .tab").forEach(function(t){t.classList.remove("active")});
 document.querySelectorAll("#s-compta .tc").forEach(function(t){t.classList.remove("active")});
 if(el)el.classList.add("active");var tc=document.getElementById("ct-"+n);if(tc)tc.classList.add("active");
-document.getElementById("period-sel").style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";
-loadCompta();}
+var ps=document.getElementById("period-sel");if(ps)ps.style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";
+loadCompta();
+}catch(e){console.error("showCT error:",n,e);}}
 
-function loadCompta(){
+function loadCompta(){try{
 var dd=document.getElementById("gl-dd").value;var df=document.getElementById("gl-df").value;
 
 fetch("/api/comptabilite/journal").then(safeJson).then(function(j){
@@ -8541,7 +8548,7 @@ fetch("/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){
 var h="<input placeholder='Rechercher...' oninput='rechPC(this.value)' style='margin-bottom:10px'><table id='pc-t'><tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";
 for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}h+="</table>";
 document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-plan-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
-}
+}catch(e){console.error("loadCompta error:",e);}}
 
 function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(e){console.error("Plan comptable",e);});}
 function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(safeJson).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
@@ -8570,7 +8577,7 @@ var cls=d.sans_justificatif?"warn":"ok";var icon=d.sans_justificatif?"&#9888;":"
 document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class='ai'>"+icon+"</span><span>"+(d.alerte||"Ecriture enregistree.")+(d.sans_justificatif?" <em style='color:var(--r)'>(justificatif manquant)</em>":"")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 
 /* === SIMULATION === */
-function showSimTab(n,el){document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}
+function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
 function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
@@ -8881,8 +8888,8 @@ w.document.write(html);w.document.close();setTimeout(function(){w.print();},600)
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
 /* === RH MODULE === */
-function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(n==="salaries")loadRHSalaries();if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
+function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
+if(n==="salaries")loadRHSalaries();if(n==="contrats"){loadRHContrats();loadRHAvenants();}if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
@@ -9014,7 +9021,7 @@ function exportRegistreCSV(){
 rhGet("/api/rh/contrats",function(list){
 var csv="N;Nom;Prenom;NIR;Emploi;Date entree;Date sortie;Type contrat\\n";
 for(var i=0;i<list.length;i++){var c=list[i];csv+=(i+1)+";"+c.nom_salarie+";"+c.prenom_salarie+";"+(c.nir||"")+";"+c.poste+";"+c.date_debut+";"+(c.date_fin||"")+";"+c.type_contrat+"\\n";}
-var blob=new Blob([csv.replace(/\\n/g,"\\n")],{type:"text/csv"});var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="registre_personnel.csv";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="registre_personnel.csv";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
 toast("Registre exporte en CSV.","ok");});}
 
 function creerAvenant(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-av-ctr").value);fd.append("type_avenant",document.getElementById("rh-av-type").value);fd.append("description",document.getElementById("rh-av-desc").value);fd.append("date_effet",document.getElementById("rh-av-date").value);fd.append("nouvelles_conditions",document.getElementById("rh-av-desc").value);
@@ -9138,6 +9145,12 @@ if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.bor
 else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";}
 else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";}
 d.textContent=msg;document.body.appendChild(d);setTimeout(function(){d.style.opacity="0";d.style.transition="opacity .3s";setTimeout(function(){d.remove();},300);},4000);}
+
+/* === INITIALIZATION === */
+(function initApp(){
+loadDash();
+loadDashServer();
+})();
 </script>
 </body>
 </html>"""
