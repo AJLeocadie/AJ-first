@@ -11,7 +11,7 @@ services:
     container_name: normacheck-app
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     volumes:
       # Donnees persistantes (survive aux redemarrages/mises a jour)
       - normacheck_data:/data/normacheck
@@ -49,8 +49,7 @@ services:
       - certbot_certs:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
     depends_on:
-      normacheck:
-        condition: service_healthy
+      - normacheck
 
   # Certbot pour SSL Let's Encrypt
   certbot:
