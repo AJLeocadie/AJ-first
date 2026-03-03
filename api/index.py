@@ -391,6 +391,116 @@ async def dashboard_load(request: Request):
     return {"status": "ok", "data": entry["data"], "saved_at": entry["saved_at"]}
 
 
+@app.get("/api/scores/methodologie")
+async def scores_methodologie():
+    """Retourne la methodologie complete des 3 scores de conformite pour certification."""
+    return {
+        "version": "3.8",
+        "date_methodologie": "2026-03-03",
+        "statut_certification": "en_cours_de_validation",
+        "scores": {
+            "urssaf": {
+                "nom": "Score URSSAF - Conformite sociale",
+                "organisme_certificateur": "URSSAF / Caisse Nationale",
+                "cadre_legal": "Code de la securite sociale (CSS)",
+                "formule": "S_URSSAF = 100 - Somme(P(severite_i)) + B_social",
+                "penalites": {
+                    "critique": {"points": -15, "exemples": ["Absence DPAE", "Travail dissimule", "Non-declaration salarie"]},
+                    "haute": {"points": -10, "exemples": ["Ecart cotisation > 5%", "NIR invalide", "FNAL taux incorrect"]},
+                    "moyenne": {"points": -5, "exemples": ["Ecart taux AT/MP", "Proratisation PASS incorrecte", "CSG assiette erronee"]},
+                    "faible": {"points": -2, "exemples": ["Arrondi mineur", "Libelle incomplet", "Format NIR non standard"]},
+                },
+                "bonus": [
+                    {"condition": "Aucun constat critique", "points": 5},
+                    {"condition": ">= 3 sources analysees (BS + DSN + LDP)", "points": 3},
+                    {"condition": "Audit social >= 80% couverture", "points": 5},
+                ],
+                "plafond": "80% si <= 1 document analyse",
+                "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
+                "perimetres_controle": [
+                    {"point": "Assiette des cotisations", "reference": "Art. L242-1 CSS"},
+                    {"point": "Reduction generale (ex-Fillon)", "reference": "Art. L241-13 CSS"},
+                    {"point": "FNAL", "reference": "Art. L834-1 CSS"},
+                    {"point": "Taux AT/MP", "reference": "Art. L242-5, D242-6-1 CSS"},
+                    {"point": "CSG/CRDS", "reference": "Art. L136-1-1 CSS"},
+                    {"point": "Plafond SS proratise", "reference": "Art. L242-8 CSS"},
+                    {"point": "Retraite complementaire", "reference": "ANI AGIRC-ARRCO art. 36"},
+                    {"point": "SMIC horaire", "reference": "Art. L3231-2 Code du travail"},
+                    {"point": "NIR / Identite", "reference": "Art. R.114-7 CSS"},
+                    {"point": "Bulletin de paie", "reference": "Art. L3243-2 Code du travail"},
+                ],
+            },
+            "dgfip": {
+                "nom": "Score DGFIP - Conformite fiscale",
+                "organisme_certificateur": "Direction Generale des Finances Publiques (DGFiP)",
+                "cadre_legal": "Code general des impots (CGI) / Livre des procedures fiscales (LPF)",
+                "formule": "S_DGFIP = 100 - Somme(P(severite_i)) + B_fiscal",
+                "penalites": {
+                    "critique": {"points": -15, "exemples": ["Absence TVA", "Non-depot declaration"]},
+                    "haute": {"points": -10, "exemples": ["Ecart TVA collectee/deductible", "DAS-2 manquante"]},
+                    "moyenne": {"points": -5, "exemples": ["Mentions facture manquantes", "Delai archivage"]},
+                    "faible": {"points": -2, "exemples": ["Format FEC non optimal", "Ecart arrondi"]},
+                },
+                "bonus": [
+                    {"condition": "Aucun constat critique", "points": 5},
+                    {"condition": ">= 3 sources analysees", "points": 3},
+                    {"condition": "Audit fiscal >= 80% couverture", "points": 5},
+                ],
+                "plafond": "80% si <= 1 document analyse",
+                "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
+                "perimetres_controle": [
+                    {"point": "TVA collectee / deductible", "reference": "Art. 256 et 271 CGI"},
+                    {"point": "Declarations fiscales", "reference": "Art. 1649 quater B CGI"},
+                    {"point": "DAS-2 Honoraires", "reference": "Art. 240 CGI"},
+                    {"point": "FEC", "reference": "Art. L.47 A-I LPF"},
+                    {"point": "Facturation", "reference": "Art. 289 CGI"},
+                    {"point": "Conservation documents", "reference": "Art. L.102 B LPF"},
+                    {"point": "Avantages en nature", "reference": "Art. 82 CGI"},
+                    {"point": "Credit impot formation", "reference": "Art. 244 quater M CGI"},
+                    {"point": "CFE / CVAE", "reference": "Art. 1447 CGI"},
+                    {"point": "Taxe sur les salaires", "reference": "Art. 231 CGI"},
+                ],
+            },
+            "cour_des_comptes": {
+                "nom": "Score Cour des comptes - Regularite comptable",
+                "organisme_certificateur": "Cour des comptes / Chambres regionales des comptes",
+                "cadre_legal": "Code de commerce / Normes NEP-ISA",
+                "formule": "S_CDC = 100 - Somme(P(severite_i)) + B_cdc",
+                "penalites": {
+                    "critique": {"points": -15, "exemples": ["Comptes non certifiables", "Anomalie significative"]},
+                    "haute": {"points": -10, "exemples": ["Ecart BS/DSN > 5%", "Cut-off non respecte"]},
+                    "moyenne": {"points": -5, "exemples": ["Piece justificative manquante", "Rapprochement partiel"]},
+                    "faible": {"points": -2, "exemples": ["Ecart arrondi", "Libelle imprecis"]},
+                },
+                "bonus": [
+                    {"condition": "Aucun constat critique", "points": 5},
+                    {"condition": ">= 3 sources analysees", "points": 3},
+                    {"condition": "Audit CDC >= 80% couverture", "points": 5},
+                    {"condition": "Rapprochement masses concordant (ecart < 1%)", "points": 3},
+                ],
+                "plafond": "80% si <= 1 document analyse",
+                "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
+                "perimetres_controle": [
+                    {"point": "Regularite des comptes", "reference": "Normes NEP / ISA"},
+                    {"point": "Sincerite des ecritures", "reference": "Art. L.123-14 Code de commerce"},
+                    {"point": "Image fidele du patrimoine", "reference": "Art. L.123-14 Code de commerce"},
+                    {"point": "Continuite d exploitation", "reference": "NEP 570"},
+                    {"point": "Separation des exercices", "reference": "Art. L.123-12 C.com / PCG 313-1"},
+                    {"point": "Exhaustivite charges sociales", "reference": "ISA 550 / NEP 550"},
+                    {"point": "Conventions reglementees", "reference": "Art. L.225-38 Code de commerce"},
+                    {"point": "Controle interne", "reference": "NEP 315 / ISA 315"},
+                ],
+            },
+        },
+        "score_global": {
+            "formule": "S_global = S_URSSAF * 0.40 + S_DGFIP * 0.35 + S_CDC * 0.25",
+            "poids": {"URSSAF": 0.40, "DGFIP": 0.35, "Cour_des_comptes": 0.25},
+            "justification_poids": "Risque financier (cotisations sociales = charge principale) > Risque fiscal > Risque comptable",
+        },
+        "avertissement": "Les scores NormaCheck sont des indicateurs internes. Ils ne constituent pas une certification officielle (art. L.243-6-3 CSS).",
+    }
+
+
 # ==============================
 # BIBLIOTHEQUE DE CONNAISSANCES
 # ==============================
@@ -7371,7 +7481,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .al.err{background:var(--rl);color:#991b1b;border:1px solid #fecaca}
 .al.warn{background:var(--ol);color:#92400e;border:1px solid #fde68a}
 /* Gauge */
-.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--g) 0%,var(--g) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto}
+.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--gc,var(--g)) 0%,var(--gc,var(--g)) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto}
 .gauge-inner{width:90px;height:90px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p)}
 /* Progress */
 .prg{display:none;margin:14px 0}
@@ -7492,7 +7602,29 @@ APP_HTML += """
 </div>
 <div class="card"><h2>Alertes</h2><div id="dash-alertes"><div class="al info"><span class="ai">&#128161;</span><span>Importez des documents pour lancer l'analyse.</span></div></div></div>
 </div>
-<div class="card"><h2>Scores de risque par destinataire</h2>
+<div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button></h2>
+<div class="g3" id="dash-scores-triple">
+<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">URSSAF / CSS</div>
+<div class="gauge" id="gauge-urssaf" style="--pct:0%;--gc:var(--p3)"><div class="gauge-inner" id="gauge-urssaf-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Securite sociale</div>
+<div style="font-size:.72em;margin-top:2px" id="grade-urssaf"></div>
+</div>
+<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">DGFIP / CGI</div>
+<div class="gauge" id="gauge-fiscal" style="--pct:0%;--gc:var(--pu)"><div class="gauge-inner" id="gauge-fiscal-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Fiscal</div>
+<div style="font-size:.72em;margin-top:2px" id="grade-fiscal"></div>
+</div>
+<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">COUR DES COMPTES</div>
+<div class="gauge" id="gauge-cdc" style="--pct:0%;--gc:var(--tl)"><div class="gauge-inner" id="gauge-cdc-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Regularite comptable</div>
+<div style="font-size:.72em;margin-top:2px" id="grade-cdc"></div>
+</div>
+</div>
+</div>
+<div class="card"><h2>Impacts financiers par destinataire</h2>
 <div class="g4" id="dash-by-dest">
 <div class="sc blue"><div class="val" id="dd-urssaf">-</div><div class="lab">URSSAF</div></div>
 <div class="sc purple"><div class="val" id="dd-fiscal">-</div><div class="lab">Fiscal</div></div>
@@ -8058,6 +8190,144 @@ APP_HTML += """
 </div>
 </div>
 
+<!-- ===== DETAILS DES SCORES DE CONFORMITE ===== -->
+<div class="sec" id="s-score-details">
+<div class="card">
+<h2>Methodologie des scores de conformite NormaCheck v3.8</h2>
+<div class="al info"><span class="ai">&#9878;</span><span>Cette page detaille les formules de calcul des trois scores de conformite. Ces methodologies sont soumises a validation par l <strong>URSSAF</strong>, la <strong>DGFIP</strong> et la <strong>Cour des comptes</strong> en vue d une certification et labelisation officielle.</span></div>
+<button class="btn btn-s" onclick="showS('dashboard')" style="margin-top:12px">&#8592; Retour au dashboard</button>
+</div>
+
+<div class="card" style="border-left:4px solid var(--p3)">
+<h2 style="color:var(--p2)">1. Score URSSAF - Conformite sociale (CSS)</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule :</strong><br>
+S<sub>URSSAF</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>social</sub><br><br>
+<strong>Penalites P(sev) par constat social :</strong><br>
+&bull; Critique : -15 pts (ex: absence DPAE, travail dissimule)<br>
+&bull; Haute : -10 pts (ex: ecart cotisation > 5%, NIR invalide)<br>
+&bull; Moyenne : -5 pts (ex: ecart taux AT/MP, proratisation PASS)<br>
+&bull; Faible : -2 pts (ex: arrondi mineur, libelle incomplet)<br><br>
+<strong>Bonus B<sub>social</sub> :</strong><br>
+&bull; +5 pts si aucun constat critique (absence de fraude presumee)<br>
+&bull; +3 pts si &ge; 3 sources analysees (BS + DSN + LDP = corroboration)<br>
+&bull; +5 pts si audit social &ge; 80% de couverture<br>
+&bull; Plafond a 80% si &le; 1 document analyse (fiabilite insuffisante)
+</div>
+<div style="margin-top:12px;font-size:.86em;line-height:1.8">
+<h3 style="margin-bottom:8px">Perimetres de controle</h3>
+<table><thead><tr><th>Point de controle</th><th>Reference legale</th><th>Nature du constat</th></tr></thead><tbody>
+<tr><td>Assiette des cotisations</td><td>Art. L242-1 CSS</td><td>Ecart brut BS vs DSN</td></tr>
+<tr><td>Reduction generale (ex-Fillon)</td><td>Art. L241-13 CSS</td><td>Depassement 3,5 SMIC, coefficient errone</td></tr>
+<tr><td>FNAL</td><td>Art. L834-1 CSS</td><td>Taux incorrect selon effectif (&lt;50 / &ge;50)</td></tr>
+<tr><td>Taux AT/MP</td><td>Art. L242-5, D242-6-1 CSS</td><td>Taux applique vs taux notifie</td></tr>
+<tr><td>CSG/CRDS</td><td>Art. L136-1-1 CSS</td><td>Assiette incorrecte (abattement 1,75%)</td></tr>
+<tr><td>Plafond SS proratise</td><td>Art. L242-8 CSS</td><td>Temps partiel non proratise</td></tr>
+<tr><td>Retraite complementaire</td><td>ANI AGIRC-ARRCO art. 36</td><td>Tranche 1/2 incorrecte</td></tr>
+<tr><td>SMIC horaire</td><td>Art. L3231-2 Code du travail</td><td>Net inferieur au SMIC 2026</td></tr>
+<tr><td>NIR / Identite</td><td>Art. R.114-7 CSS</td><td>NIR absent ou format invalide</td></tr>
+<tr><td>Bulletin de paie</td><td>Art. L3243-2 Code du travail</td><td>Rubriques obligatoires manquantes</td></tr>
+</tbody></table>
+</div>
+<div style="margin-top:12px;padding:12px;background:var(--pl);border-radius:8px;font-size:.84em">
+<strong>Echelle de notation :</strong> A (&ge;90) | B (&ge;75) | C (&ge;60) | D (&ge;45) | E (&ge;30) | F (&lt;30)<br>
+<strong>Organisme certificateur vise :</strong> URSSAF / Caisse Nationale (art. L.243-6-3 CSS)
+</div>
+<div id="score-detail-urssaf" style="margin-top:12px"></div>
+</div>
+
+<div class="card" style="border-left:4px solid var(--pu)">
+<h2 style="color:var(--pu)">2. Score DGFIP - Conformite fiscale (CGI)</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule :</strong><br>
+S<sub>DGFIP</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>fiscal</sub><br><br>
+<strong>Penalites P(sev) par constat fiscal :</strong><br>
+&bull; Critique : -15 pts (ex: absence TVA, non-depot declaration)<br>
+&bull; Haute : -10 pts (ex: ecart TVA collectee/deductible, DAS-2 manquante)<br>
+&bull; Moyenne : -5 pts (ex: mentions facture manquantes, delai archivage)<br>
+&bull; Faible : -2 pts (ex: format FEC non optimal, ecart arrondi)<br><br>
+<strong>Bonus B<sub>fiscal</sub> :</strong><br>
+&bull; +5 pts si aucun constat critique<br>
+&bull; +3 pts si &ge; 3 sources analysees<br>
+&bull; +5 pts si audit fiscal &ge; 80% de couverture<br>
+&bull; Plafond a 80% si &le; 1 document analyse
+</div>
+<div style="margin-top:12px;font-size:.86em;line-height:1.8">
+<h3 style="margin-bottom:8px">Perimetres de controle</h3>
+<table><thead><tr><th>Point de controle</th><th>Reference legale</th><th>Nature du constat</th></tr></thead><tbody>
+<tr><td>TVA collectee / deductible</td><td>Art. 256 et 271 CGI</td><td>Ecart entre TVA declaree et calculee</td></tr>
+<tr><td>Declarations fiscales</td><td>Art. 1649 quater B CGI</td><td>Completude des declarations (IS, IR, TVA)</td></tr>
+<tr><td>DAS-2 Honoraires</td><td>Art. 240 CGI</td><td>Declaration des honoraires > 1200 EUR/an</td></tr>
+<tr><td>FEC</td><td>Art. L.47 A-I LPF</td><td>Presentation du fichier des ecritures comptables</td></tr>
+<tr><td>Facturation</td><td>Art. 289 CGI</td><td>Mentions obligatoires sur factures</td></tr>
+<tr><td>Conservation documents</td><td>Art. L.102 B LPF</td><td>Delai 6 ans fiscal / 10 ans comptable</td></tr>
+<tr><td>Avantages en nature</td><td>Art. 82 CGI</td><td>Evaluation et declaration correctes</td></tr>
+<tr><td>Credit impot formation</td><td>Art. 244 quater M CGI</td><td>Eligibilite et justificatifs</td></tr>
+<tr><td>CFE / CVAE</td><td>Art. 1447 CGI</td><td>Declarations et paiement</td></tr>
+<tr><td>Taxe sur les salaires</td><td>Art. 231 CGI</td><td>Assujettissement et calcul</td></tr>
+</tbody></table>
+</div>
+<div style="margin-top:12px;padding:12px;background:var(--pul);border-radius:8px;font-size:.84em">
+<strong>Echelle de notation :</strong> A (&ge;90) | B (&ge;75) | C (&ge;60) | D (&ge;45) | E (&ge;30) | F (&lt;30)<br>
+<strong>Organisme certificateur vise :</strong> Direction Generale des Finances Publiques (DGFiP)
+</div>
+<div id="score-detail-fiscal" style="margin-top:12px"></div>
+</div>
+
+<div class="card" style="border-left:4px solid var(--tl)">
+<h2 style="color:var(--tl)">3. Score Cour des comptes - Regularite comptable</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule :</strong><br>
+S<sub>CDC</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>cdc</sub><br><br>
+<strong>Penalites P(sev) par constat comptable :</strong><br>
+&bull; Critique : -15 pts (ex: comptes non certifiables, anomalie significative)<br>
+&bull; Haute : -10 pts (ex: ecart BS/DSN > 5%, cut-off non respecte)<br>
+&bull; Moyenne : -5 pts (ex: piece justificative manquante, rapprochement partiel)<br>
+&bull; Faible : -2 pts (ex: ecart arrondi, libelle imprecis)<br><br>
+<strong>Bonus B<sub>cdc</sub> :</strong><br>
+&bull; +5 pts si aucun constat critique<br>
+&bull; +3 pts si &ge; 3 sources analysees<br>
+&bull; +5 pts si audit CDC &ge; 80% de couverture<br>
+&bull; +3 pts si rapprochement des masses concordant (ecart &lt; 1%)<br>
+&bull; Plafond a 80% si &le; 1 document analyse
+</div>
+<div style="margin-top:12px;font-size:.86em;line-height:1.8">
+<h3 style="margin-bottom:8px">Perimetres de controle</h3>
+<table><thead><tr><th>Point de controle</th><th>Reference legale / norme</th><th>Nature du constat</th></tr></thead><tbody>
+<tr><td>Regularite des comptes</td><td>Normes NEP / ISA</td><td>Comptes annuels certifiables</td></tr>
+<tr><td>Sincerite des ecritures</td><td>Art. L.123-14 Code de commerce</td><td>Absence de manipulations comptables</td></tr>
+<tr><td>Image fidele du patrimoine</td><td>Art. L.123-14 Code de commerce</td><td>Bilan refletant la realite economique</td></tr>
+<tr><td>Continuite d exploitation</td><td>NEP 570</td><td>Aucun doute significatif</td></tr>
+<tr><td>Separation des exercices</td><td>Art. L.123-12 C.com / PCG 313-1</td><td>Cut-off correct</td></tr>
+<tr><td>Exhaustivite charges sociales</td><td>ISA 550 / NEP 550</td><td>Concordance BS / DSN / LDP</td></tr>
+<tr><td>Conventions reglementees</td><td>Art. L.225-38 C.com</td><td>Rapport special CAC</td></tr>
+<tr><td>Controle interne</td><td>NEP 315 / ISA 315</td><td>Documentation des procedures</td></tr>
+</tbody></table>
+</div>
+<div style="margin-top:12px;padding:12px;background:#f0fdfa;border-radius:8px;font-size:.84em">
+<strong>Echelle de notation :</strong> A (&ge;90) | B (&ge;75) | C (&ge;60) | D (&ge;45) | E (&ge;30) | F (&lt;30)<br>
+<strong>Organisme certificateur vise :</strong> Cour des comptes / Chambres regionales des comptes
+</div>
+<div id="score-detail-cdc" style="margin-top:12px"></div>
+</div>
+
+<div class="card">
+<h2>Score global NormaCheck</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule du score global :</strong><br>
+S<sub>global</sub> = &lfloor; (S<sub>URSSAF</sub> &times; 0.40) + (S<sub>DGFIP</sub> &times; 0.35) + (S<sub>CDC</sub> &times; 0.25) &rfloor;<br><br>
+<strong>Poids de ponderation :</strong><br>
+&bull; URSSAF : 40% (risque financier principal : cotisations sociales)<br>
+&bull; DGFIP : 35% (risque fiscal : impots, TVA, declarations)<br>
+&bull; Cour des comptes : 25% (risque comptable : regularite, sincerite)
+</div>
+<div id="score-detail-global" style="margin-top:12px"></div>
+<div style="margin-top:16px;padding:14px;background:var(--ol);border-radius:10px;border:1px solid #fde68a;font-size:.84em">
+<strong>&#9888; Avertissement :</strong> Les scores NormaCheck sont des indicateurs internes d aide a la conformite. Ils ne constituent pas une certification officielle et ne sont pas opposables aux administrations (art. L.243-6-3 CSS). La labelisation est en cours de validation aupres des organismes certificateurs.
+</div>
+</div>
+</div>
+
 </div><!-- end .page -->
 </div><!-- end .content -->
 </div><!-- end .layout -->
@@ -8072,7 +8342,7 @@ var _ncUser=null;
 function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
 
 /* === INIT === */
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration"};
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite"};
 function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
 function gv(id){var el=document.getElementById(id);return el?el.value:"";}
 function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
@@ -8102,6 +8372,7 @@ if(n==="analyse"&&analysisData){document.getElementById("res-analyse").style.dis
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
 if(n==="veille"){loadVeille();}
 if(n==="config"){loadEntete();loadAlertConfigs();}
+if(n==="score-details"){renderScoreDetails();}
 }catch(e){console.error("showS error:",n,e);}
 }
 
@@ -8135,6 +8406,12 @@ document.getElementById("dd-urssaf").textContent=byDest["URSSAF"].toFixed(0)+" E
 document.getElementById("dd-fiscal").textContent=byDest["Fiscal"].toFixed(0)+" EUR";
 document.getElementById("dd-ft").textContent=byDest["France Travail"].toFixed(0)+" EUR";
 document.getElementById("dd-guso").textContent=byDest["GUSO"].toFixed(0)+" EUR";
+/* Triple scores */
+var ts=calculateTripleScore(d);
+function setGauge(id,valId,gradeId,sc){var g=document.getElementById(id);var v=document.getElementById(valId);var gr=document.getElementById(gradeId);if(g)g.style.setProperty("--pct",sc.score+"%");if(v)v.textContent=sc.score+"%";if(gr){var gcls=sc.score>=75?"color:var(--g)":sc.score>=45?"color:var(--o)":"color:var(--r)";gr.innerHTML="<span style='font-weight:700;"+gcls+"'>"+sc.grade+"</span>";}}
+setGauge("gauge-urssaf","gauge-urssaf-val","grade-urssaf",ts.urssaf);
+setGauge("gauge-fiscal","gauge-fiscal-val","grade-fiscal",ts.fiscal);
+setGauge("gauge-cdc","gauge-cdc-val","grade-cdc",ts.cdc);
 }catch(e){console.error("loadDash",e);}
 }
 
@@ -8202,11 +8479,14 @@ return resp.json().then(function(data){analysisData=data;try{sessionStorage.setI
 function showJsonResults(data){
 var s=data.synthese||{};var impact=s.impact_financier_total||0;
 var dashNr=s.nb_fichiers_non_reconnus||0;
-var nbAno=(data.constats||[]).length;var conform=Math.max(0,100-(s.score_risque_global||0));
+var nbAno=(data.constats||[]).length;var ts=calculateTripleScore(data);
 var dashH="<div class='sc blue' style='cursor:pointer' data-scroll='az-findings' onclick='scrollToEl(this)'><div class='val'>"+nbAno+"</div><div class='lab'>Anomalies &#8595;</div></div>";
 dashH+="<div class='sc "+(impact>1000?"red":"green")+"' style='cursor:pointer' data-toggle='az-impact-detail' onclick='toggleDetailAttr(this)'><div class='val'>"+impact.toFixed(2)+" EUR</div><div class='lab'>Impact &#8595;</div></div>";
-dashH+="<div class='sc green' style='cursor:pointer' data-scroll='az-audit-card' onclick='scrollToEl(this)'><div class='val'>"+conform+"%</div><div class='lab'>Conformite &#8595;</div></div>";
+dashH+="<div class='sc green' style='cursor:pointer' data-scroll='az-audit-card' onclick='scrollToEl(this)'><div class='val'>"+ts.global.score+"%</div><div class='lab'>Conformite &#8595;</div></div>";
 dashH+="<div class='sc'><div class='val'>"+(s.nb_fichiers||0)+"</div><div class='lab'>Fichiers</div></div>";
+dashH+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF</div></div>";
+dashH+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP</div></div>";
+dashH+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC</div></div>";
 if(dashNr>0)dashH+="<div class='sc red'><div class='val'>"+dashNr+"</div><div class='lab'>Non reconnus</div></div>";
 document.getElementById("az-dashboard").innerHTML=dashH;
 var impactDetail=document.getElementById("az-impact-detail");
@@ -8835,25 +9115,75 @@ h+="</tbody></table></div>";}
 el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur chargement audit: "+e.message+"</div>";});}
 
 /* === CONFORMITY SCORE === */
-function calculateConformityScore(data){
-var score=100;var details=[];var constats=data.constats||[];
-var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;
+function categToDomain(cat,ref){
+var c=(cat||"").toLowerCase();var r=(ref||"").toLowerCase();
+if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||r.indexOf("taxe")>=0)return"fiscal";
+if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0)return"cdc";
+return"urssaf";}
+function _scoreOne(constats,nbDecl){
+var score=100;var details=[];var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;
 for(var i=0;i<constats.length;i++){var c=constats[i];var sev=(c.severite||"").toLowerCase();
-if(sev==="critique"){score-=15;nbCrit++;details.push({deduction:-15,raison:c.titre||"Anomalie critique"});}
-else if(sev==="haute"||sev==="high"){score-=10;nbHaut++;details.push({deduction:-10,raison:c.titre||"Anomalie haute"});}
-else if(sev==="moyenne"||sev==="medium"){score-=5;nbMoy++;details.push({deduction:-5,raison:c.titre||"Anomalie moyenne"});}
-else{score-=2;nbBas++;details.push({deduction:-2,raison:c.titre||"Anomalie basse"});}}
-if(nbCrit===0&&constats.length>0){score+=5;details.push({deduction:5,raison:"Bonus: aucune anomalie critique"});}
-var nbDecl=(data.declarations||[]).length;
-if(nbDecl>=3){score+=3;details.push({deduction:3,raison:"Bonus: documentation suffisante ("+nbDecl+" sources)"});}
-else if(nbDecl<=1){var maxScore=80;if(score>maxScore){score=maxScore;}details.push({deduction:0,raison:"Plafond a "+maxScore+"% : documentation insuffisante pour score complet"});}
+if(sev==="critique"){score-=15;nbCrit++;details.push({deduction:-15,raison:c.titre||"Anomalie critique",ref:c.reference_legale||""});}
+else if(sev==="haute"||sev==="high"){score-=10;nbHaut++;details.push({deduction:-10,raison:c.titre||"Anomalie haute",ref:c.reference_legale||""});}
+else if(sev==="moyenne"||sev==="medium"){score-=5;nbMoy++;details.push({deduction:-5,raison:c.titre||"Anomalie moyenne",ref:c.reference_legale||""});}
+else{score-=2;nbBas++;details.push({deduction:-2,raison:c.titre||"Anomalie basse",ref:c.reference_legale||""});}}
+if(nbCrit===0&&constats.length>0){score+=5;details.push({deduction:5,raison:"Bonus: aucun constat critique",ref:""});}
+if(nbDecl>=3){score+=3;details.push({deduction:3,raison:"Bonus: documentation suffisante ("+nbDecl+" sources)",ref:""});}
+else if(nbDecl<=1){if(score>80)score=80;details.push({deduction:0,raison:"Plafond 80% : documentation insuffisante",ref:""});}
 score=Math.max(0,Math.min(100,score));
 var grade="F";if(score>=90)grade="A";else if(score>=75)grade="B";else if(score>=60)grade="C";else if(score>=45)grade="D";else if(score>=30)grade="E";
-var explication="Score NormaCheck : "+score+"/100 ("+grade+"). ";
-explication+="Base 100, deductions : critiques("+nbCrit+"x-15) hautes("+nbHaut+"x-10) moyennes("+nbMoy+"x-5) basses("+nbBas+"x-2). ";
-explication+="Bonus possible si aucune anomalie critique (+5) et documentation suffisante (+3). ";
-explication+="Plafonne a 80% si moins de 2 documents analyses.";
-return{score:score,grade:grade,explanation:explication,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas};}
+return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas};}
+function calculateTripleScore(data){
+var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
+var urssafC=[],fiscalC=[],cdcC=[];
+for(var i=0;i<constats.length;i++){var c=constats[i];var dom=categToDomain(c.categorie,c.reference_legale);
+if(dom==="fiscal")fiscalC.push(c);else if(dom==="cdc")cdcC.push(c);else urssafC.push(c);}
+var su=_scoreOne(urssafC,nbDecl);var sf=_scoreOne(fiscalC,nbDecl);var sc=_scoreOne(cdcC,nbDecl);
+/* Bonus audit coverage - fetched async if available */
+su.domaine="URSSAF";su.ref_legal="Code de la securite sociale (CSS)";su.organisme="URSSAF / Caisse Nationale";
+sf.domaine="DGFIP";sf.ref_legal="Code general des impots (CGI)";sf.organisme="Direction Generale des Finances Publiques";
+sc.domaine="Cour des comptes";sc.ref_legal="Code de commerce / Normes NEP-ISA";sc.organisme="Cour des comptes / CRC";
+var global=Math.round(su.score*0.40+sf.score*0.35+sc.score*0.25);
+var ggrade="F";if(global>=90)ggrade="A";else if(global>=75)ggrade="B";else if(global>=60)ggrade="C";else if(global>=45)ggrade="D";else if(global>=30)ggrade="E";
+return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length};}
+function calculateConformityScore(data){
+var ts=calculateTripleScore(data);var g=ts.global;
+var allDetails=ts.urssaf.details.concat(ts.fiscal.details).concat(ts.cdc.details);
+var explication="Score global NormaCheck : "+g.score+"/100 ("+g.grade+"). ";
+explication+="URSSAF: "+ts.urssaf.score+"/100 ("+ts.urssaf.grade+") | DGFIP: "+ts.fiscal.score+"/100 ("+ts.fiscal.grade+") | CDC: "+ts.cdc.score+"/100 ("+ts.cdc.grade+"). ";
+explication+="Formule: S = URSSAF*0.40 + DGFIP*0.35 + CDC*0.25.";
+return{score:g.score,grade:g.grade,explanation:explication,details:allDetails,
+nb_critiques:ts.urssaf.nb_critiques+ts.fiscal.nb_critiques+ts.cdc.nb_critiques,
+nb_hautes:ts.urssaf.nb_hautes+ts.fiscal.nb_hautes+ts.cdc.nb_hautes,
+nb_moyennes:ts.urssaf.nb_moyennes+ts.fiscal.nb_moyennes+ts.cdc.nb_moyennes,
+nb_basses:ts.urssaf.nb_basses+ts.fiscal.nb_basses+ts.cdc.nb_basses,
+tripleScore:ts};}
+function renderScoreDetails(){
+if(!analysisData)return;
+var ts=calculateTripleScore(analysisData);
+function renderDomainDetail(elId,sc){
+var el=document.getElementById(elId);if(!el)return;
+var h="<h3>Resultat : "+sc.score+"/100 ("+sc.grade+") - "+sc.domaine+"</h3>";
+h+="<div style='margin:8px 0;font-size:.86em'><strong>Constats pris en compte :</strong> critiques="+sc.nb_critiques+" | hautes="+sc.nb_hautes+" | moyennes="+sc.nb_moyennes+" | faibles="+sc.nb_basses+"</div>";
+h+="<table><thead><tr><th>Points</th><th>Raison</th><th>Reference legale</th></tr></thead><tbody>";
+for(var i=0;i<sc.details.length;i++){var d=sc.details[i];
+h+="<tr><td style='font-weight:700;color:"+(d.deduction>0?"var(--g)":"var(--r)")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td>"+d.raison+"</td><td style='font-size:.82em;color:var(--tx2)'>"+d.ref+"</td></tr>";}
+h+="</tbody></table>";
+h+="<div style='margin-top:10px;padding:10px;background:var(--bg);border-radius:8px;font-family:monospace;font-size:.84em'>S<sub>"+sc.domaine+"</sub> = 100";
+for(var i=0;i<sc.details.length;i++){var d=sc.details[i];h+=(d.deduction>=0?" + ":" - ")+Math.abs(d.deduction);}
+h+=" = <strong>"+sc.score+"</strong></div>";
+el.innerHTML=h;}
+renderDomainDetail("score-detail-urssaf",ts.urssaf);
+renderDomainDetail("score-detail-fiscal",ts.fiscal);
+renderDomainDetail("score-detail-cdc",ts.cdc);
+var gel=document.getElementById("score-detail-global");
+if(gel){var gh="<div style='font-size:.9em;line-height:1.8'>";
+gh+="<strong>Calcul :</strong> S<sub>global</sub> = ("+ts.urssaf.score+" x 0.40) + ("+ts.fiscal.score+" x 0.35) + ("+ts.cdc.score+" x 0.25) = <strong>"+ts.global.score+"/100 ("+ts.global.grade+")</strong></div>";
+gh+="<div class='g3' style='margin-top:12px'>";
+gh+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF (x0.40)</div></div>";
+gh+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP (x0.35)</div></div>";
+gh+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC (x0.25)</div></div>";
+gh+="</div>";gel.innerHTML=gh;}}
 
 /* === PDF EXPORT === */
 function exportPDF(){
@@ -8875,14 +9205,28 @@ var html="<!DOCTYPE html><html><head><meta charset='UTF-8'><title>"+titre+"</tit
 html+=entHtml;
 html+="<h1 style='text-align:center'>"+titre+"</h1>";
 html+="<p style='text-align:center;color:#64748b'>Date: "+new Date().toLocaleDateString("fr-FR")+" | "+((analysisData.synthese||{}).nb_fichiers||0)+" fichier(s) analyse(s)</p>";
-html+="<div class='score'><div class='grade'>"+scoreData.grade+"</div><div style='font-size:2em;font-weight:700'>"+scoreData.score+" / 100</div><p style='color:#64748b;margin-top:8px'>"+scoreData.explanation+"</p></div>";
-if(socialH){html+="<h2>Partie sociale - Constats</h2><p style='color:#64748b'>Points de controle relevant de la legislation sociale (Code de la securite sociale, Code du travail)</p>"+socialH;}
-if(fiscalH){html+="<h2>Partie fiscale - Constats</h2><p style='color:#64748b'>Points de controle relevant de la legislation fiscale (Code general des impots)</p>"+fiscalH;}
+var ts=scoreData.tripleScore||calculateTripleScore(analysisData);
+html+="<div class='score'><div class='grade'>"+scoreData.grade+"</div><div style='font-size:2em;font-weight:700'>Score global : "+scoreData.score+" / 100</div><p style='color:#64748b;margin-top:8px'>"+scoreData.explanation+"</p></div>";
+html+="<div style='display:flex;gap:16px;justify-content:center;margin:20px 0;flex-wrap:wrap'>";
+html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #3b82f6;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>URSSAF / CSS</div><div style='font-size:2em;font-weight:800;color:#1e40af'>"+ts.urssaf.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.urssaf.score>=75?"#16a34a":ts.urssaf.score>=45?"#d97706":"#ef4444")+"'>"+ts.urssaf.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.urssaf.nb_critiques+" critique(s) | "+ts.urssaf.details.length+" constat(s)</div></div>";
+html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #a855f7;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>DGFIP / CGI</div><div style='font-size:2em;font-weight:800;color:#7c3aed'>"+ts.fiscal.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.fiscal.score>=75?"#16a34a":ts.fiscal.score>=45?"#d97706":"#ef4444")+"'>"+ts.fiscal.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.fiscal.nb_critiques+" critique(s) | "+ts.fiscal.details.length+" constat(s)</div></div>";
+html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #0d9488;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>COUR DES COMPTES</div><div style='font-size:2em;font-weight:800;color:#0d9488'>"+ts.cdc.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.cdc.score>=75?"#16a34a":ts.cdc.score>=45?"#d97706":"#ef4444")+"'>"+ts.cdc.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.cdc.nb_critiques+" critique(s) | "+ts.cdc.details.length+" constat(s)</div></div>";
+html+="</div>";
+html+="<div style='text-align:center;padding:10px;background:#f8fafc;border-radius:8px;margin:10px 0;font-size:.85em'><strong>Ponderation :</strong> S<sub>global</sub> = URSSAF("+ts.urssaf.score+") x 0.40 + DGFIP("+ts.fiscal.score+") x 0.35 + CDC("+ts.cdc.score+") x 0.25 = <strong>"+ts.global.score+"</strong></div>";
+if(socialH){html+="<h2>Partie sociale - Constats URSSAF</h2><p style='color:#64748b'>Points de controle relevant de la legislation sociale (Code de la securite sociale, Code du travail)</p>"+socialH;}
+if(fiscalH){html+="<h2>Partie fiscale - Constats DGFIP</h2><p style='color:#64748b'>Points de controle relevant de la legislation fiscale (Code general des impots)</p>"+fiscalH;}
 if(!socialH&&!fiscalH){html+="<h2>Constats</h2>";for(var i=0;i<constats.length;i++){var c=constats[i];html+="<div style='border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0'><strong>"+c.titre+"</strong><p>"+c.description+"</p><p>Impact: "+Math.abs(c.montant_impact||0).toFixed(2)+" EUR</p></div>";}}
 html+="<h2>Recommandations</h2>";var recos=analysisData.recommandations||[];for(var i=0;i<recos.length;i++){html+="<p>"+(i+1)+". "+(recos[i].description||recos[i].titre||"")+"</p>";}
-html+="<div style='margin-top:40px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;font-size:.85em'><h3>Methodologie du score NormaCheck</h3><p>"+scoreData.explanation+"</p><table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:#1e40af;color:#fff'><th style='padding:6px 10px;text-align:left'>Deduction</th><th style='padding:6px 10px;text-align:left'>Raison</th></tr>";
-for(var i=0;i<scoreData.details.length;i++){var d=scoreData.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td></tr>";}
-html+="</table></div>";
+function _pdfScoreTable(sc,title,color){
+html+="<div style='margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;border-left:4px solid "+color+";font-size:.85em'>";
+html+="<h3 style='color:"+color+"'>"+title+" - "+sc.score+"/100 ("+sc.grade+")</h3>";
+html+="<p style='margin:6px 0'>Formule : S = 100 - &Sigma; P(severite) + Bonus. Penalites : critique(-15), haute(-10), moyenne(-5), faible(-2).</p>";
+html+="<table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:"+color+";color:#fff'><th style='padding:6px 10px;text-align:left'>Points</th><th style='padding:6px 10px;text-align:left'>Raison</th><th style='padding:6px 10px;text-align:left'>Reference</th></tr>";
+for(var i=0;i<sc.details.length;i++){var d=sc.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td><td style='padding:4px 10px;font-size:.9em;color:#64748b'>"+(d.ref||"")+"</td></tr>";}
+html+="</table></div>";}
+_pdfScoreTable(ts.urssaf,"Score URSSAF (Securite sociale)","#1e40af");
+_pdfScoreTable(ts.fiscal,"Score DGFIP (Fiscal)","#7c3aed");
+_pdfScoreTable(ts.cdc,"Score Cour des comptes (Regularite comptable)","#0d9488");
 html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.8 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
