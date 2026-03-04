@@ -2724,9 +2724,9 @@ async def reset_ecritures():
 
 @app.get("/api/simulation/bulletin")
 async def sim_bulletin(
-    brut_mensuel: float = Query(2500),
-    effectif: int = Query(10),
-    est_cadre: bool = Query(False),
+    brut_mensuel: float = Query(2500, description="Salaire brut mensuel du salarie simule (EUR)"),
+    effectif: int = Query(10, description="Effectif total de l entreprise (pour seuils FNAL, versement mobilite)"),
+    est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
 ):
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
     calc = ContributionRules()
@@ -3271,14 +3271,14 @@ async def sim_identifier_ccn(texte: str = Query("")):
 # --- Simulation : Cout total employeur ---
 @app.get("/api/simulation/cout-employeur")
 async def sim_cout_employeur(
-    brut_mensuel: float = Query(2500),
-    effectif: int = Query(10),
-    est_cadre: bool = Query(False),
-    avantages_nature: float = Query(0),
-    frais_km: float = Query(0),
-    primes: float = Query(0),
-    tickets_restaurant: float = Query(0),
-    mutuelle_employeur: float = Query(40),
+    brut_mensuel: float = Query(2500, description="Salaire brut mensuel du salarie simule (EUR)"),
+    effectif: int = Query(10, description="Effectif total de l entreprise (pour formation, effort construction, participation)"),
+    est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
+    avantages_nature: float = Query(0, description="Avantages en nature mensuels (EUR)"),
+    frais_km: float = Query(0, description="Frais kilometriques mensuels (EUR)"),
+    primes: float = Query(0, description="Primes mensuelles (EUR)"),
+    tickets_restaurant: float = Query(0, description="Tickets restaurant mensuels (EUR)"),
+    mutuelle_employeur: float = Query(40, description="Part employeur mutuelle mensuelle (EUR)"),
 ):
     brut = brut_mensuel + primes
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
@@ -3326,8 +3326,8 @@ async def sim_cout_employeur(
 # --- Simulation : Seuils d'effectif ---
 @app.get("/api/simulation/seuils-effectif")
 async def sim_seuils(
-    effectif_actuel: int = Query(10),
-    masse_salariale_annuelle: float = Query(400000),
+    effectif_actuel: int = Query(10, description="Effectif total actuel de l entreprise (nb salaries ETP)"),
+    masse_salariale_annuelle: float = Query(400000, description="Masse salariale brute annuelle totale de l entreprise (EUR)"),
 ):
     seuils = [
         {"seuil": 11, "obligations": [
@@ -3399,14 +3399,14 @@ async def sim_seuils(
 # --- Simulation : Masse salariale ---
 @app.get("/api/simulation/masse-salariale")
 async def sim_masse_salariale(
-    brut_moyen: float = Query(2500),
-    effectif: int = Query(10),
-    augmentation_pct: float = Query(3.0),
-    inflation_pct: float = Query(2.0),
-    frais_km_moyen: float = Query(50),
-    avantages_nature_moyen: float = Query(0),
-    primes_variables_pct: float = Query(5.0),
-    turnover_pct: float = Query(10.0),
+    brut_moyen: float = Query(2500, description="Salaire brut moyen par salarie (EUR/mois)"),
+    effectif: int = Query(10, description="Effectif total de l entreprise (nb salaries) — masse = brut_moyen x effectif x 12"),
+    augmentation_pct: float = Query(3.0, description="Augmentation envisagee (%)"),
+    inflation_pct: float = Query(2.0, description="Inflation prevue (%)"),
+    frais_km_moyen: float = Query(50, description="Frais km moyen par salarie (EUR/mois)"),
+    avantages_nature_moyen: float = Query(0, description="Avantages nature moyen par salarie (EUR/mois)"),
+    primes_variables_pct: float = Query(5.0, description="Primes variables (% masse salariale)"),
+    turnover_pct: float = Query(10.0, description="Turnover annuel previsionnel (%)"),
 ):
     masse_actuelle = brut_moyen * effectif * 12
     taux_charges = 0.45
@@ -11228,7 +11228,7 @@ APP_HTML += """
 <div class="tab" onclick="showSimTab('cout',this)">Cout employeur</div>
 <div class="tab" onclick="showSimTab('exo',this)">Exonerations</div>
 <div class="tab" onclick="showSimTab('masse',this)">Masse salariale</div>
-<div class="tab" onclick="showSimTab('seuils',this)">Seuils effectif</div>
+<div class="tab" onclick="showSimTab('seuils',this)">Seuils entreprise</div>
 <div class="tab" onclick="showSimTab('fincontrat',this)">Fins contrats</div>
 <div class="tab" onclick="showSimTab('optim',this)">Optimisation</div>
 <div class="tab" onclick="showSimTab('risques',this)">Risques sectoriels</div>
@@ -11240,27 +11240,29 @@ APP_HTML += """
 <div class="card">
 <div class="tc active" id="sim-bulletin">
 <h2>Simulation bulletin de paie</h2>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong>. L effectif total de l entreprise determine les cotisations liees aux seuils (FNAL, versement mobilite, formation).</p>
 <div class="g3">
-<div><label>Brut mensuel</label><input type="number" step="0.01" id="sim-brut" value="2500"></div>
-<div><label>Effectif</label><input type="number" id="sim-eff" value="10"></div>
-<div><label>Cadre</label><select id="sim-cadre"><option value="false">Non</option><option value="true">Oui</option></select></div>
+<div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="sim-brut" value="2500"></div>
+<div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="sim-eff" value="10"></div>
+<div><label>Statut du salarie</label><select id="sim-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div>
 </div>
 <div class="btn-group"><button class="btn btn-blue" onclick="simBulletin()">Simuler</button><button class="btn btn-s btn-sm" onclick="exportSection('sim')">&#128190; Export</button></div>
 <div id="sim-bull-res"></div>
 </div>
 
 <div class="tc" id="sim-cout"><h2>Cout total employeur detaille</h2>
-<div class="g4"><div><label>Brut mensuel</label><input type="number" step="0.01" id="ce-brut" value="2500"></div><div><label>Effectif</label><input type="number" id="ce-eff" value="10"></div><div><label>Cadre</label><select id="ce-cadre"><option value="false">Non</option><option value="true">Oui</option></select></div><div><label>Primes</label><input type="number" step="0.01" id="ce-primes" value="0"></div></div>
-<div class="g4"><div><label>Avantages nature</label><input type="number" step="0.01" id="ce-avantages" value="0"></div><div><label>Frais km</label><input type="number" step="0.01" id="ce-km" value="0"></div><div><label>Tickets resto</label><input type="number" step="0.01" id="ce-tr" value="0"></div><div><label>Mutuelle (part empl.)</label><input type="number" step="0.01" id="ce-mut" value="40"></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Cout mensuel complet pour <strong>un salarie</strong>. L effectif total sert a determiner les obligations annexes (formation 0.55% ou 1%, effort construction >= 50, participation >= 50).</p>
+<div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="ce-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ce-eff" value="10"></div><div><label>Statut du salarie</label><select id="ce-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Primes mensuelles (EUR)</label><input type="number" step="0.01" id="ce-primes" value="0"></div></div>
+<div class="g4"><div><label>Avantages nature (EUR/mois)</label><input type="number" step="0.01" id="ce-avantages" value="0"></div><div><label>Frais km (EUR/mois)</label><input type="number" step="0.01" id="ce-km" value="0"></div><div><label>Tickets resto (EUR/mois)</label><input type="number" step="0.01" id="ce-tr" value="0"></div><div><label>Mutuelle part employeur (EUR/mois)</label><input type="number" step="0.01" id="ce-mut" value="40"></div></div>
 <button class="btn btn-blue" onclick="simCout()">Calculer</button><div id="sim-cout-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-exo"><h2>Exonerations et aides a l emploi</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulez precisement les exonerations applicables. Tous les parametres de calcul sont modifiables : heures, absences, temps partiel, bareme LODEOM, taux AT, statut cadre.</p>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong> (ou un groupe au meme profil). L effectif total determine les exonerations liees aux seuils. Tous les parametres sont modifiables.</p>
 
 <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
-<h3 style="margin:0 0 8px;font-size:.95em">&#128100; Salarie</h3>
-<div class="g4"><div><label>Brut mensuel (EUR)</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif entreprise</label><input type="number" id="exo-eff" value="10"></div><div><label>Age salarie</label><input type="number" id="exo-age" value="30"></div><div><label>Duree contrat (mois)</label><input type="number" id="exo-duree" value="0" placeholder="0 = CDI"></div></div>
-<div class="g4"><div><label>Statut salarie</label><select id="exo-statut"><option value="standard">Standard (CDI/CDD)</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Cadre</label><select id="exo-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div><div><label>Nb salaries (simulation groupee)</label><input type="number" id="exo-nb" value="1" min="1" max="500"></div></div>
+<h3 style="margin:0 0 8px;font-size:.95em">&#128100; Salarie simule</h3>
+<div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="exo-eff" value="10"></div><div><label>Age du salarie simule</label><input type="number" id="exo-age" value="30"></div><div><label>Duree du contrat (mois, 0 = CDI)</label><input type="number" id="exo-duree" value="0" placeholder="0 = CDI"></div></div>
+<div class="g4"><div><label>Statut du salarie</label><select id="exo-statut"><option value="standard">Standard (CDI/CDD)</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Statut cadre/non-cadre</label><select id="exo-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div><div><label>Nb de salaries au meme profil (simulation groupee)</label><input type="number" id="exo-nb" value="1" min="1" max="500"></div></div>
 </div>
 
 <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
@@ -11281,20 +11283,20 @@ APP_HTML += """
 <button class="btn btn-blue btn-f" onclick="simExo()">&#9889; Simuler les exonerations</button>
 <div id="sim-exo-res" style="margin-top:12px"></div></div>
 
-<div class="tc" id="sim-masse"><h2>Simulation masse salariale</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Impact augmentations, inflation, primes, frais, turnover sur le budget global.</p>
-<div class="g4"><div><label>Brut moyen</label><input type="number" step="0.01" id="ms-brut" value="2500"></div><div><label>Effectif</label><input type="number" id="ms-eff" value="10"></div><div><label>Augmentation %</label><input type="number" step="0.1" id="ms-aug" value="3"></div><div><label>Inflation %</label><input type="number" step="0.1" id="ms-infl" value="2"></div></div>
-<div class="g4"><div><label>Frais km moyen/mois</label><input type="number" step="0.01" id="ms-km" value="50"></div><div><label>Avantages nature/mois</label><input type="number" step="0.01" id="ms-an" value="0"></div><div><label>Primes variables %</label><input type="number" step="0.1" id="ms-primes" value="5"></div><div><label>Turnover %</label><input type="number" step="0.1" id="ms-turn" value="10"></div></div>
+<div class="tc" id="sim-masse"><h2>Simulation masse salariale globale</h2>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Projection du budget salarial <strong>pour l ensemble de l entreprise</strong>. Le brut moyen est multiplie par l effectif total pour estimer la masse annuelle. Impact augmentations, inflation, primes, frais et turnover.</p>
+<div class="g4"><div><label>Salaire brut moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ms-eff" value="10"></div><div><label>Augmentation envisagee (%)</label><input type="number" step="0.1" id="ms-aug" value="3"></div><div><label>Inflation prevue (%)</label><input type="number" step="0.1" id="ms-infl" value="2"></div></div>
+<div class="g4"><div><label>Frais km moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-km" value="50"></div><div><label>Avantages nature moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-an" value="0"></div><div><label>Primes variables (% masse salariale)</label><input type="number" step="0.1" id="ms-primes" value="5"></div><div><label>Turnover annuel previsionnel (%)</label><input type="number" step="0.1" id="ms-turn" value="10"></div></div>
 <button class="btn btn-blue" onclick="simMasse()">Projeter</button><div id="sim-masse-res" style="margin-top:12px"></div></div>
 
-<div class="tc" id="sim-seuils"><h2>Impact seuils d effectif</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Obligations declenchees par le franchissement des seuils 11, 20, 50, 250 et 300 salaries.</p>
-<div class="g2"><div><label>Effectif actuel</label><input type="number" id="se-eff" value="48"></div><div><label>Masse salariale annuelle</label><input type="number" step="0.01" id="se-masse" value="1500000"></div></div>
+<div class="tc" id="sim-seuils"><h2>Impact des seuils d effectif sur les obligations de l entreprise</h2>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse <strong>pour l ensemble de l entreprise</strong> : quelles obligations sont declenchees par le franchissement des seuils legaux (11, 20, 50, 250, 300 salaries) et leur impact financier estime.</p>
+<div class="g2"><div><label>Effectif total actuel de l entreprise (nb salaries ETP)</label><input type="number" id="se-eff" value="48"></div><div><label>Masse salariale brute annuelle totale (EUR)</label><input type="number" step="0.01" id="se-masse" value="1500000"></div></div>
 <button class="btn btn-blue" onclick="simSeuils()">Analyser les seuils</button><div id="sim-seuils-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-fincontrat"><h2>Simulation fins de contrats</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Licenciement, rupture conventionnelle, fin CDD, depart retraite : indemnites et couts.</p>
-<div class="g4"><div><label>Type de fin</label><select id="fc-type"><option value="licenciement">Licenciement</option><option value="rupture_conventionnelle">Rupture conventionnelle</option><option value="fin_cdd">Fin de CDD</option><option value="retraite">Depart retraite</option></select></div><div><label>Salaire brut mensuel</label><input type="number" step="0.01" id="fc-brut" value="2500"></div><div><label>Anciennete (mois)</label><input type="number" id="fc-anc" value="36"></div><div><label>Cadre</label><select id="fc-cadre"><option value="false">Non</option><option value="true">Oui</option></select></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong> : licenciement, rupture conventionnelle, fin CDD, depart retraite — indemnites legales et cout total.</p>
+<div class="g4"><div><label>Type de rupture</label><select id="fc-type"><option value="licenciement">Licenciement</option><option value="rupture_conventionnelle">Rupture conventionnelle</option><option value="fin_cdd">Fin de CDD</option><option value="retraite">Depart retraite</option></select></div><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="fc-brut" value="2500"></div><div><label>Anciennete du salarie (mois)</label><input type="number" id="fc-anc" value="36"></div><div><label>Statut du salarie</label><select id="fc-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div></div>
 <div class="g2"><div><label>Motif (licenciement)</label><select id="fc-motif"><option value="personnel">Personnel</option><option value="economique">Economique</option><option value="faute_grave">Faute grave</option><option value="inaptitude">Inaptitude</option></select></div><div style="display:flex;align-items:flex-end"><button class="btn btn-blue btn-f" onclick="simFinContrat()" style="margin-top:0">Calculer les indemnites</button></div></div>
 <div id="sim-fc-res" style="margin-top:12px"></div></div>
 
@@ -11306,8 +11308,8 @@ APP_HTML += """
 <button class="btn btn-blue" onclick="simOptim()">Comparer les scenarios</button><div id="sim-optim-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-risques"><h2>Risques specifiques sectoriels</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse des risques sociaux, AT/MP, obligations et subventions par secteur d activite.</p>
-<div class="g3"><div><label>Code NAF/APE</label><input id="rs-naf" value="6201Z" placeholder="Ex: 6201Z, 4120A..."></div><div><label>Effectif</label><input type="number" id="rs-eff" value="10"></div><div><label>Masse salariale annuelle</label><input type="number" step="0.01" id="rs-masse" value="400000"></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse <strong>pour l ensemble de l entreprise</strong> : risques sociaux, AT/MP, obligations et subventions par secteur d activite.</p>
+<div class="g3"><div><label>Code NAF/APE de l entreprise</label><input id="rs-naf" value="6201Z" placeholder="Ex: 6201Z, 4120A..."></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="rs-eff" value="10"></div><div><label>Masse salariale brute annuelle totale (EUR)</label><input type="number" step="0.01" id="rs-masse" value="400000"></div></div>
 <button class="btn btn-blue" onclick="simRisques()">Analyser</button><div id="sim-risques-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-micro"><h2>Micro-entrepreneur</h2>
