@@ -3875,6 +3875,1148 @@ async def telecharger_tous_documents_demo(
 
 
 # ==============================
+# SUBVENTIONS ET AIDES
+# ==============================
+
+@app.get("/api/subventions/recherche")
+async def rechercher_subventions(
+    code_naf: str = Query(""),
+    effectif: int = Query(10),
+    forme_juridique: str = Query(""),
+    region: str = Query(""),
+    zone: str = Query(""),
+    ca: float = Query(0),
+    age_entreprise: int = Query(5),
+    masse_salariale: float = Query(0),
+    innovation: bool = Query(False),
+    environnement: bool = Query(False),
+    numerique: bool = Query(False),
+    export_intl: bool = Query(False),
+    formation: bool = Query(False),
+    creation_reprise: bool = Query(False),
+    investissement: bool = Query(False),
+    ess: bool = Query(False),
+):
+    """Recherche exhaustive de subventions et aides eligibles."""
+
+    lettre_naf = code_naf[0].upper() if code_naf else ""
+    is_tpe = effectif < 10
+    is_pme = effectif < 250
+    is_eti = 250 <= effectif < 5000
+    is_startup = age_entreprise <= 3
+    is_jeune = age_entreprise <= 8
+
+    # ============================================================
+    # BASE DE DONNEES EXHAUSTIVE DES SUBVENTIONS FRANCAISES
+    # ============================================================
+    toutes_aides = []
+
+    # ------ AIDES NATIONALES - INNOVATION / R&D ------
+    toutes_aides.append({
+        "id": "cir", "nom": "Credit d Impot Recherche (CIR)",
+        "organisme": "MESRI / DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "credit_impot",
+        "description": "Credit d impot de 30% sur les depenses de R&D (jusqu a 100 MEUR), 5% au-dela. Inclut salaires chercheurs, amortissements, brevets, sous-traitance publique.",
+        "montant_max": "30% des depenses R&D",
+        "montant_estime": round(masse_salariale * 0.30, 2) if masse_salariale else None,
+        "conditions": ["Activites de R&D au sens du Manuel de Frascati", "Depenses eligibles documentees", "Declaration annuelle 2069-A"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation or lettre_naf in ("C", "J", "M", "G"),
+        "url_info": "https://www.enseignementsup-recherche.gouv.fr/fr/le-credit-d-impot-recherche-cir-49416",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cii", "nom": "Credit d Impot Innovation (CII)",
+        "organisme": "MESRI / DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "credit_impot",
+        "description": "Credit d impot de 30% sur les depenses d innovation (prototypes, installations pilotes) pour les PME. Plafond 400 000 EUR de depenses.",
+        "montant_max": "120 000 EUR (30% de 400 000 EUR)",
+        "montant_estime": min(120000, round(masse_salariale * 0.30, 2)) if masse_salariale else 120000,
+        "conditions": ["PME au sens communautaire (< 250 sal, CA < 50 MEUR)", "Depenses de conception de prototypes ou installations pilotes de nouveaux produits"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme and (innovation or lettre_naf in ("C", "J", "M")),
+        "url_info": "https://www.enseignementsup-recherche.gouv.fr/fr/le-credit-d-impot-innovation-cii-49418",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "jei", "nom": "Jeune Entreprise Innovante (JEI)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "innovation",
+        "type_aide": "exoneration",
+        "description": "Exoneration de cotisations patronales sur les salaires des personnels de R&D (chercheurs, techniciens, gestionnaires de projets). Exoneration d IS partielle. Entreprise de moins de 8 ans, depenses R&D >= 15% des charges.",
+        "montant_max": "Exoneration totale cotisations patronales R&D + IS partiel",
+        "montant_estime": round(masse_salariale * 0.25, 2) if masse_salariale else None,
+        "conditions": ["Moins de 8 ans d existence", "Depenses R&D >= 15% des charges deductibles", "PME independante", "Activite reellement nouvelle"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_jeune and is_pme and innovation,
+        "url_info": "https://www.economie.gouv.fr/entreprises/jeune-entreprise-innovante-JEI",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "jeic", "nom": "Jeune Entreprise Innovante de Croissance (JEIC)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "exoneration",
+        "description": "Statut renforce depuis 2024 pour les JEI en phase de croissance. Exoneration IS totale la 1ere annee beneficiaire, 50% la 2e. Exoneration cotisations patronales renforcee.",
+        "montant_max": "Exoneration IS + cotisations patronales",
+        "montant_estime": None,
+        "conditions": ["Conditions JEI remplies", "Croissance CA > 10%/an", "Depenses R&D >= 20% des charges"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_jeune and is_pme and innovation,
+        "url_info": "https://www.economie.gouv.fr/entreprises/jeune-entreprise-innovante-JEI",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "bpi-aide-innovation", "nom": "Aide a l innovation (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Subvention ou avance remboursable pour les projets d innovation (faisabilite, developpement, industrialisation). Taux d aide jusqu a 45% pour les PME.",
+        "montant_max": "Jusqu a 3 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Projet innovant (produit, procede, service)", "Plan de financement solide", "Potentiel de marche demontre"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": innovation and (is_pme or is_eti),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "bpi-bourse-french-tech", "nom": "Bourse French Tech",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Subvention pour les startups innovantes en phase d amorcage. Finance la maturation du projet et la validation du modele economique.",
+        "montant_max": "30 000 EUR",
+        "montant_estime": 30000,
+        "conditions": ["Entreprise innovante de moins de 1 an", "Projet technologique ou de rupture", "Entrepreneur a temps plein"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": is_tpe and age_entreprise <= 1 and innovation,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation/bourse-french-tech",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "france2030-i-demo", "nom": "France 2030 - i-Demo",
+        "organisme": "Bpifrance / SGPI", "niveau": "national", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Subvention + avance remboursable pour des projets de R&D collaboratifs ou individuels visant un developpement et une demonstration industriels. Budget total France 2030 : 54 Md EUR.",
+        "montant_max": "Jusqu a 10 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Projet de R&D avec demonstration industrielle", "TRL 5-8", "Marche vise identifie"],
+        "tailles": ["pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation and not is_tpe,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation/aide-pour-le-developpement-de-linnovation",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "cip", "nom": "Credit d Impot Brevets (CIB / IP Box)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "credit_impot",
+        "description": "Taux reduit d IS a 10% sur les revenus de cession ou concession de brevets, logiciels proteges, certificats d obtention vegetale et procedes de fabrication.",
+        "montant_max": "IS a 10% au lieu de 25% sur revenus PI",
+        "montant_estime": None,
+        "conditions": ["Titulaire de brevets ou licences", "Revenus de PI identifiables", "R&D realisee en France"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation,
+        "url_info": "https://www.economie.gouv.fr/entreprises/impot-societes-taux-reduit-brevets",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - EMPLOI / FORMATION ------
+    toutes_aides.append({
+        "id": "acre", "nom": "ACRE (Aide aux Createurs et Repreneurs d Entreprise)",
+        "organisme": "URSSAF", "niveau": "national", "categorie": "emploi",
+        "type_aide": "exoneration",
+        "description": "Exoneration partielle de cotisations sociales pendant la 1ere annee d activite. 50% d exoneration des cotisations maladie, maternite, invalidite, deces, vieillesse, allocations familiales.",
+        "montant_max": "50% des cotisations pendant 12 mois",
+        "montant_estime": round(masse_salariale * 0.15, 2) if masse_salariale and is_startup else None,
+        "conditions": ["Creation ou reprise d entreprise", "Ne pas avoir beneficie de l ACRE dans les 3 ans precedents", "Avoir le controle effectif de l entreprise"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": creation_reprise or is_startup,
+        "url_info": "https://www.urssaf.fr/accueil/employeur/beneficier-dune-exoneration/exonerations-generales/acre.html",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "aide-apprentissage", "nom": "Aide a l embauche d un apprenti",
+        "organisme": "ASP / Ministere du Travail", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aide de 6 000 EUR pour l embauche d un apprenti. Applicable pour les contrats d apprentissage visant un diplome jusqu au master (bac+5).",
+        "montant_max": "6 000 EUR par apprenti",
+        "montant_estime": 6000 * min(effectif, 5) if formation else None,
+        "conditions": ["Contrat d apprentissage", "Apprenti preparant un diplome jusqu au bac+5", "Entreprise de toute taille"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation or True,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F23556",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "contrat-pro", "nom": "Aide au contrat de professionnalisation",
+        "organisme": "ASP", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aide financiere pour l embauche en contrat de professionnalisation de demandeurs d emploi de 26 ans et plus ou de jeunes de moins de 30 ans.",
+        "montant_max": "2 000 EUR",
+        "montant_estime": 2000,
+        "conditions": ["Contrat de professionnalisation", "Salarie de 26 ans et plus ou demandeur d emploi"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F35391",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "reduction-generale", "nom": "Reduction generale des cotisations (ex-Fillon)",
+        "organisme": "URSSAF", "niveau": "national", "categorie": "social",
+        "type_aide": "exoneration",
+        "description": "Reduction degressive des cotisations patronales pour les salaires inferieurs a 1.6 SMIC. Applicable automatiquement. Reduction maximale au SMIC, nulle a 1.6 SMIC.",
+        "montant_max": "Jusqu a 32% du brut au niveau du SMIC",
+        "montant_estime": round(effectif * 350 * 12, 2) if effectif and masse_salariale else None,
+        "conditions": ["Salaries dont la remuneration < 1.6 SMIC brut", "Applicable a toutes les entreprises", "Calcul annualise obligatoire"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": True,
+        "url_info": "https://www.urssaf.fr/accueil/employeur/beneficier-dune-exoneration/exonerations-generales/la-reduction-generale.html",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "aide-emploi-franc", "nom": "Emplois francs",
+        "organisme": "France Travail", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aide a l embauche pour le recrutement de residents de QPV (Quartiers Prioritaires de la Ville). CDI : 5 000 EUR/an sur 3 ans. CDD >= 6 mois : 2 500 EUR/an sur 2 ans.",
+        "montant_max": "15 000 EUR (CDI sur 3 ans)",
+        "montant_estime": 15000 if zone == "qpv" else None,
+        "conditions": ["Resident d un QPV", "CDI ou CDD >= 6 mois", "Inscrit comme demandeur d emploi"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": zone == "qpv" or True,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F34917",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "fne-formation", "nom": "FNE-Formation",
+        "organisme": "DREETS / ASP", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Prise en charge des couts pedagogiques pour la formation des salaries. Cible les transitions ecologiques, alimentaires, numeriques. Taux de prise en charge : 40 a 100% selon taille.",
+        "montant_max": "100% des couts pedagogiques (TPE/PME)",
+        "montant_estime": round(effectif * 1500, 2) if effectif else None,
+        "conditions": ["Salaries en activite", "Formation liee aux transitions (ecologique, numerique, alimentaire)", "Pas de formation obligatoire"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation or environnement or numerique,
+        "url_info": "https://travail-emploi.gouv.fr/emploi-et-insertion/accompagnement-des-mutations-economiques/appui-aux-mutations-economiques/fne-formation",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "aide-th", "nom": "Aide a l emploi de travailleurs handicapes (AGEFIPH)",
+        "organisme": "AGEFIPH", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aides financieres pour l integration ou le maintien dans l emploi de personnes en situation de handicap : amenagement de poste, tutorat, formation.",
+        "montant_max": "Jusqu a 5 000 EUR (amenagement) + 3 000 EUR (accueil)",
+        "montant_estime": 5000,
+        "conditions": ["Recrutement ou maintien d un travailleur handicape (RQTH)", "Entreprise du secteur prive"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": True,
+        "url_info": "https://www.agefiph.fr/aides-handicap",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "opco-formation", "nom": "Financement OPCO (plan de developpement des competences)",
+        "organisme": "OPCO (11 operateurs)", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Prise en charge des actions de formation pour les entreprises de moins de 50 salaries par l OPCO de branche. Frais pedagogiques + remuneration + frais annexes.",
+        "montant_max": "Variable selon OPCO et branche",
+        "montant_estime": None,
+        "conditions": ["Entreprise < 50 salaries", "Formation dans le plan de developpement des competences", "OPCO de branche identifie"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": effectif < 50,
+        "url_info": "https://travail-emploi.gouv.fr/ministere/acteurs/partenaires/opco",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - ENVIRONNEMENT / TRANSITION ECOLOGIQUE ------
+    toutes_aides.append({
+        "id": "ademe-tremplin", "nom": "ADEME Tremplin pour la transition ecologique",
+        "organisme": "ADEME", "niveau": "national", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Aide forfaitaire simplifiee pour les PME : diagnostic environnemental, eco-conception, mobilite durable, economie circulaire, decarbonation.",
+        "montant_max": "Jusqu a 200 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME (< 250 salaries)", "Projet de transition ecologique identifie", "Devis ou cahier des charges"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme and (environnement or True),
+        "url_info": "https://agirpourlatransition.ademe.fr/entreprises/aides-financieres/2024/tremplin-transition-ecologique-pme",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "ademe-decarb-industrie", "nom": "ADEME Decarbonation de l industrie",
+        "organisme": "ADEME / France 2030", "niveau": "national", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Aide a l investissement pour la decarbonation des sites industriels : efficacite energetique, electrification, chaleur bas-carbone, captage CO2.",
+        "montant_max": "Jusqu a 50 MEUR",
+        "montant_estime": None,
+        "conditions": ["Site industriel emetteur de GES", "Projet de reduction des emissions > 1 000 tCO2/an", "Etude prealable realisee"],
+        "tailles": ["pme", "eti", "ge"],
+        "secteurs": ["C"],
+        "eligible": environnement and lettre_naf == "C",
+        "url_info": "https://agirpourlatransition.ademe.fr/entreprises/aides-financieres/2024/aide-a-decarbonation-industrie",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "ci-transition-energetique", "nom": "Credit d impot investissements industrie verte (C3IV)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "environnement",
+        "type_aide": "credit_impot",
+        "description": "Credit d impot de 20 a 60% pour les investissements dans la production de batteries, panneaux solaires, eolien, pompes a chaleur. PME : 60%, ETI : 40%, GE : 20%.",
+        "montant_max": "150 MEUR par entreprise",
+        "montant_estime": None,
+        "conditions": ["Production d equipements pour les energies renouvelables", "Investissement en France", "Agrement prealable"],
+        "tailles": ["pme", "eti", "ge"],
+        "secteurs": ["C"],
+        "eligible": environnement and lettre_naf in ("C", "D"),
+        "url_info": "https://www.economie.gouv.fr/france-nation-verte/credit-impot-investissements-industrie-verte",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "pret-vert", "nom": "Pret Vert (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "environnement",
+        "type_aide": "pret",
+        "description": "Pret participatif sans garantie pour financer les investissements lies a la transition ecologique et energetique des PME et ETI.",
+        "montant_max": "3 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "Projet de transition ecologique identifie", "Cofinancement bancaire"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": environnement and (is_pme or is_eti),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/transition-ecologique-et-energetique/pret-vert",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "diag-eco-flux", "nom": "Diagnostic Eco-Flux (Bpifrance / ADEME)",
+        "organisme": "Bpifrance / ADEME", "niveau": "national", "categorie": "environnement",
+        "type_aide": "accompagnement",
+        "description": "Diagnostic gratuit de 10 jours pour identifier les economies d energie, eau, matieres premieres et dechets. En moyenne 45 000 EUR d economies identifiees.",
+        "montant_max": "Diagnostic finance a 100%",
+        "montant_estime": None,
+        "conditions": ["PME de 20 a 250 salaries", "Secteur industriel, agro, tertiaire"],
+        "tailles": ["pme"],
+        "secteurs": [],
+        "eligible": environnement and 20 <= effectif < 250,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/transition-ecologique-et-energetique/diag-eco-flux",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cee", "nom": "Certificats d Economie d Energie (CEE)",
+        "organisme": "Ministere Transition Ecologique", "niveau": "national", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Primes versees par les fournisseurs d energie pour financer des travaux d efficacite energetique : isolation, chauffage, eclairage, process industriels.",
+        "montant_max": "Variable selon travaux (jusqu a 80% du cout)",
+        "montant_estime": None,
+        "conditions": ["Travaux d efficacite energetique", "Professionnels RGE pour les travaux", "Fiches standardisees CEE"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": environnement or investissement,
+        "url_info": "https://www.ecologie.gouv.fr/certificats-deconomies-denergie",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - NUMERIQUE ------
+    toutes_aides.append({
+        "id": "france-num", "nom": "France Num - Aides a la numerisation",
+        "organisme": "France Num / DGE", "niveau": "national", "categorie": "numerique",
+        "type_aide": "accompagnement",
+        "description": "Accompagnement et financement de la transformation numerique des TPE/PME : site web, logiciel de gestion, cybersecurite, IA. Cheque numerique et diagnostics.",
+        "montant_max": "Variable (diagnostics gratuits + aides financieres)",
+        "montant_estime": None,
+        "conditions": ["TPE ou PME", "Projet de numerisation identifie"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": numerique and is_pme,
+        "url_info": "https://www.francenum.gouv.fr/aides-financieres",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "diag-cyber", "nom": "Diagnostic Cybersecurite (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "numerique",
+        "type_aide": "accompagnement",
+        "description": "Diagnostic subventionne de cybersecurite pour les PME et ETI. Cartographie des risques, plan d actions, sensibilisation des equipes.",
+        "montant_max": "Prise en charge 50% (reste a charge ~4 000 EUR)",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "Volonte de structurer sa cybersecurite"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": numerique and (is_pme or is_eti),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/transition-numerique/diagnostic-cybersecurite",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "ci-ia", "nom": "Aides France 2030 - Intelligence Artificielle",
+        "organisme": "Bpifrance / SGPI", "niveau": "national", "categorie": "numerique",
+        "type_aide": "subvention",
+        "description": "Financements pour les projets integrant l IA : R&D, deploiement, cas d usage sectoriels. Appels a projets reguliers dans le cadre de la strategie nationale IA.",
+        "montant_max": "Jusqu a 5 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Projet integrant l IA", "Dimension innovante demontree", "Equipe technique identifiee"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": ["J", "M", "C"],
+        "eligible": numerique and innovation and lettre_naf in ("J", "M", "C"),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - EXPORT / INTERNATIONAL ------
+    toutes_aides.append({
+        "id": "assurance-prospection", "nom": "Assurance Prospection (Bpifrance Assurance Export)",
+        "organisme": "Bpifrance Assurance Export", "niveau": "national", "categorie": "export",
+        "type_aide": "garantie",
+        "description": "Garantie couvrant les depenses de prospection a l international en cas d echec commercial. Couverture de 65% a 85% des frais engages.",
+        "montant_max": "Jusqu a 500 000 EUR de budget garanti",
+        "montant_estime": None,
+        "conditions": ["CA export < 50% du CA total", "Budget de prospection defini", "Marches cibles identifies"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": export_intl,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/international/assurance-prospection",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cheque-relance-export", "nom": "Cheque Relance VIE / Export",
+        "organisme": "Business France / Bpifrance", "niveau": "national", "categorie": "export",
+        "type_aide": "subvention",
+        "description": "Aide financiere pour l embauche d un VIE (Volontaire International en Entreprise) ou pour des missions de prospection. Subvention de 5 000 a 10 000 EUR.",
+        "montant_max": "10 000 EUR",
+        "montant_estime": 10000 if export_intl else None,
+        "conditions": ["PME ou ETI", "Embauche d un VIE ou mission export structuree"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": export_intl and (is_pme or is_eti),
+        "url_info": "https://www.businessfrance.fr/vie-volontariat-international-en-entreprise",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "pret-croissance-intl", "nom": "Pret Croissance International (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "export",
+        "type_aide": "pret",
+        "description": "Pret sans garantie pour financer le developpement international : implantation, recrutement export, adaptation produits, prospection.",
+        "montant_max": "5 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "Projet de developpement international structure", "3 ans d existence minimum"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": export_intl and age_entreprise >= 3,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/international/pret-croissance-international",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - CREATION / REPRISE ------
+    toutes_aides.append({
+        "id": "nacre", "nom": "NACRE (Nouvel Accompagnement pour la Creation/Reprise)",
+        "organisme": "Region / BGE / Reseau Entreprendre", "niveau": "national", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Accompagnement gratuit en 3 phases : aide au montage du projet, structuration financiere, demarrage de l activite. Pret a taux zero de 1 000 a 10 000 EUR.",
+        "montant_max": "10 000 EUR (pret a taux zero) + accompagnement",
+        "montant_estime": 10000 if creation_reprise else None,
+        "conditions": ["Createur ou repreneur d entreprise", "Demandeur d emploi, jeune < 26 ans, beneficiaire RSA/ASS, ou zone urbaine sensible"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": creation_reprise and is_tpe,
+        "url_info": "https://www.service-public.fr/particuliers/vosdroits/F20016",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cape", "nom": "CAPE (Contrat d Appui au Projet d Entreprise)",
+        "organisme": "Couveuses / Cooperatives", "niveau": "national", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Contrat permettant de tester son activite au sein d une structure (couveuse, CAE) tout en conservant son statut social. Duree max 12 mois renouvelable.",
+        "montant_max": "Accompagnement + couverture sociale",
+        "montant_estime": None,
+        "conditions": ["Porteur de projet en phase de test", "Avant immatriculation ou en debut d activite"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": creation_reprise and age_entreprise <= 1,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F11299",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "arce", "nom": "ARCE (Aide a la Reprise ou Creation d Entreprise)",
+        "organisme": "France Travail", "niveau": "national", "categorie": "creation",
+        "type_aide": "subvention",
+        "description": "Versement en capital de 60% des droits restants a l allocation chomage pour les createurs ou repreneurs d entreprise. Versee en 2 fois.",
+        "montant_max": "60% des droits ARE restants",
+        "montant_estime": None,
+        "conditions": ["Etre indemnise par France Travail ou avoir des droits ARE", "Avoir obtenu l ACRE", "Creer ou reprendre une entreprise"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": creation_reprise,
+        "url_info": "https://www.service-public.fr/particuliers/vosdroits/F11677",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - INVESTISSEMENT ------
+    toutes_aides.append({
+        "id": "suramortissement", "nom": "Suramortissement industriel (loi Macron)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "investissement",
+        "type_aide": "credit_impot",
+        "description": "Deduction exceptionnelle de 40% du prix de revient des biens d equipement industriel acquis entre 2019 et 2025 (prolonge). Robotique, impression 3D, logiciels de production.",
+        "montant_max": "40% du prix des equipements en deduction",
+        "montant_estime": None,
+        "conditions": ["Acquisition de biens industriels eligibles", "PME industrielle", "Investissement productif"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": ["C", "F"],
+        "eligible": investissement and lettre_naf in ("C", "F") and is_pme,
+        "url_info": "https://www.economie.gouv.fr/entreprises/suramortissement-investissement-productif",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "bpi-pret-atout", "nom": "Pret Atout (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "investissement",
+        "type_aide": "pret",
+        "description": "Pret sans garantie de 50 000 a 5 MEUR pour renforcer la tresorerie, financer la croissance, les investissements materiels et immateriels des PME et ETI.",
+        "montant_max": "5 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "3 ans d existence minimum", "Situation financiere saine"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": investissement and age_entreprise >= 3,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/financement/pret-atout",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "garantie-bpi", "nom": "Garantie de pret Bpifrance",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "investissement",
+        "type_aide": "garantie",
+        "description": "Garantie de 40 a 70% des prets bancaires pour faciliter l acces au credit des TPE/PME. Creation, investissement, international, innovation.",
+        "montant_max": "70% du pret garanti",
+        "montant_estime": None,
+        "conditions": ["Pret bancaire en cours de negociation", "TPE ou PME", "Projet identifie (creation, investissement, croissance)"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme and (investissement or creation_reprise),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/financement/garantie-de-pret",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - FISCAL / ZONES ------
+    toutes_aides.append({
+        "id": "zrr-exo", "nom": "Exoneration ZRR (Zone de Revitalisation Rurale)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration d IS/IR pendant 5 ans (totale) puis 3 ans (degressive) pour les entreprises nouvelles en ZRR. Exoneration de CFE et CVAE possible.",
+        "montant_max": "Exoneration totale IS 5 ans + degressive 3 ans",
+        "montant_estime": None,
+        "conditions": ["Implantation en ZRR (France Ruralites Revitalisation depuis 2024)", "Entreprise nouvelle ou reprise", "Activite commerciale, artisanale, industrielle ou liberale"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": zone == "zrr",
+        "url_info": "https://www.economie.gouv.fr/entreprises/zone-revitalisation-rurale-zrr",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "zfu-exo", "nom": "Exoneration ZFU-TE (Zone Franche Urbaine)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration d IS/IR pendant 5 ans (totale) + 3 ans (degressive). Exoneration cotisations patronales pendant 5 ans. Exoneration CFE et taxe fonciere.",
+        "montant_max": "Exoneration totale multi-impots 5 ans",
+        "montant_estime": None,
+        "conditions": ["Implantation en ZFU-TE", "Entreprise de moins de 50 salaries", "Clause d embauche locale (1/3 des salaries en ZFU/QPV)"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": zone == "zfu",
+        "url_info": "https://www.economie.gouv.fr/entreprises/zone-franche-urbaine-zfu",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "ber-exo", "nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration totale d IS, CFE, CVAE et cotisations patronales pendant 5 ans pour les entreprises nouvelles dans les bassins d emploi a redynamiser.",
+        "montant_max": "Exoneration totale 5 ans",
+        "montant_estime": None,
+        "conditions": ["Implantation dans un BER", "Entreprise nouvelle", "Bassin de la Vallee de la Meuse ou Lavelanet"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": zone == "ber",
+        "url_info": "https://www.economie.gouv.fr/entreprises/aides-entreprises-bassins-emploi-redynamiser",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "outre-mer-exo", "nom": "Exonerations Outre-mer (LODEOM)",
+        "organisme": "URSSAF / DGFIP", "niveau": "national", "categorie": "social",
+        "type_aide": "exoneration",
+        "description": "Exonerations renforcees de cotisations patronales pour les entreprises d Outre-mer. Baremes specifiques selon taille et secteur : competitivite, competitivite renforcee, innovation.",
+        "montant_max": "Exoneration jusqu a 2 SMIC (competitivite) ou 3.5 SMIC (innovation)",
+        "montant_estime": None,
+        "conditions": ["Siege social en DOM (Guadeloupe, Martinique, Guyane, Reunion, Mayotte)", "Effectif < 250 salaries (sauf secteurs prioritaires)"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": region == "outre-mer",
+        "url_info": "https://www.urssaf.fr/accueil/employeur/beneficier-dune-exoneration/exonerations-outre-mer.html",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - ESS / IMPACT ------
+    toutes_aides.append({
+        "id": "dla", "nom": "DLA (Dispositif Local d Accompagnement)",
+        "organisme": "France Active / Etat", "niveau": "national", "categorie": "ess",
+        "type_aide": "accompagnement",
+        "description": "Accompagnement gratuit pour les structures ESS (associations, cooperatives, entreprises sociales) : diagnostic, plan d actions, appui strategique.",
+        "montant_max": "Accompagnement gratuit",
+        "montant_estime": None,
+        "conditions": ["Structure de l ESS (association, cooperative, entreprise sociale)", "Activite d interet general ou d utilite sociale"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": ess or forme_juridique == "Association",
+        "url_info": "https://www.info-dla.fr/",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "france-active-garantie", "nom": "Garantie France Active",
+        "organisme": "France Active", "niveau": "national", "categorie": "ess",
+        "type_aide": "garantie",
+        "description": "Garantie bancaire pour les entreprises de l ESS et les createurs en situation de precarite. Couvre jusqu a 80% du pret bancaire.",
+        "montant_max": "80% de garantie (plafond 100 000 EUR)",
+        "montant_estime": None,
+        "conditions": ["Entreprise ESS ou createur en difficulte d acces au credit", "Projet viable economiquement"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": ess or forme_juridique == "Association",
+        "url_info": "https://www.franceactive.org/",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "agrement-esus", "nom": "Agrement ESUS (Entreprise Solidaire d Utilite Sociale)",
+        "organisme": "Prefecture / DREETS", "niveau": "national", "categorie": "ess",
+        "type_aide": "accompagnement",
+        "description": "Agrement ouvrant droit a des financements specifiques (epargne salariale solidaire, BPI, fonds ESS) et a des avantages fiscaux pour les investisseurs (IR-PME 25%).",
+        "montant_max": "Acces a l epargne solidaire + avantages fiscaux investisseurs",
+        "montant_estime": None,
+        "conditions": ["Objectif d utilite sociale", "Politique de remuneration encadree (ecart max 1 a 7)", "Charge d utilite sociale > 66% du CA"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": ess,
+        "url_info": "https://www.economie.gouv.fr/entreprises/agrement-entreprise-solidaire-utilite-sociale-ess",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - PREVENTION / SANTE AU TRAVAIL ------
+    toutes_aides.append({
+        "id": "subvention-prevention-tpe", "nom": "Subventions prevention TPE (CARSAT / CRAMIF)",
+        "organisme": "CARSAT / CRAMIF / CGSS", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Subventions pour les TPE (1-49 salaries) pour des investissements en prevention des risques professionnels : TMS Pro, Risque chimique, Equip Mobile, Filmeuse +.",
+        "montant_max": "25 000 EUR",
+        "montant_estime": 25000 if effectif < 50 else None,
+        "conditions": ["TPE de 1 a 49 salaries", "Investissement en equipement de prevention", "DUERP a jour"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": effectif < 50,
+        "url_info": "https://www.ameli.fr/entreprise/sante-travail/aides-financieres",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "fact", "nom": "FACT (Fonds d Amelioration des Conditions de Travail)",
+        "organisme": "ANACT", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Financement de projets d amelioration des conditions de travail : organisation du travail, prevenir les TMS, transitions numeriques et ecologiques au travail.",
+        "montant_max": "50 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Entreprise de toute taille", "Projet d amelioration des conditions de travail structure", "Implication des representants du personnel"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": True,
+        "url_info": "https://www.anact.fr/le-fonds-pour-lamelioration-des-conditions-de-travail-fact",
+        "priorite": 3,
+    })
+
+    # ------ AIDES REGIONALES ------
+    aides_regionales_generiques = [
+        {
+            "id": "region-aide-invest", "nom": "Aide regionale a l investissement productif",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Subvention pour les investissements materiels et immateriels des PME. Taux d aide de 10 a 30% selon region et zone AFR. Toutes les regions proposent ce type d aide.",
+            "montant_max": "Variable (30 000 a 500 000 EUR selon region)",
+            "montant_estime": None,
+            "conditions": ["PME implantee dans la region", "Investissement productif (equipement, immobilier)", "Creation d emplois associee souvent requise"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": investissement and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-creation", "nom": "Aide regionale a la creation d entreprise",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "creation",
+            "type_aide": "subvention",
+            "description": "Plupart des regions proposent des aides a la creation : prets d honneur, subventions, accompagnement. Montant et conditions varient selon les regions.",
+            "montant_max": "Variable (5 000 a 50 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["Creation ou reprise d entreprise", "Implantation dans la region", "Projet economiquement viable"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": creation_reprise,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-export", "nom": "Aide regionale a l export",
+            "organisme": "Conseil Regional / CCI", "niveau": "regional", "categorie": "export",
+            "type_aide": "subvention",
+            "description": "Aides regionales pour la prospection internationale : salons, missions commerciales, etudes de marche. Souvent 50% des depenses prises en charge.",
+            "montant_max": "Variable (5 000 a 30 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["PME de la region", "Premier developpement export ou nouveau marche"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": export_intl and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-innovation", "nom": "Aide regionale a l innovation",
+            "organisme": "Conseil Regional / Agence d innovation", "niveau": "regional", "categorie": "innovation",
+            "type_aide": "subvention",
+            "description": "Aides regionales pour la R&D et l innovation : bourses de faisabilite, aides au prototypage, aides aux brevets. Souvent complementaires au CIR/CII.",
+            "montant_max": "Variable (10 000 a 200 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["PME de la region", "Projet innovant (produit ou procede nouveau)", "Co-financement souvent requis"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": innovation and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-transition", "nom": "Aide regionale a la transition ecologique",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "environnement",
+            "type_aide": "subvention",
+            "description": "Aides regionales pour la transition ecologique : audits energetiques, investissements verts, economie circulaire, mobilite durable.",
+            "montant_max": "Variable (5 000 a 100 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["Entreprise de la region", "Projet de transition ecologique", "Diagnostic prealable souvent requis"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": environnement and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-numerique", "nom": "Cheque numerique regional",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "numerique",
+            "type_aide": "subvention",
+            "description": "Aides regionales a la numerisation : site web, ERP, CRM, e-commerce, cybersecurite. Souvent sous forme de cheque ou de subvention forfaitaire.",
+            "montant_max": "Variable (2 000 a 20 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["TPE ou PME de la region", "Projet de numerisation", "Prestataire agree souvent requis"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": numerique and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+    ]
+
+    # Aides regionales specifiques selon la region selectionnee
+    if region == "ile-de-france":
+        aides_regionales_generiques.append({
+            "id": "idf-pm-up", "nom": "PM up (Ile-de-France)",
+            "organisme": "Region Ile-de-France", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aide de 10 000 a 250 000 EUR pour les PME franciliennes en croissance. Investissement materiel, immateriel, recrutement, conseil strategique.",
+            "montant_max": "250 000 EUR",
+            "montant_estime": None,
+            "conditions": ["PME de 5 a 250 salaries", "Siege social en IDF", "Croissance du CA sur 3 ans"],
+            "tailles": ["pme"],
+            "secteurs": [],
+            "eligible": True,
+            "url_info": "https://www.iledefrance.fr/aides-et-appels-a-projets/pm-up",
+            "priorite": 1,
+        })
+        aides_regionales_generiques.append({
+            "id": "idf-innov-up", "nom": "Innov up (Ile-de-France)",
+            "organisme": "Region Ile-de-France", "niveau": "regional", "categorie": "innovation",
+            "type_aide": "subvention",
+            "description": "Aide pour les projets innovants des TPE/PME franciliennes : faisabilite, experimentation, developpement, industrialisation.",
+            "montant_max": "Jusqu a 500 000 EUR",
+            "montant_estime": None,
+            "conditions": ["TPE/PME en IDF", "Projet innovant", "Prototype ou POC"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": innovation,
+            "url_info": "https://www.iledefrance.fr/aides-et-appels-a-projets/innov-up",
+            "priorite": 1,
+        })
+
+    if region == "auvergne-rhone-alpes":
+        aides_regionales_generiques.append({
+            "id": "ara-ambition-eco", "nom": "Ambition Eco (Auvergne-Rhone-Alpes)",
+            "organisme": "Region AURA", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aide pour les projets d investissement structurants des PME de la region AURA : equipements, immobilier, numerisation.",
+            "montant_max": "200 000 EUR",
+            "montant_estime": None,
+            "conditions": ["PME implantee en AURA", "Projet d investissement productif", "Creation d emplois"],
+            "tailles": ["pme"],
+            "secteurs": [],
+            "eligible": investissement,
+            "url_info": "https://ambitioneco.auvergnerhonealpes.fr/",
+            "priorite": 1,
+        })
+
+    if region == "nouvelle-aquitaine":
+        aides_regionales_generiques.append({
+            "id": "na-croissance-verte", "nom": "Croissance Verte (Nouvelle-Aquitaine)",
+            "organisme": "Region Nouvelle-Aquitaine", "niveau": "regional", "categorie": "environnement",
+            "type_aide": "subvention",
+            "description": "Aide aux entreprises de Nouvelle-Aquitaine pour des projets de croissance verte : eco-conception, EnR, economie circulaire, mobilite propre.",
+            "montant_max": "100 000 EUR",
+            "montant_estime": None,
+            "conditions": ["Entreprise implantee en Nouvelle-Aquitaine", "Projet de transition ecologique"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": environnement,
+            "url_info": "https://les-aides.nouvelle-aquitaine.fr/",
+            "priorite": 1,
+        })
+
+    if region == "occitanie":
+        aides_regionales_generiques.append({
+            "id": "occ-pass-occitanie", "nom": "Pass Occitanie",
+            "organisme": "Region Occitanie / AD Occ", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aide de 2 000 a 10 000 EUR pour les TPE et PME d Occitanie. Investissement, conseil, communication, numerisation.",
+            "montant_max": "10 000 EUR",
+            "montant_estime": 10000 if is_pme else None,
+            "conditions": ["TPE/PME d Occitanie", "Moins de 50 salaries", "Projet de developpement"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": True,
+            "url_info": "https://www.laregion.fr/Pass-Occitanie",
+            "priorite": 1,
+        })
+
+    toutes_aides.extend(aides_regionales_generiques)
+
+    # ------ AIDES LOCALES ------
+    toutes_aides.append({
+        "id": "local-pret-honneur", "nom": "Pret d honneur (Initiative France / Reseau Entreprendre)",
+        "organisme": "Initiative France / Reseau Entreprendre", "niveau": "local", "categorie": "creation",
+        "type_aide": "pret",
+        "description": "Pret a taux zero, sans garantie, pour les createurs et repreneurs. De 2 000 a 50 000 EUR. Effet levier pour obtenir un pret bancaire (1 EUR Initiative = 7.50 EUR de pret bancaire).",
+        "montant_max": "50 000 EUR (Initiative) / 90 000 EUR (Reseau Entreprendre)",
+        "montant_estime": None,
+        "conditions": ["Creation ou reprise d entreprise", "Projet viable et coherent", "Accompagnement par la plateforme"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": creation_reprise or is_startup,
+        "url_info": "https://www.initiative-france.fr/",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "local-pepiniere", "nom": "Pepiniere / Incubateur d entreprises",
+        "organisme": "Collectivites locales / Technopoles", "niveau": "local", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Hebergement a tarif reduit + accompagnement pour les jeunes entreprises. Services mutualises : salle reunion, secretariat, conseil juridique, comptable.",
+        "montant_max": "Loyer reduit 50-70% + services inclus",
+        "montant_estime": None,
+        "conditions": ["Entreprise de moins de 3-5 ans", "Projet innovant ou a fort potentiel", "Candidature aupres de la pepiniere"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": is_startup,
+        "url_info": "https://www.economie.gouv.fr/entreprises/pepinieres-incubateurs-entreprises",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "local-exo-cfe", "nom": "Exoneration CFE (Cotisation Fonciere des Entreprises)",
+        "organisme": "Communes / EPCI", "niveau": "local", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration de CFE possible sur deliberation communale pour les creations d entreprises (2 ans), les ZRR, les JEI, les artistes, et certaines activites specifiques.",
+        "montant_max": "Exoneration totale CFE 2-5 ans",
+        "montant_estime": None,
+        "conditions": ["Variable selon commune", "Creation d entreprise ou implantation en zone prioritaire"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": creation_reprise or zone in ("zrr", "zfu", "ber"),
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F23547",
+        "priorite": 2,
+    })
+
+    # ------ AIDES EUROPEENNES ------
+    toutes_aides.append({
+        "id": "feder", "nom": "FEDER (Fonds Europeen de Developpement Regional)",
+        "organisme": "Commission europeenne / Region", "niveau": "europeen", "categorie": "investissement",
+        "type_aide": "subvention",
+        "description": "Cofinancement de projets d investissement, d innovation, de transition ecologique et de numerisation. Gere au niveau regional. Budget 2021-2027 : 226 Md EUR.",
+        "montant_max": "Variable (40 a 85% de cofinancement selon zone)",
+        "montant_estime": None,
+        "conditions": ["Projet s inscrivant dans les priorites regionales", "Cofinancement obligatoire", "Appel a projets regional"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": investissement or innovation or environnement or numerique,
+        "url_info": "https://ec.europa.eu/regional_policy/funding/erdf_fr",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "fse-plus", "nom": "FSE+ (Fonds Social Europeen Plus)",
+        "organisme": "Commission europeenne / DREETS", "niveau": "europeen", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Financement de projets emploi, formation, inclusion sociale. Formation des salaries, insertion professionnelle, lutte contre la pauvrete. Budget 2021-2027 : 99 Md EUR.",
+        "montant_max": "Variable selon projet (cofinancement 50 a 85%)",
+        "montant_estime": None,
+        "conditions": ["Projet emploi/formation/inclusion", "Cofinancement obligatoire", "Appel a projets"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation or ess,
+        "url_info": "https://ec.europa.eu/european-social-fund-plus/fr",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "horizon-europe", "nom": "Horizon Europe",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Programme-cadre de R&D de l UE (2021-2027, 95.5 Md EUR). Finance des projets collaboratifs de recherche et innovation. EIC Accelerator pour les PME innovantes : jusqu a 2.5 MEUR subvention + 15 MEUR equity.",
+        "montant_max": "2 500 000 EUR (subvention EIC) + 15 MEUR (equity)",
+        "montant_estime": None,
+        "conditions": ["Projet de R&D avec dimension europeenne", "Consortium transnational (sauf EIC)", "Excellence scientifique et impact"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation,
+        "url_info": "https://research-and-innovation.ec.europa.eu/funding/funding-opportunities/funding-programmes-and-open-calls/horizon-europe_en",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "eic-accelerator", "nom": "EIC Accelerator (Horizon Europe)",
+        "organisme": "European Innovation Council", "niveau": "europeen", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Financement pour les PME innovantes a fort potentiel de croissance. Subvention jusqu a 2.5 MEUR + investissement en equity jusqu a 15 MEUR. TRL 5-9.",
+        "montant_max": "2 500 000 EUR subvention + 15 MEUR equity",
+        "montant_estime": None,
+        "conditions": ["PME au sens UE", "Innovation de rupture (deep tech, green tech, health tech)", "TRL 5-9", "Ambition de scale-up europeen"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": innovation and is_pme,
+        "url_info": "https://eic.ec.europa.eu/eic-funding-opportunities/eic-accelerator_en",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "cosme-sme", "nom": "Programme SMP / COSME (ex-COSME)",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "investissement",
+        "type_aide": "garantie",
+        "description": "Garantie de prets et facilitation d acces aux marches pour les PME europeennes. Via le programme Single Market Programme (ex-COSME). Garantie intermediee par les banques.",
+        "montant_max": "Garantie bancaire facilitee (jusqu a 150 000 EUR)",
+        "montant_estime": None,
+        "conditions": ["PME europeenne", "Demande via banque partenaire", "Projet de croissance ou de creation"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme,
+        "url_info": "https://single-market-economy.ec.europa.eu/smes/cosme_en",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "life", "nom": "Programme LIFE (environnement et climat)",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Financement de projets environnementaux : biodiversite, economie circulaire, attenuation/adaptation climatique, transition energetique. Budget 2021-2027 : 5.4 Md EUR.",
+        "montant_max": "Variable (cofinancement 60 a 75%)",
+        "montant_estime": None,
+        "conditions": ["Projet a dimension environnementale", "Impact mesurable", "Valeur ajoutee europeenne"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": environnement,
+        "url_info": "https://cinea.ec.europa.eu/programmes/life_en",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "erasmus-entreprises", "nom": "Erasmus pour jeunes entrepreneurs",
+        "organisme": "Commission europeenne / EASME", "niveau": "europeen", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Programme d echange permettant a un jeune entrepreneur de passer 1 a 6 mois chez un entrepreneur experimente dans un autre pays de l UE. Bourse de sejour incluse.",
+        "montant_max": "Bourse de 530 a 1 100 EUR/mois selon pays",
+        "montant_estime": None,
+        "conditions": ["Entrepreneur de moins de 3 ans d activite ou porteur de projet", "Partenariat avec un entrepreneur hote dans un autre pays UE"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": creation_reprise and is_startup,
+        "url_info": "https://www.erasmus-entrepreneurs.eu/",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "digital-europe", "nom": "Digital Europe Programme",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "numerique",
+        "type_aide": "subvention",
+        "description": "Programme europeen pour la transformation numerique : IA, cybersecurite, calcul haute performance, competences numeriques, interoperabilite. Budget : 7.5 Md EUR.",
+        "montant_max": "Variable selon appel a projets",
+        "montant_estime": None,
+        "conditions": ["Projet numerique (IA, cyber, cloud, data)", "Consortium transnational recommande", "Appel a projets"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": ["J", "M"],
+        "eligible": numerique and innovation,
+        "url_info": "https://digital-strategy.ec.europa.eu/en/activities/digital-programme",
+        "priorite": 3,
+    })
+
+    # ------ AIDES SECTORIELLES ------
+    if lettre_naf in ("A",):
+        toutes_aides.append({
+            "id": "pac-aides", "nom": "PAC - Aides agricoles",
+            "organisme": "ASP / DDT", "niveau": "europeen", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aides directes (DPB, paiement vert, aide redistributive) et aides couplees pour les exploitations agricoles. PCAE pour les investissements.",
+            "montant_max": "Variable selon exploitation",
+            "montant_estime": None,
+            "conditions": ["Exploitant agricole", "Surface minimale (SNA)", "Respect conditionnalite"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": ["A"],
+            "eligible": True,
+            "url_info": "https://agriculture.gouv.fr/la-pac-en-un-coup-doeil",
+            "priorite": 1,
+        })
+
+    if lettre_naf in ("I",):
+        toutes_aides.append({
+            "id": "chr-modernisation", "nom": "Aide a la modernisation CHR",
+            "organisme": "Bpifrance / Region", "niveau": "national", "categorie": "investissement",
+            "type_aide": "pret",
+            "description": "Pret specifique pour les cafes, hotels, restaurants : renovation, mise aux normes, equipements, numerisation.",
+            "montant_max": "300 000 EUR",
+            "montant_estime": None,
+            "conditions": ["Cafe, hotel ou restaurant", "Investissement de modernisation"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": ["I"],
+            "eligible": True,
+            "url_info": "https://www.bpifrance.fr/",
+            "priorite": 2,
+        })
+
+    if lettre_naf in ("F",):
+        toutes_aides.append({
+            "id": "btp-prevention", "nom": "Aides OPPBTP a la prevention BTP",
+            "organisme": "OPPBTP", "niveau": "national", "categorie": "emploi",
+            "type_aide": "subvention",
+            "description": "Aides financieres et accompagnement pour la prevention des risques dans le BTP : equipements de securite, formations, diagnostics.",
+            "montant_max": "Variable (diagnostics gratuits + aides equipements)",
+            "montant_estime": None,
+            "conditions": ["Entreprise du BTP", "Cotisant OPPBTP"],
+            "tailles": ["tpe", "pme", "eti"],
+            "secteurs": ["F"],
+            "eligible": True,
+            "url_info": "https://www.preventionbtp.fr/",
+            "priorite": 2,
+        })
+
+    if lettre_naf in ("C", "J", "M"):
+        toutes_aides.append({
+            "id": "cifre", "nom": "Convention CIFRE (These en entreprise)",
+            "organisme": "ANRT / MESRI", "niveau": "national", "categorie": "innovation",
+            "type_aide": "subvention",
+            "description": "Subvention annuelle de 14 000 EUR pendant 3 ans pour l embauche d un doctorant en these au sein de l entreprise. Eligible au CIR en complementarite.",
+            "montant_max": "42 000 EUR (14 000/an x 3 ans)",
+            "montant_estime": 42000,
+            "conditions": ["Embauche d un doctorant en CDI ou CDD 3 ans", "Partenariat avec un laboratoire de recherche", "Sujet de these valide par l ANRT"],
+            "tailles": ["tpe", "pme", "eti", "ge"],
+            "secteurs": ["C", "J", "M"],
+            "eligible": innovation,
+            "url_info": "https://www.anrt.asso.fr/fr/le-dispositif-cifre-7844",
+            "priorite": 2,
+        })
+
+    # Filtrage : ne garder que les aides eligible = True
+    aides_eligibles = [a for a in toutes_aides if a.get("eligible")]
+
+    # Tri par priorite puis nom
+    aides_eligibles.sort(key=lambda a: (a.get("priorite", 5), a["nom"]))
+
+    # Statistiques
+    montant_total = 0
+    for a in aides_eligibles:
+        est = a.get("montant_estime")
+        if est and isinstance(est, (int, float)):
+            montant_total += est
+
+    niveaux = {}
+    categories = {}
+    types = {}
+    for a in aides_eligibles:
+        niveaux[a["niveau"]] = niveaux.get(a["niveau"], 0) + 1
+        categories[a["categorie"]] = categories.get(a["categorie"], 0) + 1
+        types[a["type_aide"]] = types.get(a["type_aide"], 0) + 1
+
+    return {
+        "total": len(aides_eligibles),
+        "montant_potentiel_estime": montant_total,
+        "par_niveau": niveaux,
+        "par_categorie": categories,
+        "par_type": types,
+        "aides": aides_eligibles,
+        "criteres_utilises": {
+            "code_naf": code_naf,
+            "effectif": effectif,
+            "forme_juridique": forme_juridique,
+            "region": region,
+            "zone": zone,
+            "ca": ca,
+            "age_entreprise": age_entreprise,
+            "masse_salariale": masse_salariale,
+            "innovation": innovation,
+            "environnement": environnement,
+            "numerique": numerique,
+            "export": export_intl,
+            "formation": formation,
+            "creation_reprise": creation_reprise,
+            "investissement": investissement,
+            "ess": ess,
+        },
+    }
+
+
+# ==============================
 # IDCC / CONVENTIONS COLLECTIVES
 # ==============================
 
@@ -8182,6 +9324,7 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="nl" onclick="showS('rh',this)"><span class="ico">&#128119;</span><span>Ressources humaines</span></div>
 <div class="nl" onclick="showS('simulation',this)"><span class="ico">&#128200;</span><span>Simulation</span></div>
 <div class="nav-group">Outils</div>
+<div class="nl" onclick="showS('subventions',this)"><span class="ico">&#127974;</span><span>Subventions</span></div>
 <div class="nl" onclick="showS('veille',this)"><span class="ico">&#9878;</span><span>Veille juridique</span></div>
 <div class="nl" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
 <div class="nl" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
@@ -8536,6 +9679,72 @@ APP_HTML += """
 <div class="tc" id="sim-ir"><h2>Impot sur le revenu</h2>
 <div class="g3"><div><label>Benefice</label><input type="number" step="0.01" id="sim-ben" value="40000"></div><div><label>Parts</label><input type="number" step="0.5" id="sim-parts" value="1"></div><div><label>Autres rev.</label><input type="number" step="0.01" id="sim-autres" value="0"></div></div>
 <button class="btn btn-blue" onclick="simIR()">Simuler</button><div id="sim-ir-res" style="margin-top:12px"></div></div>
+</div>
+</div>
+
+<!-- ===== SUBVENTIONS ET AIDES ===== -->
+<div class="sec" id="s-subventions">
+<div class="card">
+<h2>Recherche de subventions et aides</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Identifiez toutes les subventions, aides et dispositifs auxquels votre entreprise est potentiellement eligible. Renseignez les criteres ci-dessous pour un matching precis.</p>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128161;</span><span>Les donnees de votre entreprise sont pre-remplies depuis la <strong>Configuration</strong> et le <strong>Portefeuille</strong>. Vous pouvez les ajuster pour affiner la recherche.</span></div>
+<div class="g3">
+<div><label>Code NAF / APE</label><input id="sub-naf" placeholder="Ex: 6201Z, 4120A..." value=""></div>
+<div><label>Effectif</label><input type="number" id="sub-eff" value="10"></div>
+<div><label>Forme juridique</label><select id="sub-forme"><option value="">-- Toutes --</option><option value="SAS">SAS / SASU</option><option value="SARL">SARL / EURL</option><option value="SA">SA</option><option value="EI">EI / EIRL</option><option value="SCI">SCI</option><option value="Association">Association</option><option value="SNC">SNC</option></select></div>
+</div>
+<div class="g3">
+<div><label>Region</label><select id="sub-region"><option value="">-- Toute la France --</option><option value="ile-de-france">Ile-de-France</option><option value="auvergne-rhone-alpes">Auvergne-Rhone-Alpes</option><option value="nouvelle-aquitaine">Nouvelle-Aquitaine</option><option value="occitanie">Occitanie</option><option value="hauts-de-france">Hauts-de-France</option><option value="provence-alpes-cote-dazur">Provence-Alpes-Cote d Azur</option><option value="grand-est">Grand Est</option><option value="pays-de-la-loire">Pays de la Loire</option><option value="bretagne">Bretagne</option><option value="normandie">Normandie</option><option value="bourgogne-franche-comte">Bourgogne-Franche-Comte</option><option value="centre-val-de-loire">Centre-Val de Loire</option><option value="corse">Corse</option><option value="outre-mer">Outre-mer (DOM-TOM)</option></select></div>
+<div><label>Ville / Zone</label><select id="sub-zone"><option value="">-- Toute zone --</option><option value="zrr">ZRR (Zone revitalisation rurale)</option><option value="zfu">ZFU-TE (Zone franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="ber">BER (Bassin emploi a redynamiser)</option><option value="zrd">ZRD (Zone restructuration defense)</option><option value="afi">AFR (Aide finalite regionale)</option></select></div>
+<div><label>Chiffre d affaires annuel</label><input type="number" id="sub-ca" placeholder="Ex: 500000" value=""></div>
+</div>
+<div class="g3">
+<div><label>Age de l entreprise (annees)</label><input type="number" id="sub-age" value="5"></div>
+<div><label>Masse salariale annuelle</label><input type="number" id="sub-masse" placeholder="Ex: 400000" value=""></div>
+<div><label>Date de creation</label><input type="date" id="sub-creation" value=""></div>
+</div>
+<p style="font-weight:600;font-size:.88em;color:var(--p);margin:14px 0 8px">Domaines d activite (cochez ceux qui vous concernent) :</p>
+<div class="g4" style="margin-bottom:14px">
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-innovation" style="width:auto;margin:0"> Innovation / R&D</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-environnement" style="width:auto;margin:0"> Transition ecologique</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-numerique" style="width:auto;margin:0"> Transformation numerique</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-export" style="width:auto;margin:0"> Export / International</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-formation" style="width:auto;margin:0"> Formation / Emploi</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-creation-reprise" style="width:auto;margin:0"> Creation / Reprise</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-investissement" style="width:auto;margin:0"> Investissement</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-ess" style="width:auto;margin:0"> ESS / Impact social</label>
+</div>
+<div class="btn-group"><button class="btn btn-blue btn-f" onclick="rechercherSubventions()">&#128269; Rechercher les subventions eligibles</button></div>
+</div>
+
+<div id="sub-results" style="display:none">
+
+<div class="g4" id="sub-stats" style="margin-bottom:18px">
+<div class="sc blue"><div class="val" id="sub-total">0</div><div class="lab">Aides identifiees</div></div>
+<div class="sc green"><div class="val" id="sub-montant">0 EUR</div><div class="lab">Montant potentiel max</div></div>
+<div class="sc amber"><div class="val" id="sub-nationales">0</div><div class="lab">Nationales</div></div>
+<div class="sc purple"><div class="val" id="sub-europeennes">0</div><div class="lab">Europeennes</div></div>
+</div>
+
+<div class="card">
+<h2>Filtrer les resultats</h2>
+<div class="g4">
+<div><label>Niveau</label><select id="sub-filtre-niveau" onchange="filtrerSubventions()"><option value="">Tous</option><option value="local">Local</option><option value="regional">Regional</option><option value="national">National</option><option value="europeen">Europeen</option></select></div>
+<div><label>Categorie</label><select id="sub-filtre-cat" onchange="filtrerSubventions()"><option value="">Toutes</option><option value="innovation">Innovation / R&D</option><option value="environnement">Environnement</option><option value="emploi">Emploi / Formation</option><option value="numerique">Numerique</option><option value="export">Export</option><option value="creation">Creation / Reprise</option><option value="investissement">Investissement</option><option value="fiscal">Avantage fiscal</option><option value="social">Exoneration sociale</option><option value="ess">ESS / Impact</option></select></div>
+<div><label>Type d aide</label><select id="sub-filtre-type" onchange="filtrerSubventions()"><option value="">Tous</option><option value="subvention">Subvention directe</option><option value="credit_impot">Credit d impot</option><option value="exoneration">Exoneration</option><option value="pret">Pret / Avance</option><option value="garantie">Garantie</option><option value="accompagnement">Accompagnement</option></select></div>
+<div><label>Taille entreprise</label><select id="sub-filtre-taille" onchange="filtrerSubventions()"><option value="">Toutes</option><option value="tpe">TPE (< 10 sal.)</option><option value="pme">PME (< 250 sal.)</option><option value="eti">ETI (250-4999)</option><option value="ge">GE (5000+)</option></select></div>
+</div>
+</div>
+
+<div id="sub-liste"></div>
+
+<div class="card" id="sub-recapitulatif" style="display:none">
+<h2>Recapitulatif des aides eligibles</h2>
+<div style="overflow-x:auto"><table id="sub-recap-table">
+<tr><th>Aide</th><th>Niveau</th><th>Type</th><th>Montant max</th><th>Organisme</th><th>Eligibilite</th></tr>
+</table></div>
+<div class="btn-group" style="margin-top:14px;justify-content:flex-end"><button class="btn btn-s btn-sm" onclick="exportSubventions()">&#128190; Exporter CSV</button><button class="btn btn-blue btn-sm" onclick="imprimerSubventions()">&#128424; Imprimer</button></div>
+</div>
 </div>
 </div>
 
@@ -8944,7 +10153,7 @@ APP_HTML += """
 <script>
 /* === CORE NAV (separate script to guarantee availability) === */
 var _ncUser=null;
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite"};
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite"};
 function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
 function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
 function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
@@ -8966,6 +10175,7 @@ if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrou
 if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
 if(n==="analyse"&&typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
+if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
 if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
 if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();}
 if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
@@ -9476,6 +10686,90 @@ function simSeuils(){fetch("/api/simulation/seuils-effectif?effectif_actuel="+gv
 function simFinContrat(){var p="type_fin="+gv("fc-type")+"&salaire_brut="+gv("fc-brut")+"&anciennete_mois="+gv("fc-anc")+"&est_cadre="+gv("fc-cadre")+"&motif="+gv("fc-motif");fetch("/api/simulation/fin-contrat?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.type_fin.replace(/_/g," ")+"</div><div class='lab'>Type</div></div><div class='sc'><div class='val'>"+r.anciennete_ans+" ans</div><div class='lab'>Anciennete</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_total)+"</div><div class='lab'>Cout total</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";var skip={"type_fin":1,"salaire_brut":1,"anciennete_mois":1,"anciennete_ans":1,"cout_total":1,"reference":1,"motif":1,"note":1,"exceptions":1};for(var k in r){if(!skip[k]&&typeof r[k]==="number"){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+r[k].toFixed(2)+"</td></tr>";}}h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT TOTAL</td><td class='num'>"+r.cout_total.toFixed(2)+"</td></tr></table>";if(r.reference)h+="<p style='margin-top:8px;font-size:.82em;color:var(--tx2)'>Ref: "+r.reference+"</p>";if(r.note)h+="<p style='font-size:.82em;color:var(--amber)'>"+r.note+"</p>";if(r.exceptions)h+="<p style='font-size:.82em;color:var(--tx2)'>"+r.exceptions+"</p>";document.getElementById("sim-fc-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simOptim(){var p="benefice_net="+gv("op-benef")+"&remuneration_gerant="+gv("op-rem")+"&dividendes="+gv("op-div")+"&interessement="+gv("op-int")+"&participation="+gv("op-part")+"&frais_pro="+gv("op-frais")+"&pee_abondement="+gv("op-pee")+"&nb_parts="+gv("op-parts")+"&forme_juridique="+gv("op-forme");fetch("/api/simulation/optimisation?"+p).then(safeJson).then(function(r){var h="<div class='g2' style='margin-bottom:12px'><div class='sc green'><div class='val'>"+r.meilleur_scenario+"</div><div class='lab'>Meilleur scenario</div></div><div class='sc blue'><div class='val'>"+fmt(r.ecart_max)+"</div><div class='lab'>Ecart max entre scenarios</div></div></div>";var sc=r.scenarios||[];h+="<table><tr><th>Scenario</th><th class='num'>Salaire brut</th><th class='num'>Charges</th><th class='num'>Dividendes</th><th class='num'>IR</th><th class='num'>Net disponible</th><th>Protection</th></tr>";for(var i=0;i<sc.length;i++){var s=sc[i];var best=s.nom===r.meilleur_scenario?" style='background:var(--bg2);font-weight:600'":"";h+="<tr"+best+"><td>"+s.nom+"</td><td class='num'>"+s.salaire_brut.toFixed(2)+"</td><td class='num'>"+s.charges_sociales.toFixed(2)+"</td><td class='num'>"+(s.dividendes||0).toFixed(2)+"</td><td class='num'>"+s.ir.toFixed(2)+"</td><td class='num' style='font-weight:600'>"+s.net_disponible.toFixed(2)+"</td><td style='font-size:.8em'>"+s.protection_sociale+"</td></tr>";}h+="</table>";if(r.frais_professionnels){var fp=r.frais_professionnels;h+="<div style='margin-top:14px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Frais professionnels deductibles</h3>";h+="<p style='margin:0 0 6px;font-size:.84em'>Frais declares: <b>"+fp.frais_declares.toFixed(2)+" EUR</b> - Economie IS: <b>"+fp.economie_is.toFixed(2)+" EUR</b></p>";h+="<div style='font-size:.84em;color:var(--tx2)'>Types eligibles: "+fp.types_eligibles.join(" | ")+"</div></div>";}document.getElementById("sim-optim-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simRisques(){var p="code_naf="+encodeURIComponent(gv("rs-naf"))+"&effectif="+gv("rs-eff")+"&masse_salariale="+gv("rs-masse");fetch("/api/simulation/risques-sectoriels?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.secteur+"</div><div class='lab'>Secteur</div></div><div class='sc amber'><div class='val'>"+r.taux_at_moyen+"%</div><div class='lab'>Taux AT moyen</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_at_annuel)+"</div><div class='lab'>Cout AT annuel</div></div><div class='sc'><div class='val'>"+r.effectif+"</div><div class='lab'>Effectif</div></div></div>";h+="<div style='margin-top:14px'><h3>Risques specifiques du secteur</h3><ul style='margin:6px 0;padding-left:20px'>";var rs=r.risques_specifiques||[];for(var i=0;i<rs.length;i++)h+="<li style='margin:3px 0'>"+rs[i]+"</li>";h+="</ul></div>";h+="<h3 style='margin-top:14px'>Risques financiers</h3><table><tr><th>Risque</th><th class='num'>Impact estime</th><th>Detail</th></tr>";var rf=r.risques_financiers||[];for(var i=0;i<rf.length;i++){h+="<tr><td>"+rf[i].risque+"</td><td class='num'>"+fmt(rf[i].impact_estime)+"</td><td style='font-size:.84em'>"+rf[i].detail+"</td></tr>";}h+="</table>";h+="<h3 style='margin-top:14px'>Subventions eligibles</h3><table><tr><th>Subvention</th><th class='num'>Montant max</th><th>Condition</th></tr>";var sb=r.subventions_eligibles||[];for(var i=0;i<sb.length;i++){h+="<tr><td>"+sb[i].nom+"</td><td class='num'>"+fmt(sb[i].montant_max)+"</td><td style='font-size:.84em'>"+sb[i].condition+"</td></tr>";}h+="</table>";h+="<div style='margin-top:12px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Recommandations</h3><ul style='margin:0;padding-left:20px'>";var rc=r.recommandations||[];for(var i=0;i<rc.length;i++)h+="<li style='margin:3px 0'>"+rc[i]+"</li>";h+="</ul></div>";document.getElementById("sim-risques-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+
+/* === SUBVENTIONS === */
+var _subData=null;
+function rechercherSubventions(){
+var p="code_naf="+encodeURIComponent(gv("sub-naf"))+"&effectif="+gv("sub-eff")+"&forme_juridique="+encodeURIComponent(document.getElementById("sub-forme").value)+"&region="+encodeURIComponent(document.getElementById("sub-region").value)+"&zone="+encodeURIComponent(document.getElementById("sub-zone").value)+"&ca="+(gv("sub-ca")||0)+"&age_entreprise="+(gv("sub-age")||5)+"&masse_salariale="+(gv("sub-masse")||0)+"&innovation="+(document.getElementById("sub-innovation").checked)+"&environnement="+(document.getElementById("sub-environnement").checked)+"&numerique="+(document.getElementById("sub-numerique").checked)+"&export_intl="+(document.getElementById("sub-export").checked)+"&formation="+(document.getElementById("sub-formation").checked)+"&creation_reprise="+(document.getElementById("sub-creation-reprise").checked)+"&investissement="+(document.getElementById("sub-investissement").checked)+"&ess="+(document.getElementById("sub-ess").checked);
+fetch("/api/subventions/recherche?"+p).then(safeJson).then(function(r){
+_subData=r;
+document.getElementById("sub-results").style.display="block";
+document.getElementById("sub-total").textContent=r.total;
+document.getElementById("sub-montant").textContent=fmt(r.montant_potentiel_estime||0);
+document.getElementById("sub-nationales").textContent=r.par_niveau.national||0;
+document.getElementById("sub-europeennes").textContent=r.par_niveau.europeen||0;
+afficherSubventions(r.aides);
+}).catch(function(e){toast(e.message||"Erreur recherche subventions");});
+}
+function afficherSubventions(aides){
+var container=document.getElementById("sub-liste");
+if(!aides||aides.length===0){container.innerHTML="<div class='al info'><span class='ai'>&#128161;</span><span>Aucune aide trouvee avec ces criteres. Essayez d elargir vos criteres de recherche.</span></div>";document.getElementById("sub-recapitulatif").style.display="none";return;}
+var h="";
+var niveauColors={"national":"blue","regional":"purple","europeen":"teal","local":"amber"};
+var typeLabels={"subvention":"Subvention","credit_impot":"Credit d impot","exoneration":"Exoneration","pret":"Pret / Avance","garantie":"Garantie","accompagnement":"Accompagnement"};
+var catLabels={"innovation":"Innovation / R&D","environnement":"Environnement","emploi":"Emploi / Formation","numerique":"Numerique","export":"Export","creation":"Creation / Reprise","investissement":"Investissement","fiscal":"Avantage fiscal","social":"Exoneration sociale","ess":"ESS / Impact"};
+for(var i=0;i<aides.length;i++){var a=aides[i];
+var nc=niveauColors[a.niveau]||"blue";
+h+="<div class='card' style='cursor:pointer;border-left:4px solid var(--"+(nc==="blue"?"p3":nc==="purple"?"pu":nc==="teal"?"tl":"o")+")' onclick='this.querySelector(\".sub-detail\").style.display=this.querySelector(\".sub-detail\").style.display===\"none\"?\"block\":\"none\"'>";
+h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px'>";
+h+="<div><h2 style='margin-bottom:4px'>"+a.nom+"</h2><div style='font-size:.82em;color:var(--tx2)'>"+a.organisme+"</div></div>";
+h+="<div style='display:flex;gap:6px;flex-wrap:wrap'>";
+h+="<span class='badge badge-"+nc+"'>"+a.niveau.charAt(0).toUpperCase()+a.niveau.slice(1)+"</span>";
+h+="<span class='badge badge-green'>"+(typeLabels[a.type_aide]||a.type_aide)+"</span>";
+h+="<span class='badge badge-blue'>"+(catLabels[a.categorie]||a.categorie)+"</span>";
+h+="</div></div>";
+h+="<div style='margin-top:8px;font-size:.88em;color:var(--tx)'>"+a.description+"</div>";
+h+="<div style='margin-top:8px;display:flex;gap:16px;flex-wrap:wrap'>";
+h+="<div style='font-size:.84em'><strong>Montant max :</strong> "+a.montant_max+"</div>";
+if(a.montant_estime)h+="<div style='font-size:.84em;color:var(--g)'><strong>Estimation pour vous :</strong> "+fmt(a.montant_estime)+"</div>";
+h+="</div>";
+h+="<div class='sub-detail' style='display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--brd)'>";
+h+="<h3 style='font-size:.9em;margin-bottom:6px'>Conditions d eligibilite :</h3><ul style='padding-left:20px;margin:0'>";
+var conds=a.conditions||[];for(var c=0;c<conds.length;c++)h+="<li style='font-size:.84em;margin:3px 0;color:var(--tx)'>"+conds[c]+"</li>";
+h+="</ul>";
+if(a.tailles&&a.tailles.length){h+="<div style='margin-top:8px;font-size:.82em'><strong>Tailles eligibles :</strong> ";var tl=[];for(var t=0;t<a.tailles.length;t++){var labels={"tpe":"TPE","pme":"PME","eti":"ETI","ge":"GE"};tl.push(labels[a.tailles[t]]||a.tailles[t]);}h+=tl.join(", ")+"</div>";}
+if(a.url_info)h+="<div style='margin-top:8px'><a href='"+a.url_info+"' target='_blank' rel='noopener' style='font-size:.84em;color:var(--p3)'>En savoir plus &#8599;</a></div>";
+h+="</div></div>";
+}
+container.innerHTML=h;
+// Recap table
+var recap=document.getElementById("sub-recapitulatif");recap.style.display="block";
+var tb=document.getElementById("sub-recap-table");
+var rows="<tr><th>Aide</th><th>Niveau</th><th>Type</th><th>Montant max</th><th>Organisme</th><th>Eligibilite</th></tr>";
+for(var i=0;i<aides.length;i++){var a=aides[i];
+rows+="<tr><td><strong>"+a.nom+"</strong></td><td><span class='badge badge-"+(niveauColors[a.niveau]||"blue")+"'>"+a.niveau+"</span></td><td>"+(typeLabels[a.type_aide]||a.type_aide)+"</td><td class='num'>"+a.montant_max+"</td><td style='font-size:.84em'>"+a.organisme+"</td><td style='font-size:.78em'>"+((a.conditions||[]).slice(0,2).join("; "))+"</td></tr>";}
+tb.innerHTML=rows;
+}
+function filtrerSubventions(){
+if(!_subData)return;
+var niv=document.getElementById("sub-filtre-niveau").value;
+var cat=document.getElementById("sub-filtre-cat").value;
+var typ=document.getElementById("sub-filtre-type").value;
+var tai=document.getElementById("sub-filtre-taille").value;
+var filtered=_subData.aides.filter(function(a){
+if(niv&&a.niveau!==niv)return false;
+if(cat&&a.categorie!==cat)return false;
+if(typ&&a.type_aide!==typ)return false;
+if(tai&&a.tailles&&a.tailles.indexOf(tai)<0)return false;
+return true;
+});
+afficherSubventions(filtered);
+}
+function exportSubventions(){
+if(!_subData||!_subData.aides)return;
+var csv="Nom;Organisme;Niveau;Categorie;Type;Montant max;Conditions\n";
+for(var i=0;i<_subData.aides.length;i++){var a=_subData.aides[i];csv+='"'+a.nom+'";"'+a.organisme+'";"'+a.niveau+'";"'+a.categorie+'";"'+a.type_aide+'";"'+a.montant_max+'";"'+((a.conditions||[]).join(", "))+'"\n';}
+var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="subventions_eligibles.csv";l.click();URL.revokeObjectURL(u);
+}
+function imprimerSubventions(){window.print();}
+function prefillSubventions(){
+try{
+fetch("/api/config/entete").then(safeJson).then(function(cfg){
+if(cfg.code_naf)document.getElementById("sub-naf").value=cfg.code_naf;
+if(cfg.forme_juridique){var sel=document.getElementById("sub-forme");for(var i=0;i<sel.options.length;i++){if(sel.options[i].value&&cfg.forme_juridique.toUpperCase().indexOf(sel.options[i].value)>=0){sel.selectedIndex=i;break;}}}
+}).catch(function(){});
+}catch(e){}
+}
 
 /* === VEILLE === */
 function loadVeille(){var a=document.getElementById("v-annee").value;document.getElementById("v-res").style.display="block";
