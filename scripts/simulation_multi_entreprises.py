@@ -28,6 +28,84 @@ import requests
 BASE_URL = os.environ.get("NORMACHECK_URL", "http://localhost:8000")
 RESULTS = []
 
+# ============================================================
+# Constantes réglementaires 2026 (alignées sur urssaf_analyzer)
+# ============================================================
+
+PASS_MENSUEL = 4005.00       # Plafond mensuel sécurité sociale 2026
+PASS_ANNUEL = 48060.00       # Plafond annuel
+SMIC_MENSUEL = 1823.03       # SMIC mensuel brut 2026
+
+# Taux de cotisations de référence 2026 — FORMAT DÉCIMAL
+# Aligné sur urssaf_analyzer/config/constants.py
+# IMPORTANT : tous les taux sont en décimal (0.13 = 13%)
+# Les noms DOIVENT correspondre aux patterns du CSV parser (substring matching)
+# Le parser CSV fait: if taux > 1 → divise par 100, sinon garde tel quel
+
+# Cotisations reconnues par le CSV parser (noms compatibles avec le mapping)
+TAUX_CSV = {
+    # Sécurité sociale
+    "maladie":                  {"patronal": 0.13,    "salarial": 0.00,    "assiette": "totalite"},
+    "vieillesse plafonnee":     {"patronal": 0.0855,  "salarial": 0.069,   "assiette": "plafonnee_pass"},
+    "vieillesse deplafonnee":   {"patronal": 0.0211,  "salarial": 0.004,   "assiette": "totalite"},
+    "allocations familiales":   {"patronal": 0.0525,  "salarial": 0.00,    "assiette": "totalite"},
+    "accident travail":         {"patronal": 0.0208,  "salarial": 0.00,    "assiette": "totalite"},
+    # CSG / CRDS (parser: "csg" → CSG_DEDUCTIBLE, "crds" → CRDS)
+    # Note: "csg non deductible" exclue du CSV car le parser la mappe à CSG_DEDUCTIBLE
+    #        (substring "csg" matché avant "csg non deductible" dans le dict)
+    "csg":                      {"patronal": 0.00,    "salarial": 0.068,   "assiette": "98.25%"},
+    "crds":                     {"patronal": 0.00,    "salarial": 0.005,   "assiette": "98.25%"},
+    # Chômage (parser: "chomage" → ASSURANCE_CHOMAGE, "ags" → AGS)
+    "chomage":                  {"patronal": 0.0405,  "salarial": 0.00,    "assiette": "totalite"},
+    "ags":                      {"patronal": 0.0015,  "salarial": 0.00,    "assiette": "totalite"},
+    # Retraite AGIRC-ARRCO (parser: "retraite complementaire"→T1, "ceg"→CEG_T1)
+    "retraite complementaire":  {"patronal": 0.0472,  "salarial": 0.0315,  "assiette": "plafonnee_pass"},
+    "ceg":                      {"patronal": 0.0129,  "salarial": 0.0086,  "assiette": "plafonnee_pass"},
+    # Autres (parser: "fnal"→FNAL, "formation"→FORMATION_PRO, "taxe apprentissage"→TAXE_APP)
+    "fnal":                     {"patronal": 0.001,   "salarial": 0.00,    "assiette": "plafonnee_pass"},
+    "formation":                {"patronal": 0.0055,  "salarial": 0.00,    "assiette": "totalite"},
+    "taxe apprentissage":       {"patronal": 0.0068,  "salarial": 0.00,    "assiette": "totalite"},
+}
+
+# Cotisations T2 pour cadres au-dessus du PASS (noms reconnus par le parser)
+# "agirc" → RETRAITE_COMPLEMENTAIRE_T2
+# Note: CEG_T2 n'a pas de mapping CSV distinct, on ne l'inclut pas en CSV
+TAUX_T2_CSV = {
+    "agirc":                    {"patronal": 0.1295,  "salarial": 0.0864,  "assiette": "tranche_2"},
+}
+
+# Cotisations supplémentaires pour DSN/XML uniquement (pas de mapping CSV fiable)
+# Le parser CSV les mapperait à MALADIE par défaut → faux doublons
+TAUX_DSN_ONLY = {
+    "versement mobilite":       {"patronal": 0.0175,  "salarial": 0.00,   "assiette": "totalite", "seuil": 11},
+    "peec":                     {"patronal": 0.0045,  "salarial": 0.00,   "assiette": "totalite", "seuil": 20},
+    "contribution solidarite autonomie": {"patronal": 0.003, "salarial": 0.00, "assiette": "totalite"},
+    "ceg t2":                   {"patronal": 0.0162,  "salarial": 0.0108, "assiette": "tranche_2"},
+}
+
+# Mapping CTP pour DSN
+CTP_MAPPING = {
+    "maladie": "100",
+    "vieillesse plafonnee": "260",
+    "vieillesse deplafonnee": "262",
+    "allocations familiales": "332",
+    "accident travail": "452",
+    "csg": "012",
+    "csg non deductible": "013",
+    "crds": "018",
+    "chomage": "772",
+    "ags": "937",
+    "fnal": "236",
+    "formation": "971",
+    "retraite complementaire": "400",
+    "ceg": "403",
+    "agirc": "401",
+    "ceg t2": "404",
+    "versement mobilite": "900",
+    "peec": "960",
+    "taxe apprentissage": "979",
+}
+
 
 # ============================================================
 # Génération des données d'entreprise
@@ -57,7 +135,7 @@ ENTREPRISES = [
              "base_brute": 2500.00},
         ],
         "anomalies": {
-            "taux_atmp_eleve": 5.50,  # Taux AT/MP BTP élevé
+            "taux_atmp_eleve": 0.055,  # Taux AT/MP BTP élevé (5.5% en décimal)
             "montant_maladie_errone": True,  # Montant calculé incorrect
         },
     },
@@ -82,7 +160,7 @@ ENTREPRISES = [
              "base_brute": 7500.00},
         ],
         "anomalies": {
-            "taux_vieillesse_errone": 10.00,  # Taux patronal vieillesse incorrect (devrait être 8.55)
+            "taux_vieillesse_errone": 0.10,  # Taux patronal vieillesse incorrect (devrait être 0.0855)
             "doublon_cotisation": True,  # Ligne de cotisation en double
         },
     },
@@ -130,7 +208,7 @@ ENTREPRISES = [
              "base_brute": 2100.00},
         ],
         "anomalies": {
-            "taux_af_errone": 7.50,  # Allocations familiales taux bien trop élevé (devrait être 3.45 ou 5.25)
+            "taux_af_errone": 0.075,  # Allocations familiales taux bien trop élevé (7.5% en décimal)
         },
     },
     {
@@ -157,24 +235,65 @@ ENTREPRISES = [
         ],
         "anomalies": {
             "montant_calcul_errone": True,  # Montant patronal incorrect
-            "taux_atmp_transport": 3.80,  # Taux AT/MP transport
+            "taux_atmp_transport": 0.038,  # Taux AT/MP transport (3.8% en décimal)
         },
     },
 ]
 
 
-# Taux de cotisations de référence 2026
-TAUX_REF = {
-    "maladie": {"patronal": 13.00, "salarial": 0.00},
-    "vieillesse plafonnee": {"patronal": 8.55, "salarial": 6.90},
-    "vieillesse deplafonnee": {"patronal": 2.02, "salarial": 0.40},
-    "allocations familiales": {"patronal": 5.25, "salarial": 0.00},
-    "at/mp": {"patronal": 2.08, "salarial": 0.00},
-}
+def _calcul_assiette(base_brute, assiette_type):
+    """Calcule l'assiette selon le type de cotisation."""
+    if assiette_type == "plafonnee_pass":
+        return min(base_brute, PASS_MENSUEL)
+    elif assiette_type == "98.25%":
+        return round(abs(base_brute) * 0.9825, 2)
+    elif assiette_type == "tranche_2":
+        if base_brute > PASS_MENSUEL:
+            return min(base_brute - PASS_MENSUEL, 7 * PASS_MENSUEL)
+        return 0
+    return abs(base_brute)
+
+
+def _get_cotisations_csv(entreprise, salarie):
+    """Retourne les cotisations pour le CSV (noms reconnus par le parser)."""
+    cots = dict(TAUX_CSV)
+    effectif = entreprise["effectif"]
+
+    # FNAL : adapter le taux selon effectif (0.50% déplafonné si >= 50)
+    if effectif >= 50:
+        cots["fnal"] = {"patronal": 0.005, "salarial": 0.00, "assiette": "totalite"}
+
+    # Formation professionnelle : adapter selon effectif (1.00% si >= 11)
+    if effectif >= 11:
+        cots["formation"] = {"patronal": 0.01, "salarial": 0.00, "assiette": "totalite"}
+
+    # Retraite T2 (agirc) si salaire > PASS
+    if salarie["base_brute"] > PASS_MENSUEL:
+        for nom_cot, params in TAUX_T2_CSV.items():
+            cots[nom_cot] = params
+
+    return cots
+
+
+def _get_cotisations_dsn(entreprise, salarie):
+    """Retourne TOUTES les cotisations pour DSN/XML (y compris non-CSV)."""
+    cots = _get_cotisations_csv(entreprise, salarie)
+    effectif = entreprise["effectif"]
+
+    # Cotisations DSN-only (pas de mapping CSV fiable)
+    for nom_cot, params in TAUX_DSN_ONLY.items():
+        seuil = params.get("seuil", 0)
+        if seuil and effectif < seuil:
+            continue
+        if params.get("assiette") == "tranche_2" and salarie["base_brute"] <= PASS_MENSUEL:
+            continue
+        cots[nom_cot] = params
+
+    return cots
 
 
 def generer_csv_paie(entreprise):
-    """Génère un fichier CSV de paie avec les anomalies spécifiques."""
+    """Génère un fichier CSV de paie avec toutes les cotisations et anomalies spécifiques."""
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
@@ -192,14 +311,20 @@ def generer_csv_paie(entreprise):
         if anomalies.get("base_negative") and sal == entreprise["salaries"][0]:
             base = anomalies["base_negative"]
 
-        for cot_type, taux in TAUX_REF.items():
+        cotisations = _get_cotisations_csv(entreprise, sal)
+
+        for cot_type, taux in cotisations.items():
             tp = taux["patronal"]
             ts = taux["salarial"]
+            assiette_type = taux.get("assiette", "totalite")
 
-            # Anomalie : taux AT/MP élevé
-            if cot_type == "at/mp" and anomalies.get("taux_atmp_eleve"):
+            # Calcul de l'assiette correcte
+            assiette = _calcul_assiette(base, assiette_type)
+
+            # Anomalie : taux AT/MP élevé (en décimal)
+            if cot_type == "accident travail" and anomalies.get("taux_atmp_eleve"):
                 tp = anomalies["taux_atmp_eleve"]
-            if cot_type == "at/mp" and anomalies.get("taux_atmp_transport"):
+            if cot_type == "accident travail" and anomalies.get("taux_atmp_transport"):
                 tp = anomalies["taux_atmp_transport"]
 
             # Anomalie : taux vieillesse erroné
@@ -210,8 +335,9 @@ def generer_csv_paie(entreprise):
             if cot_type == "allocations familiales" and anomalies.get("taux_af_errone"):
                 tp = anomalies["taux_af_errone"]
 
-            mp = round(abs(base) * tp / 100, 2)
-            ms = round(abs(base) * ts / 100, 2)
+            # Taux en décimal → multiplication directe
+            mp = round(abs(assiette) * tp, 2)
+            ms = round(abs(assiette) * ts, 2)
 
             # Anomalie : montant maladie erroné
             if cot_type == "maladie" and anomalies.get("montant_maladie_errone"):
@@ -221,70 +347,188 @@ def generer_csv_paie(entreprise):
             if anomalies.get("montant_calcul_errone") and cot_type == "vieillesse deplafonnee":
                 mp = round(mp * 0.5, 2)  # 50% trop bas
 
+            # Pour le CSV, écrire l'assiette réelle (pas la base brute)
+            # afin que l'analyseur voie la bonne base dans la colonne base_brute
+            base_csv = assiette if assiette_type != "totalite" else base
             writer.writerow([
                 sal["nir"], sal["nom"], sal["prenom"], sal["statut"],
-                f"{base:.2f}", cot_type, f"{tp:.2f}", f"{mp:.2f}",
-                f"{ts:.2f}", f"{ms:.2f}", "01/01/2026", "31/01/2026"
+                f"{base_csv:.2f}", cot_type, f"{tp:.4f}", f"{mp:.2f}",
+                f"{ts:.4f}", f"{ms:.2f}", "01/01/2026", "31/01/2026"
             ])
 
         # Anomalie : doublon cotisation
         if anomalies.get("doublon_cotisation") and sal == entreprise["salaries"][0]:
-            tp = TAUX_REF["maladie"]["patronal"]
-            mp = round(abs(base) * tp / 100, 2)
+            tp = TAUX_CSV["maladie"]["patronal"]
+            mp = round(abs(base) * tp, 2)
             writer.writerow([
                 sal["nir"], sal["nom"], sal["prenom"], sal["statut"],
-                f"{base:.2f}", "maladie", f"{tp:.2f}", f"{mp:.2f}",
-                "0.00", "0.00", "01/01/2026", "31/01/2026"
+                f"{base:.2f}", "maladie", f"{tp:.4f}", f"{mp:.2f}",
+                "0.0000", "0.00", "01/01/2026", "31/01/2026"
             ])
 
     return output.getvalue()
 
 
 def generer_dsn(entreprise):
-    """Génère un fichier DSN pour l'entreprise."""
+    """Génère un fichier DSN complet avec tous les blocs obligatoires."""
     lines = []
+
+    # S10 — Emetteur
     lines.append(f"S10.G00.00.001 '{entreprise['nom']}'")
     lines.append("S10.G00.00.002 '01'")
     lines.append("S10.G00.00.003 '11'")
     lines.append("S10.G00.00.004 '01012026'")
     lines.append("S10.G00.00.005 '31012026'")
+
+    # S20 — Entreprise
     lines.append(f"S20.G00.05.001 '{entreprise['siren']}'")
     lines.append(f"S20.G00.05.002 '{entreprise['nom']}'")
+
+    # S21.G00.06 — Etablissement
     lines.append(f"S21.G00.06.001 '{entreprise['siret'][-5:]}'")
     lines.append("S21.G00.06.003 '012026'")
+
+    # S21.G00.11 — Effectif
     lines.append(f"S21.G00.11.001 '{entreprise['effectif']}'")
 
-    for sal in entreprise["salaries"]:
+    # Pour chaque salarié : S30 + S21.G00.40 (contrat) + S21.G00.51 (rémunération)
+    # + S21.G00.78 (base assujettie) + S21.G00.81 (cotisation individuelle)
+    for i, sal in enumerate(entreprise["salaries"]):
+        # S30 — Identification salarié
         lines.append(f"S30.G00.30.001 '{sal['nir']}'")
         lines.append(f"S30.G00.30.002 '{sal['nom']}'")
         lines.append(f"S30.G00.30.004 '{sal['prenom']}'")
 
-    # Cotisations agrégées
-    for cot_code, cot_type in [("100", "maladie"), ("260", "vieillesse plafonnee"),
-                                ("262", "vieillesse deplafonnee")]:
-        total_base = sum(s["base_brute"] for s in entreprise["salaries"])
-        tp = TAUX_REF[cot_type]["patronal"]
-        mp = round(total_base * tp / 100, 2)
-        lines.append(f"S81.G00.81.001 '{cot_code}'")
-        lines.append(f"S81.G00.81.003 '{total_base:.2f}'")
-        lines.append(f"S81.G00.81.004 '{tp:.2f}'")
-        lines.append(f"S81.G00.81.005 '{mp:.2f}'")
+        # S21.G00.40 — Contrat
+        lines.append(f"S21.G00.40.001 '{i+1:03d}'")  # Numéro contrat
+        lines.append("S21.G00.40.002 '01'")           # CDI
+        lines.append("S21.G00.40.007 '01012026'")     # Date début
+        lines.append(f"S21.G00.40.009 '{sal['statut']}'")
+
+        # S21.G00.51 — Rémunération
+        lines.append(f"S21.G00.51.001 '{sal['base_brute']:.2f}'")
+        lines.append("S21.G00.51.002 '001'")          # Type : brut
+        lines.append("S21.G00.51.010 '01012026'")
+        lines.append("S21.G00.51.011 '31012026'")
+
+        # S21.G00.78 — Bases assujetties
+        base = sal["base_brute"]
+        base_plaf = min(base, PASS_MENSUEL)
+        base_csg = round(base * 0.9825, 2)
+        lines.append(f"S21.G00.78.001 '02'")  # Brut SS
+        lines.append(f"S21.G00.78.004 '{base:.2f}'")
+        lines.append(f"S21.G00.78.001 '03'")  # Plafonné
+        lines.append(f"S21.G00.78.004 '{base_plaf:.2f}'")
+        lines.append(f"S21.G00.78.001 '04'")  # Base CSG
+        lines.append(f"S21.G00.78.004 '{base_csg:.2f}'")
+
+        # S21.G00.81 — Cotisations individuelles
+        cotisations = _get_cotisations_dsn(entreprise, sal)
+        for cot_type, taux in cotisations.items():
+            ctp = CTP_MAPPING.get(cot_type)
+            if not ctp:
+                continue
+            assiette = _calcul_assiette(base, taux.get("assiette", "totalite"))
+            if assiette <= 0:
+                continue
+            tp = taux["patronal"]
+            mp = round(assiette * tp, 2)  # taux en décimal
+            lines.append(f"S21.G00.81.001 '{ctp}'")
+            lines.append(f"S21.G00.81.003 '{assiette:.2f}'")
+            lines.append(f"S21.G00.81.004 '{tp:.4f}'")
+            lines.append(f"S21.G00.81.005 '{mp:.2f}'")
+
+    # S21.G00.22 — Cotisations agrégées
+    total_base = sum(s["base_brute"] for s in entreprise["salaries"])
+    total_base_plaf = sum(min(s["base_brute"], PASS_MENSUEL) for s in entreprise["salaries"])
+
+    for cot_type in ["maladie", "vieillesse plafonnee", "vieillesse deplafonnee",
+                      "allocations familiales", "accident travail", "chomage",
+                      "retraite complementaire"]:
+        ctp = CTP_MAPPING.get(cot_type, "000")
+        taux_info = TAUX_CSV[cot_type]
+        if taux_info.get("assiette") == "plafonnee_pass":
+            base_agg = total_base_plaf
+        else:
+            base_agg = total_base
+        tp = taux_info["patronal"]
+        mp = round(base_agg * tp, 2)  # taux en décimal
+        lines.append(f"S21.G00.22.001 '{ctp}'")
+        lines.append(f"S21.G00.22.003 '{base_agg:.2f}'")
+        lines.append(f"S21.G00.22.004 '{tp:.4f}'")
+        lines.append(f"S21.G00.22.005 '{mp:.2f}'")
+
+    # S21.G00.23 — Bordereau de cotisation due
+    total_patronal = round(total_base * 0.13, 2)  # Maladie seule (simplifié)
+    lines.append("S21.G00.23.001 '01'")
+    lines.append(f"S21.G00.23.002 '{entreprise['siret']}'")
+    lines.append("S21.G00.23.003 '012026'")
+    lines.append(f"S21.G00.23.005 '{total_patronal:.2f}'")
 
     return "\n".join(lines)
 
 
 def generer_bordereau_xml(entreprise):
-    """Génère un bordereau de cotisations XML."""
+    """Génère un bordereau de cotisations XML complet."""
     cotisations = ""
     total_base = sum(s["base_brute"] for s in entreprise["salaries"])
+    total_base_plaf = sum(min(s["base_brute"], PASS_MENSUEL) for s in entreprise["salaries"])
 
-    for cot_type, taux in TAUX_REF.items():
-        mp = round(total_base * taux["patronal"] / 100, 2)
+    for cot_type, taux in TAUX_CSV.items():
+        if taux.get("assiette") == "plafonnee_pass":
+            base_cot = total_base_plaf
+        elif taux.get("assiette") == "98.25%":
+            base_cot = round(total_base * 0.9825, 2)
+        else:
+            base_cot = total_base
+
+        mp = round(base_cot * taux["patronal"], 2)   # taux en décimal
+        ms = round(base_cot * taux["salarial"], 2)   # taux en décimal
         cotisations += f"""    <ligne_cotisation>
-        <type_cotisation>{cot_type.title()}</type_cotisation>
-        <base>{total_base:.2f}</base>
-        <taux_patronal>{taux['patronal']:.2f}</taux_patronal>
+        <type_cotisation>{cot_type.replace(' ', '_')}</type_cotisation>
+        <base>{base_cot:.2f}</base>
+        <taux_patronal>{taux['patronal']:.4f}</taux_patronal>
         <montant_patronal>{mp:.2f}</montant_patronal>
+        <taux_salarial>{taux['salarial']:.4f}</taux_salarial>
+        <montant_salarial>{ms:.2f}</montant_salarial>
+    </ligne_cotisation>
+"""
+
+    # Cotisations DSN-only (versement mobilité, PEEC, etc.)
+    effectif = entreprise["effectif"]
+    for cot_type, params in TAUX_DSN_ONLY.items():
+        seuil = params.get("seuil", 0)
+        if seuil and effectif < seuil:
+            continue
+        if params.get("assiette") == "tranche_2":
+            continue  # T2 traité séparément ci-dessous
+        mp = round(total_base * params["patronal"], 2)
+        cotisations += f"""    <ligne_cotisation>
+        <type_cotisation>{cot_type.replace(' ', '_')}</type_cotisation>
+        <base>{total_base:.2f}</base>
+        <taux_patronal>{params['patronal']:.4f}</taux_patronal>
+        <montant_patronal>{mp:.2f}</montant_patronal>
+        <taux_salarial>{params.get('salarial', 0):.4f}</taux_salarial>
+        <montant_salarial>0.00</montant_salarial>
+    </ligne_cotisation>
+"""
+
+    # T2 pour cadres au-dessus du PASS (agirc CSV + ceg t2 DSN-only)
+    all_t2 = dict(TAUX_T2_CSV)
+    all_t2["ceg t2"] = TAUX_DSN_ONLY["ceg t2"]
+    for sal in entreprise["salaries"]:
+        if sal["base_brute"] > PASS_MENSUEL:
+            tranche2 = sal["base_brute"] - PASS_MENSUEL
+            for cot_type, params in all_t2.items():
+                mp = round(tranche2 * params["patronal"], 2)
+                ms = round(tranche2 * params["salarial"], 2)
+                cotisations += f"""    <ligne_cotisation>
+        <type_cotisation>{cot_type.replace(' ', '_')}_{sal['nom']}</type_cotisation>
+        <base>{tranche2:.2f}</base>
+        <taux_patronal>{params['patronal']:.4f}</taux_patronal>
+        <montant_patronal>{mp:.2f}</montant_patronal>
+        <taux_salarial>{params['salarial']:.4f}</taux_salarial>
+        <montant_salarial>{ms:.2f}</montant_salarial>
     </ligne_cotisation>
 """
 
@@ -300,6 +544,8 @@ def generer_bordereau_xml(entreprise):
         <date_debut>01/01/2026</date_debut>
         <date_fin>31/01/2026</date_fin>
     </periode>
+    <masse_salariale>{total_base:.2f}</masse_salariale>
+    <nb_salaries>{len(entreprise['salaries'])}</nb_salaries>
 {cotisations}</bordereau_cotisations>
 """
 
@@ -350,8 +596,7 @@ def simuler_gerant(entreprise, session):
                 print(f"        → ERREUR auth: {resp.status_code}")
                 return result
 
-        # Extraire le token JWT depuis le cookie ou le header Set-Cookie
-        # (le cookie secure=True peut empêcher la récupération sur HTTP)
+        # Extraire le token JWT
         token = session.cookies.get("nc_token")
         if not token:
             set_cookie = resp.headers.get("set-cookie", "")
@@ -373,23 +618,27 @@ def simuler_gerant(entreprise, session):
     with tempfile.TemporaryDirectory() as tmpdir:
         # CSV paie
         csv_path = os.path.join(tmpdir, f"paie_{entreprise['siren']}.csv")
+        csv_content = generer_csv_paie(entreprise)
         with open(csv_path, "w", encoding="utf-8") as f:
-            f.write(generer_csv_paie(entreprise))
-        print(f"        → CSV paie généré")
+            f.write(csv_content)
+        nb_lignes_csv = csv_content.count("\n")
+        print(f"        → CSV paie généré ({nb_lignes_csv} lignes)")
 
         # DSN
         dsn_path = os.path.join(tmpdir, f"dsn_{entreprise['siren']}.dsn")
+        dsn_content = generer_dsn(entreprise)
         with open(dsn_path, "w", encoding="utf-8") as f:
-            f.write(generer_dsn(entreprise))
-        print(f"        → DSN générée")
+            f.write(dsn_content)
+        nb_lignes_dsn = dsn_content.count("\n")
+        print(f"        → DSN générée ({nb_lignes_dsn} lignes, blocs S10-S81)")
 
         # Bordereau XML
         xml_path = os.path.join(tmpdir, f"bordereau_{entreprise['siren']}.xml")
         with open(xml_path, "w", encoding="utf-8") as f:
             f.write(generer_bordereau_xml(entreprise))
-        print(f"        → Bordereau XML généré")
+        print(f"        → Bordereau XML généré (toutes cotisations)")
 
-        result["etapes"].append({"documents": ["CSV paie", "DSN", "Bordereau XML"]})
+        result["etapes"].append({"documents": ["CSV paie complet", "DSN complète", "Bordereau XML complet"]})
 
         # --- Étape 3 : Upload et analyse ---
         print("\n  [3/5] Upload et analyse des documents...")
@@ -421,9 +670,16 @@ def simuler_gerant(entreprise, session):
                 print(f"        → Impact financier : {synthese.get('impact_financier_total', '?')} €")
                 print(f"        → Constats : {len(constats)}")
 
+                # Classement par sévérité
+                par_sev = {}
+                for c in constats:
+                    sev = c.get("severite", "inconnue")
+                    par_sev[sev] = par_sev.get(sev, 0) + 1
+                print(f"        → Par sévérité : {par_sev}")
+
                 if constats:
                     print(f"\n        Détail des constats :")
-                    for i, c in enumerate(constats[:15], 1):
+                    for i, c in enumerate(constats[:20], 1):
                         sev = c.get("severite", "?")
                         titre = c.get("titre", "?")
                         impact = c.get("montant_impact", 0)
@@ -456,7 +712,7 @@ def simuler_gerant(entreprise, session):
             }
             resp = session.post(f"{BASE_URL}/api/export/pdf", json=export_data)
             if resp.status_code == 200:
-                result["etapes"].append({"export_pdf": "OK"})
+                result["etapes"].append({"export_pdf": "OK", "taille": len(resp.content)})
                 print(f"        → Rapport généré ({len(resp.content)} octets)")
             else:
                 result["erreurs"].append(f"Export failed: {resp.status_code}")
@@ -550,6 +806,8 @@ def main():
     print(f"  NormaCheck — Simulation Multi-Entreprises")
     print(f"  {len(ENTREPRISES)} entreprises | Parcours gérant complet")
     print(f"  Serveur : {BASE_URL}")
+    print(f"  PASS mensuel : {PASS_MENSUEL} € | SMIC : {SMIC_MENSUEL} €")
+    print(f"  Cotisations CSV : {len(TAUX_CSV)} + {len(TAUX_T2_CSV)} T2 | DSN-only : {len(TAUX_DSN_ONLY)}")
     print(f"{'='*70}")
 
     # Vérifier que le serveur est accessible
@@ -558,7 +816,7 @@ def main():
         resp = requests.get(f"{BASE_URL}/api/health", timeout=5)
         if resp.status_code == 200:
             health = resp.json()
-            print(f"  → Serveur OK : {json.dumps(health, indent=2, ensure_ascii=False)[:300]}")
+            print(f"  → Serveur OK : v{health.get('version', '?')} | env: {health.get('env', '?')}")
         else:
             print(f"  → Serveur répond mais status {resp.status_code}")
     except requests.ConnectionError:
@@ -580,7 +838,6 @@ def main():
     output_path = Path(__file__).parent.parent / "data" / "simulation_results.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        # On ne sauvegarde pas l'intégralité de l'analyse (trop volumineux)
         summary = []
         for r in results:
             s = {
