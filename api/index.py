@@ -9282,16 +9282,36 @@ h+="</tbody></table></div>";}
 el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur chargement audit: "+e.message+"</div>";});}
 
 /* === CONFORMITY SCORE === */
-function categToDomain(cat,ref){
-var c=(cat||"").toLowerCase();var r=(ref||"").toLowerCase();
+function categToDomain(cat,ref,titre){
+var c=(cat||"").toLowerCase();var r=(ref||"").toLowerCase();var t=(titre||"").toLowerCase();
 /* URSSAF-specific: taxe apprentissage (CT L6241-1), formation pro are URSSAF even if "taxe" in name */
 if(c.indexOf("apprentissage")>=0||c.indexOf("formation_pro")>=0)return"urssaf";
 if(r.indexOf("code du travail")>=0&&r.indexOf("cgi")<0)return"urssaf";
 /* Fiscal domain: CGI, LPF, taxe sur salaires, TVA, impots */
 if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||c.indexOf("taxe_sur_salaires")>=0)return"fiscal";
-/* CDC domain: NEP, ISA, code de commerce, comptabilite */
+/* CDC domain: NEP, ISA, code de commerce, comptabilite, totaux/sous-totaux, doublons total/detail */
 if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0)return"cdc";
-/* Default: urssaf. Log pour traçabilite - un constat non classe est affecte au domaine social par defaut */
+/* CDC par titre: coherence comptable, totaux, doublons total/detail, base x taux, S89 */
+if(t.indexOf("total")>=0&&t.indexOf("detail")>=0)return"cdc";
+if(t.indexOf("ecart calcul cotisation")>=0||t.indexOf("base x taux")>=0)return"cdc";
+if(t.indexOf("s89")>=0)return"cdc";
+if(t.indexOf("masse salariale")>=0&&t.indexOf("bases individuelles")>=0)return"cdc";
+/*
+ * INCOHERENCE cross-document: distribuer entre domaines selon le contenu.
+ * Les incoherences de taux/montants entre documents sont des enjeux CDC (fiabilite comptable).
+ * Les incoherences SIRET/effectif/employes sont des enjeux URSSAF (declarations sociales).
+ */
+if(c==="incoherence"){
+/* Taux, montants, bases entre documents = fiabilite comptable = CDC */
+if(t.indexOf("total patronal")>=0||t.indexOf("taux at")>=0)return"cdc";
+/* Convention collective, statut = impact fiscal aussi (minima, avantages en nature) */
+if(t.indexOf("convention collective")>=0||t.indexOf("statut divergent")>=0)return"fiscal";
+}
+/* Donnee manquante: certaines sont fiscales (declarations absentes = enjeu declaration fiscale) */
+if(c==="donnee_manquante"&&(t.indexOf("mois de declaration manquants")>=0))return"fiscal";
+/* Pattern suspect: distribution Benford et outliers = enjeu comptabilite (CDC) */
+if(c==="pattern_suspect"&&(t.indexOf("benford")>=0||t.indexOf("valeur atypique")>=0))return"cdc";
+/* Default: urssaf. Log pour traçabilite */
 if(typeof console!=="undefined")console.info("Constat non classe par domaine, affecte a URSSAF par defaut:",cat,ref);
 return"urssaf";}
 /*
@@ -9355,7 +9375,7 @@ return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbH
 function calculateTripleScore(data){
 var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
 var urssafC=[],fiscalC=[],cdcC=[];
-for(var i=0;i<constats.length;i++){var c=constats[i];var dom=categToDomain(c.categorie,c.reference_legale);
+for(var i=0;i<constats.length;i++){var c=constats[i];var dom=categToDomain(c.categorie,c.reference_legale,c.titre);
 if(dom==="fiscal")fiscalC.push(c);else if(dom==="cdc")cdcC.push(c);else urssafC.push(c);}
 var su=_scoreOne(urssafC,nbDecl,"urssaf");var sf=_scoreOne(fiscalC,nbDecl,"fiscal");var sc=_scoreOne(cdcC,nbDecl,"cdc");
 su.domaine="URSSAF";su.ref_legal="Code de la securite sociale (CSS)";su.organisme="URSSAF / Caisse Nationale";
@@ -9373,8 +9393,20 @@ var Nu=DOMAIN_CONTROL_POINTS.urssaf,Nf=DOMAIN_CONTROL_POINTS.fiscal,Nc=DOMAIN_CO
 var Nt=Nu+Nf+Nc;
 var wu=Nu/Nt,wf=Nf/Nt,wc=Nc/Nt;
 var global=Math.round(su.score*wu+sf.score*wf+sc.score*wc);
+/*
+ * Penalite d accumulation d incoherences inter-documents :
+ * Si le nombre total d INCOHERENCES depasse 5, une penalite supplementaire
+ * s applique au score global. Cela evite qu un grand nombre d incoherences
+ * reparties entre domaines soit absorbe par la normalisation Wmax.
+ * Penalite = min(15, (nbIncoherences - 5) * 2) points.
+ */
+var nbIncoherences=0;
+for(var ic=0;ic<constats.length;ic++){if((constats[ic].categorie||"").toLowerCase()==="incoherence")nbIncoherences++;}
+var penaliteIncoherences=0;
+if(nbIncoherences>5){penaliteIncoherences=Math.min(15,(nbIncoherences-5)*2);global=Math.max(0,global-penaliteIncoherences);}
 var ggrade="F";if(global>=90)ggrade="A";else if(global>=75)ggrade="B";else if(global>=60)ggrade="C";else if(global>=45)ggrade="D";else if(global>=30)ggrade="E";
 return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length,
+nb_incoherences:nbIncoherences,penalite_incoherences:penaliteIncoherences,
 poids:{urssaf:wu,fiscal:wf,cdc:wc},methode:"Moyenne ponderee par nombre de points de controle (Nk/Somme_Nk)"};}
 function calculateConformityScore(data){
 var ts=calculateTripleScore(data);var g=ts.global;var p=ts.poids;
