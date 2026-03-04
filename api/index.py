@@ -2864,28 +2864,68 @@ async def sim_exonerations(
     duree_contrat_mois: int = Query(0),
     heures_supplementaires: float = Query(0),
     nb_heures_mensuelles: float = Query(151.67),
+    # Nouveaux parametres pour calcul precis
+    jours_absence: float = Query(0),
+    type_absence: str = Query(""),
+    temps_partiel_pct: float = Query(100),
+    bareme_lodeom: str = Query("competitivite"),
+    est_cadre: bool = Query(False),
+    taux_at: float = Query(0),
+    nb_salaries_simules: int = Query(1),
 ):
+    """Simulation exhaustive des exonerations avec tous parametres de calcul."""
+    smic_mensuel_ref = float(_SMIC_MENSUEL)
+    smic_horaire = round(smic_mensuel_ref / 151.67, 2)
+
+    # Prorata temps partiel
+    coeff_tp = max(0.01, min(temps_partiel_pct / 100.0, 1.0))
+    heures_contrat = nb_heures_mensuelles * coeff_tp
+    smic_mensuel = smic_mensuel_ref * coeff_tp
+
+    # Prorata absences : on deduit les jours d'absence du SMIC reconstitue
+    jours_ouvres_mois = 21.67
+    coeff_presence = max(0, (jours_ouvres_mois - jours_absence) / jours_ouvres_mois)
+    smic_retabli = round(smic_mensuel * coeff_presence, 2)
+
     brut = brut_mensuel
-    smic_mensuel = float(_SMIC_MENSUEL)
-    ratio_smic = brut / smic_mensuel if smic_mensuel > 0 else 1
+    ratio_smic = brut / smic_retabli if smic_retabli > 0 else 999
 
     exonerations = []
     total_exo = 0.0
 
-    # 1. Reduction generale (ex-Fillon) - tous employeurs < 3.5 SMIC
+    # === Taux patronaux detailles ===
+    taux_maladie = 0.07 if ratio_smic > 2.5 else 0.13
+    taux_vieillesse_plaf = 0.0855
+    taux_vieillesse_deplaf = 0.0202
+    taux_af = 0.0525 if ratio_smic > 3.5 else 0.0345
+    taux_at_reel = taux_at if taux_at > 0 else 0.0208
+    taux_fnal = 0.001 if effectif < 50 else 0.005
+    taux_csa = 0.003
+    taux_chom = 0.0405
+    taux_ags = 0.0015
+    taux_agirc = 0.1292 if est_cadre else 0.0786
+    taux_pat_total = round(taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_at_reel + taux_fnal + taux_csa + taux_chom + taux_ags + taux_agirc, 4)
+    charges_normales = round(brut * taux_pat_total, 2)
+
+    # 1. Reduction generale (ex-Fillon) - proratisee heures
     if ratio_smic <= 3.5:
         coeff_t = 0.3194 if effectif < 50 else 0.3234
-        coeff = (coeff_t / 0.6) * (1.6 * smic_mensuel / brut - 1)
+        # Formule officielle avec SMIC reconstitue (Art. D.241-7 CSS)
+        coeff = (coeff_t / 0.6) * (1.6 * smic_retabli / brut - 1) if brut > 0 else 0
         coeff = max(0, min(coeff, coeff_t))
+        # Plafonnement : la reduction ne peut exceder les cotisations ecretes
         montant_fillon = round(brut * coeff, 2)
-        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 CSS",
+        # Regularisation progressive annuelle (Art. D.241-13 CSS)
+        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 / D.241-7 CSS",
             "montant_mensuel": montant_fillon, "montant_annuel": round(montant_fillon * 12, 2),
-            "conditions": f"Salaire <= 3.5 SMIC (ratio: {ratio_smic:.2f})", "applicable": True})
+            "conditions": f"Ratio SMIC: {ratio_smic:.3f} (seuil 3.5). Coeff T={coeff_t}, coeff calcule={coeff:.5f}. "
+                          f"SMIC retabli: {smic_retabli:.2f} EUR (presence {coeff_presence*100:.0f}%, TP {temps_partiel_pct:.0f}%). "
+                          f"Heures contrat: {heures_contrat:.2f}h.", "applicable": True})
         total_exo += montant_fillon
     else:
-        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 CSS",
+        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 / D.241-7 CSS",
             "montant_mensuel": 0, "montant_annuel": 0,
-            "conditions": f"Non applicable: salaire > 3.5 SMIC (ratio: {ratio_smic:.2f})", "applicable": False})
+            "conditions": f"Non applicable: ratio SMIC {ratio_smic:.3f} > 3.5", "applicable": False})
 
     # 2. Exoneration apprenti
     if statut_salarie == "apprenti":
@@ -2895,17 +2935,17 @@ async def sim_exonerations(
         exo_app = round(detail_app["exoneration_salariale_mensuelle"] + detail_app["rgdu_patronale_mensuelle"], 2)
         exonerations.append({"nom": "Exoneration apprenti", "reference": "Art. L.6243-2 CT",
             "montant_mensuel": exo_app, "montant_annuel": round(exo_app * 12, 2),
-            "conditions": f"Exo salariale <= 79% SMIC ({detail_app['seuil_79_smic']:.0f} EUR) + RGDU patronale",
-            "applicable": True,
-            "detail": detail_app})
+            "conditions": f"Exo salariale <= 79% SMIC ({detail_app['seuil_79_smic']:.0f} EUR) + RGDU patronale. "
+                          f"Aide unique: 6 000 EUR/an (diplome <= bac+5).",
+            "applicable": True, "detail": detail_app})
         total_exo += exo_app
 
     # 3. Aide embauche jeune (-26 ans)
-    if age_salarie < 26 and brut <= smic_mensuel * 2:
+    if age_salarie < 26 and brut <= smic_mensuel_ref * 2:
         aide_jeune = 333.33
         exonerations.append({"nom": "Aide embauche jeune (<26 ans)", "reference": "Decret 2021-94",
             "montant_mensuel": aide_jeune, "montant_annuel": round(aide_jeune * 12, 2),
-            "conditions": f"Salarie < 26 ans, brut <= 2 SMIC", "applicable": True})
+            "conditions": "Salarie < 26 ans, brut <= 2 SMIC", "applicable": True})
         total_exo += aide_jeune
 
     # 4. Aide senior (+55 ans)
@@ -2942,46 +2982,88 @@ async def sim_exonerations(
 
     # 8. QPV (Quartier Prioritaire Ville)
     if zone == "qpv" and effectif < 50:
-        exo_qpv = round(min(brut * 0.28, smic_mensuel * 1.4 * 0.28), 2)
+        exo_qpv = round(min(brut * 0.28, smic_retabli * 1.4 * 0.28), 2)
         exonerations.append({"nom": "Exoneration QPV", "reference": "Art. L.131-4-3 CSS",
             "montant_mensuel": exo_qpv, "montant_annuel": round(exo_qpv * 12, 2),
-            "conditions": "Quartier prioritaire, < 50 sal, <= 1.4 SMIC", "applicable": True})
+            "conditions": f"Quartier prioritaire, < 50 sal, plafond 1.4 SMIC retabli ({smic_retabli*1.4:.2f} EUR)", "applicable": True})
         total_exo += exo_qpv
 
-    # 9. Outre-mer (LODEOM)
+    # 9. Outre-mer (LODEOM) - 3 baremes distincts (Art. L.752-3-2 CSS)
     if zone == "outremer":
-        if effectif < 11:
-            exo_om = round(brut * 0.32, 2)
-            desc = "LODEOM renforce < 11 sal"
+        if bareme_lodeom == "competitivite":
+            # Bareme competitivite : exo totale <= 1.3 SMIC, degressive 1.3-2.2 SMIC
+            if ratio_smic <= 1.3:
+                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                desc = "LODEOM competitivite - exoneration totale (<=1.3 SMIC)"
+            elif ratio_smic <= 2.2:
+                taux_degr = (2.2 - ratio_smic) / (2.2 - 1.3)
+                taux_exo = round(0.28 * taux_degr, 4)
+                exo_om = round(brut * taux_exo, 2)
+                desc = f"LODEOM competitivite - degressif ({taux_degr*100:.0f}% entre 1.3 et 2.2 SMIC)"
+            else:
+                exo_om = 0
+                desc = "LODEOM competitivite - hors plafond (>2.2 SMIC)"
+        elif bareme_lodeom == "competitivite_renforcee":
+            # Bareme comp. renforcee : exo totale <= 1.7 SMIC, degressive 1.7-2.7 SMIC
+            if ratio_smic <= 1.7:
+                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                desc = "LODEOM comp. renforcee - exoneration totale (<=1.7 SMIC)"
+            elif ratio_smic <= 2.7:
+                taux_degr = (2.7 - ratio_smic) / (2.7 - 1.7)
+                taux_exo = round(0.32 * taux_degr, 4)
+                exo_om = round(brut * taux_exo, 2)
+                desc = f"LODEOM comp. renforcee - degressif ({taux_degr*100:.0f}% entre 1.7 et 2.7 SMIC)"
+            else:
+                exo_om = 0
+                desc = "LODEOM comp. renforcee - hors plafond (>2.7 SMIC)"
+        elif bareme_lodeom == "innovation_croissance":
+            # Bareme innovation et croissance : exo totale <= 2.0 SMIC, degressive 2.0-3.0 SMIC
+            if ratio_smic <= 2.0:
+                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                desc = "LODEOM innovation/croissance - exoneration totale (<=2.0 SMIC)"
+            elif ratio_smic <= 3.0:
+                taux_degr = (3.0 - ratio_smic) / (3.0 - 2.0)
+                taux_exo = round(0.32 * taux_degr, 4)
+                exo_om = round(brut * taux_exo, 2)
+                desc = f"LODEOM innovation/croissance - degressif ({taux_degr*100:.0f}% entre 2.0 et 3.0 SMIC)"
+            else:
+                exo_om = 0
+                desc = "LODEOM innovation/croissance - hors plafond (>3.0 SMIC)"
         else:
-            exo_om = round(brut * 0.28, 2) if ratio_smic <= 1.3 else round(brut * 0.18, 2)
-            desc = "LODEOM competitivite" if ratio_smic <= 1.3 else "LODEOM competitivite renforcee"
+            exo_om = round(brut * 0.28, 2)
+            desc = "LODEOM bareme par defaut"
         exonerations.append({"nom": f"Exoneration outre-mer ({desc})", "reference": "Art. L.752-3-2 CSS (LODEOM)",
             "montant_mensuel": exo_om, "montant_annuel": round(exo_om * 12, 2),
-            "conditions": f"DOM-TOM, effectif {effectif}, ratio SMIC {ratio_smic:.2f}", "applicable": True})
+            "conditions": f"Bareme: {bareme_lodeom}, effectif {effectif}, ratio SMIC {ratio_smic:.3f}. "
+                          f"SMIC retabli: {smic_retabli:.2f} EUR.",
+            "applicable": exo_om > 0})
         total_exo += exo_om
 
     # 10. JEI (Jeune Entreprise Innovante)
     if statut_salarie == "jei":
-        exo_jei = round(brut * 0.32, 2)
+        # Plafond: exoneration patronale SS hors AT/MP, plafond 5 PASS mensuel
+        pass_mensuel = 3864.0  # 2025
+        plafond_jei = pass_mensuel * 5
+        base_jei = min(brut, plafond_jei)
+        taux_jei = taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa
+        exo_jei = round(base_jei * taux_jei, 2)
         exonerations.append({"nom": "Exoneration JEI (Jeune Entreprise Innovante)", "reference": "Art. 44 sexies-0 A CGI",
             "montant_mensuel": exo_jei, "montant_annuel": round(exo_jei * 12, 2),
-            "conditions": "Chercheurs, techniciens, mandataires - 8 ans max", "applicable": True})
+            "conditions": f"Chercheurs, techniciens, mandataires - 8 ans max. Plafond 5 PASS ({plafond_jei:.0f} EUR). "
+                          f"Hors AT/MP. Base: {base_jei:.2f} EUR, taux: {taux_jei*100:.2f}%.",
+            "applicable": True})
         total_exo += exo_jei
 
-    # 11. TEPA - Desocialisation des heures supplementaires (Art. 81 quater CGI / Art. L.241-17 CSS)
+    # 11. TEPA - Desocialisation des heures supplementaires
     if heures_supplementaires > 0:
-        taux_horaire_hs = round(brut / nb_heures_mensuelles, 2) if nb_heures_mensuelles > 0 else 0
-        # Majoration 25% pour les 8 premieres HS, 50% au-dela
-        hs_25 = min(heures_supplementaires, 8) * taux_horaire_hs * 1.25
-        hs_50 = max(0, heures_supplementaires - 8) * taux_horaire_hs * 1.50
+        taux_horaire = round(brut / heures_contrat, 2) if heures_contrat > 0 else 0
+        # Majoration : 25% (1-8h), 50% (au-dela)
+        hs_25 = min(heures_supplementaires, 8) * taux_horaire * 1.25
+        hs_50 = max(0, heures_supplementaires - 8) * taux_horaire * 1.50
         montant_hs_total = round(hs_25 + hs_50, 2)
-        # Reduction salariale : exoneration cotisations salariales vieillesse (11.31%)
         exo_tepa_sal = round(montant_hs_total * 0.1131, 2)
-        # Deduction forfaitaire patronale : 1.50 EUR/h (< 250 sal) ou 0.50 EUR/h (>= 250)
         deduc_pat_par_h = 1.50 if effectif < 250 else 0.50
         exo_tepa_pat = round(heures_supplementaires * deduc_pat_par_h, 2)
-        # Exoneration IR : les HS sont defiscalisees dans la limite de 7500 EUR/an
         exo_ir_hs = round(min(montant_hs_total, 7500 / 12), 2)
         exonerations.append({
             "nom": "TEPA - Heures supplementaires defiscalisees",
@@ -2989,50 +3071,36 @@ async def sim_exonerations(
             "montant_mensuel": round(exo_tepa_sal + exo_tepa_pat, 2),
             "montant_annuel": round((exo_tepa_sal + exo_tepa_pat) * 12, 2),
             "applicable": True,
-            "conditions": f"{heures_supplementaires:.1f}h HS/mois, taux horaire {taux_horaire_hs:.2f} EUR. "
+            "conditions": f"{heures_supplementaires:.1f}h HS/mois, taux horaire {taux_horaire:.2f} EUR. "
                           f"Reduction salariale: {exo_tepa_sal:.2f} EUR, deduction patronale: {exo_tepa_pat:.2f} EUR. "
                           f"Exoneration IR: {exo_ir_hs:.2f} EUR/mois (plafond 7500 EUR/an). "
                           f"Contingent annuel 220h (Art. D.3121-24 CT).",
-            "detail": {
-                "heures_sup": heures_supplementaires,
-                "montant_hs_brut": montant_hs_total,
-                "reduction_salariale": exo_tepa_sal,
-                "deduction_patronale": exo_tepa_pat,
-                "exoneration_ir": exo_ir_hs,
-            },
+            "detail": {"heures_sup": heures_supplementaires, "montant_hs_brut": montant_hs_total,
+                "reduction_salariale": exo_tepa_sal, "deduction_patronale": exo_tepa_pat, "exoneration_ir": exo_ir_hs},
         })
         total_exo += exo_tepa_sal + exo_tepa_pat
     else:
-        exonerations.append({
-            "nom": "TEPA - Heures supplementaires defiscalisees",
+        exonerations.append({"nom": "TEPA - Heures supplementaires defiscalisees",
             "reference": "Art. 81 quater CGI / Art. L.241-17 CSS",
-            "montant_mensuel": 0, "montant_annuel": 0,
-            "applicable": False,
-            "conditions": "Pas d heures supplementaires renseignees. Ajoutez des HS pour calculer l exoneration.",
-        })
+            "montant_mensuel": 0, "montant_annuel": 0, "applicable": False,
+            "conditions": "Pas d heures supplementaires renseignees."})
 
-    # 12. BER (Bassin d'Emploi a Redynamiser - Art. L.131-4-4 CSS)
+    # 12. BER (Bassin d'Emploi a Redynamiser)
     if zone == "ber":
         exo_ber = round(brut * 0.32, 2)
-        exonerations.append({
-            "nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
+        exonerations.append({"nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
             "reference": "Art. L.131-4-4 CSS / Art. 44 duodecies CGI",
-            "montant_mensuel": exo_ber, "montant_annuel": round(exo_ber * 12, 2),
-            "applicable": True,
-            "conditions": "Exoneration totale des cotisations patronales pendant 5 ans dans les BER (Ariege, Pyrenees-Orientales).",
-        })
+            "montant_mensuel": exo_ber, "montant_annuel": round(exo_ber * 12, 2), "applicable": True,
+            "conditions": "Exoneration totale cotisations patronales 5 ans (Ariege, Pyrenees-Orientales)."})
         total_exo += exo_ber
 
-    # 13. Contrat professionnalisation (> 45 ans)
+    # 13. Contrat professionnalisation
     if statut_salarie == "contrat_pro" or (age_salarie >= 45 and duree_contrat_mois > 0):
         exo_pro = round(brut * 0.28, 2) if age_salarie >= 45 else round(brut * 0.15, 2)
-        exonerations.append({
-            "nom": "Aide contrat de professionnalisation",
+        exonerations.append({"nom": "Aide contrat de professionnalisation",
             "reference": "Art. L.6325-16 CT / Art. D.6325-21 CT",
-            "montant_mensuel": exo_pro, "montant_annuel": round(exo_pro * 12, 2),
-            "applicable": True,
-            "conditions": f"Age: {age_salarie} ans. " + ("Aide renforcee (+45 ans)." if age_salarie >= 45 else "Aide standard."),
-        })
+            "montant_mensuel": exo_pro, "montant_annuel": round(exo_pro * 12, 2), "applicable": True,
+            "conditions": f"Age: {age_salarie} ans. " + ("Aide renforcee (+45 ans)." if age_salarie >= 45 else "Aide standard.")})
         total_exo += exo_pro
 
     # 14. ACRE (Aide aux Createurs et Repreneurs d Entreprise)
@@ -3041,29 +3109,99 @@ async def sim_exonerations(
         calc_acre = _CR3(effectif_entreprise=effectif)
         detail_acre = calc_acre.calculer_exoneration_acre(Decimal(str(brut)))
         exo_acre = round(detail_acre["exoneration_mensuelle"], 2)
-        exonerations.append({
-            "nom": "ACRE (Aide aux Createurs/Repreneurs)",
+        exonerations.append({"nom": "ACRE (Aide aux Createurs/Repreneurs)",
             "reference": detail_acre.get("ref", "Art. L.131-6-4 CSS"),
             "montant_mensuel": exo_acre, "montant_annuel": round(exo_acre * 12, 2),
             "applicable": detail_acre["eligible"],
-            "conditions": f"Exoneration {detail_acre.get('taux_exoneration', 0)*100:.0f}% cotisations patronales SS. Seuil bas: {detail_acre.get('seuil_bas_1_2_smic', 0):.0f} EUR, haut: {detail_acre.get('seuil_haut_1_6_smic', 0):.0f} EUR.",
-            "detail": detail_acre,
-        })
+            "conditions": f"Exoneration {detail_acre.get('taux_exoneration', 0)*100:.0f}% cotisations patronales SS. "
+                          f"Seuil bas: {detail_acre.get('seuil_bas_1_2_smic', 0):.0f} EUR, haut: {detail_acre.get('seuil_haut_1_6_smic', 0):.0f} EUR.",
+            "detail": detail_acre})
         total_exo += exo_acre
 
-    # Cout sans/avec exoneration
-    taux_pat = 0.42
-    charges_normales = round(brut * taux_pat, 2)
+    # 15. ZRD (Zone de Restructuration de la Defense)
+    if zone == "zrd":
+        exo_zrd = round(min(brut * 0.28, smic_retabli * 1.4 * 0.28), 2)
+        exonerations.append({"nom": "Exoneration ZRD (Restructuration Defense)",
+            "reference": "Art. 44 terdecies CGI / Art. L.131-4-5 CSS",
+            "montant_mensuel": exo_zrd, "montant_annuel": round(exo_zrd * 12, 2), "applicable": True,
+            "conditions": "Exoneration 5 ans + 3 ans degressif. Plafond 1.4 SMIC."})
+        total_exo += exo_zrd
+
+    # 16. AFR (Aide a la Finalite Regionale)
+    if zone == "afr":
+        exo_afr = round(brut * 0.20, 2)
+        exonerations.append({"nom": "Exoneration AFR",
+            "reference": "Art. 44 quindecies CGI",
+            "montant_mensuel": exo_afr, "montant_annuel": round(exo_afr * 12, 2), "applicable": True,
+            "conditions": "Zone a finalite regionale. Exoneration partielle cotisations."})
+        total_exo += exo_afr
+
+    # Impact des absences sur cotisations
+    info_absences = {}
+    if jours_absence > 0 and type_absence:
+        ijss = 0
+        complement = 0
+        if type_absence == "maladie":
+            ijss = round(min(brut / 30.42, smic_mensuel_ref / 30.42 * 1.8) * 0.5 * jours_absence, 2)
+            # Complement employeur apres carence 7j (Art. L.1226-1 CT)
+            jours_complement = max(0, jours_absence - 7)
+            complement = round((brut / 30.42) * 0.9 * min(jours_complement, 30), 2)
+        elif type_absence == "maternite":
+            ijss = round(min(brut / 30.42, smic_mensuel_ref / 30.42 * 1.8) * jours_absence, 2)
+        elif type_absence == "at_mp":
+            ijss = round((brut / 30.42) * 0.6 * min(jours_absence, 28) + (brut / 30.42) * 0.8 * max(0, jours_absence - 28), 2)
+        elif type_absence == "conge_sans_solde":
+            ijss = 0
+        info_absences = {
+            "type": type_absence, "jours": jours_absence,
+            "ijss_estimees": ijss, "complement_employeur": complement,
+            "impact_smic_retabli": f"SMIC retabli de {smic_mensuel:.2f} a {smic_retabli:.2f} EUR",
+            "impact_ratio": f"Ratio SMIC ajuste: {ratio_smic:.3f}",
+        }
+
     charges_apres_exo = round(max(0, charges_normales - total_exo), 2)
+
+    # Multi-salaries : multiplication
+    if nb_salaries_simules > 1:
+        total_exo_multi = round(total_exo * nb_salaries_simules, 2)
+        charges_normales_multi = round(charges_normales * nb_salaries_simules, 2)
+        charges_apres_exo_multi = round(charges_apres_exo * nb_salaries_simules, 2)
+    else:
+        total_exo_multi = round(total_exo, 2)
+        charges_normales_multi = charges_normales
+        charges_apres_exo_multi = charges_apres_exo
 
     return {
         "brut_mensuel": brut, "effectif": effectif, "zone": zone, "statut_salarie": statut_salarie,
-        "ratio_smic": round(ratio_smic, 2), "exonerations": exonerations,
+        "ratio_smic": round(ratio_smic, 3), "smic_retabli": smic_retabli,
+        "heures_contrat": round(heures_contrat, 2),
+        "temps_partiel_pct": temps_partiel_pct,
+        "jours_absence": jours_absence, "type_absence": type_absence,
+        "coeff_presence": round(coeff_presence, 4),
+        "bareme_lodeom": bareme_lodeom if zone == "outremer" else None,
+        "est_cadre": est_cadre, "taux_at": taux_at_reel,
+        "nb_salaries": nb_salaries_simules,
+        "taux_patronal_detaille": {
+            "maladie": taux_maladie, "vieillesse_plafonnee": taux_vieillesse_plaf,
+            "vieillesse_deplafonnee": taux_vieillesse_deplaf, "allocations_familiales": taux_af,
+            "at_mp": taux_at_reel, "fnal": taux_fnal, "csa": taux_csa,
+            "chomage": taux_chom, "ags": taux_ags,
+            "retraite_complementaire": taux_agirc, "total": taux_pat_total,
+        },
+        "exonerations": exonerations,
         "total_exonerations_mensuelles": round(total_exo, 2),
         "total_exonerations_annuelles": round(total_exo * 12, 2),
         "charges_patronales_normales": charges_normales,
         "charges_patronales_apres_exo": charges_apres_exo,
         "economie_pct": round(total_exo / charges_normales * 100, 2) if charges_normales > 0 else 0,
+        "info_absences": info_absences if info_absences else None,
+        "multi_salaries": {
+            "nb": nb_salaries_simules,
+            "total_exonerations_mensuelles": total_exo_multi,
+            "total_exonerations_annuelles": round(total_exo_multi * 12, 2),
+            "charges_normales_totales": charges_normales_multi,
+            "charges_apres_exo_totales": charges_apres_exo_multi,
+        } if nb_salaries_simules > 1 else None,
     }
 
 
@@ -10410,10 +10548,31 @@ APP_HTML += """
 <button class="btn btn-blue" onclick="simCout()">Calculer</button><div id="sim-cout-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-exo"><h2>Exonerations et aides a l emploi</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulez les exonerations applicables selon zone geographique, statut du salarie, convention collective et effectif.</p>
-<div class="g4"><div><label>Brut mensuel</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif</label><input type="number" id="exo-eff" value="10"></div><div><label>Age salarie</label><input type="number" id="exo-age" value="30"></div><div><label>Duree contrat (mois)</label><input type="number" id="exo-duree" value="0"></div></div>
-<div class="g4"><div><label>Zone geographique</label><select id="exo-zone"><option value="metropole">Metropole</option><option value="zrr">ZRR (Revitalisation rurale)</option><option value="zfu">ZFU-TE (Franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="outremer">Outre-mer (DOM-TOM)</option><option value="ber">BER (Bassin emploi a redynamiser)</option></select></div><div><label>Statut salarie</label><select id="exo-statut"><option value="standard">Standard</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Heures sup /mois</label><input type="number" step="0.5" id="exo-hs" value="0"></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div></div>
-<button class="btn btn-blue" onclick="simExo()">Simuler les exonerations</button><div id="sim-exo-res" style="margin-top:12px"></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulez precisement les exonerations applicables. Tous les parametres de calcul sont modifiables : heures, absences, temps partiel, bareme LODEOM, taux AT, statut cadre.</p>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#128100; Salarie</h3>
+<div class="g4"><div><label>Brut mensuel (EUR)</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif entreprise</label><input type="number" id="exo-eff" value="10"></div><div><label>Age salarie</label><input type="number" id="exo-age" value="30"></div><div><label>Duree contrat (mois)</label><input type="number" id="exo-duree" value="0" placeholder="0 = CDI"></div></div>
+<div class="g4"><div><label>Statut salarie</label><select id="exo-statut"><option value="standard">Standard (CDI/CDD)</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Cadre</label><select id="exo-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div><div><label>Nb salaries (simulation groupee)</label><input type="number" id="exo-nb" value="1" min="1" max="500"></div></div>
+</div>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#9200; Temps de travail</h3>
+<div class="g4"><div><label>Heures mensuelles contrat</label><input type="number" step="0.01" id="exo-heures" value="151.67"></div><div><label>Temps partiel (%)</label><input type="number" step="1" id="exo-tp" value="100" min="1" max="100"></div><div><label>Heures sup /mois</label><input type="number" step="0.5" id="exo-hs" value="0"></div><div><label>Taux AT/MP (%)</label><input type="number" step="0.01" id="exo-at" value="0" placeholder="0 = defaut 2.08%"></div></div>
+</div>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#128197; Absences du mois</h3>
+<div class="g3"><div><label>Jours d'absence</label><input type="number" step="0.5" id="exo-abs-jours" value="0" min="0" max="31"></div><div><label>Type d'absence</label><select id="exo-abs-type"><option value="">Aucune</option><option value="maladie">Maladie</option><option value="at_mp">AT / Maladie professionnelle</option><option value="maternite">Maternite / Paternite</option><option value="conge_sans_solde">Conge sans solde</option></select></div><div><label style="color:var(--tx2);font-size:.82em">Impact : le SMIC est proratise au temps de presence pour le calcul du ratio SMIC (reduction Fillon, LODEOM)</label></div></div>
+</div>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#127758; Zone geographique</h3>
+<div class="g2"><div><label>Zone</label><select id="exo-zone" onchange="toggleLodeom()"><option value="metropole">Metropole</option><option value="zrr">ZRR (Revitalisation rurale)</option><option value="zfu">ZFU-TE (Franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="outremer">Outre-mer (LODEOM)</option><option value="ber">BER (Bassin emploi a redynamiser)</option><option value="zrd">ZRD (Restructuration defense)</option><option value="afr">AFR (Finalite regionale)</option></select></div><div id="lodeom-bareme-wrap" style="display:none"><label>Bareme LODEOM</label><select id="exo-lodeom"><option value="competitivite">Competitivite (exo totale <= 1.3 SMIC, degr. 1.3-2.2)</option><option value="competitivite_renforcee">Comp. renforcee (exo totale <= 1.7 SMIC, degr. 1.7-2.7)</option><option value="innovation_croissance">Innovation et croissance (exo totale <= 2.0 SMIC, degr. 2.0-3.0)</option></select></div></div>
+</div>
+
+<button class="btn btn-blue btn-f" onclick="simExo()">&#9889; Simuler les exonerations</button>
+<div id="sim-exo-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-masse"><h2>Simulation masse salariale</h2>
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Impact augmentations, inflation, primes, frais, turnover sur le budget global.</p>
@@ -11615,7 +11774,27 @@ function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementByI
 function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simCout(){var p="brut_mensuel="+gv("ce-brut")+"&effectif="+gv("ce-eff")+"&est_cadre="+gv("ce-cadre")+"&primes="+gv("ce-primes")+"&avantages_nature="+gv("ce-avantages")+"&frais_km="+gv("ce-km")+"&tickets_restaurant="+gv("ce-tr")+"&mutuelle_employeur="+gv("ce-mut");fetch("/api/simulation/cout-employeur?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_total.toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_mensuel.toFixed(2)+"</div><div class='lab'>Cout total/mois</div></div><div class='sc'><div class='val'>"+r.cout_total_annuel.toFixed(2)+"</div><div class='lab'>Cout total/an</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";h+="<tr><td>Charges patronales URSSAF</td><td class='num'>"+r.charges_patronales_urssaf.toFixed(2)+"</td></tr>";h+="<tr><td>Charges salariales</td><td class='num'>"+r.charges_salariales.toFixed(2)+"</td></tr>";h+="<tr><td>Formation professionnelle</td><td class='num'>"+r.formation_professionnelle.toFixed(2)+"</td></tr>";h+="<tr><td>Taxe apprentissage</td><td class='num'>"+r.taxe_apprentissage.toFixed(2)+"</td></tr>";h+="<tr><td>Effort construction</td><td class='num'>"+r.effort_construction.toFixed(2)+"</td></tr>";h+="<tr><td>Participation obligatoire</td><td class='num'>"+r.participation_obligatoire.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total charges annexes</td><td class='num'>"+r.total_charges_annexes.toFixed(2)+"</td></tr>";h+="<tr><td>Avantages nature</td><td class='num'>"+r.avantages_nature.toFixed(2)+"</td></tr>";h+="<tr><td>Frais km rembourses</td><td class='num'>"+r.frais_km_rembourses.toFixed(2)+"</td></tr>";h+="<tr><td>Tickets restaurant</td><td class='num'>"+r.tickets_restaurant.toFixed(2)+"</td></tr>";h+="<tr><td>Mutuelle employeur</td><td class='num'>"+r.mutuelle_employeur.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total avantages</td><td class='num'>"+r.total_avantages.toFixed(2)+"</td></tr></table>";h+="<div class='g4' style='margin-top:12px'><div class='sc'><div class='val'>"+r.repartition.salaire_net+"%</div><div class='lab'>Salaire net</div></div><div class='sc'><div class='val'>"+r.repartition.charges_salariales+"%</div><div class='lab'>Charges sal.</div></div><div class='sc'><div class='val'>"+r.repartition.charges_patronales+"%</div><div class='lab'>Charges pat.</div></div><div class='sc'><div class='val'>"+r.repartition.annexes_avantages+"%</div><div class='lab'>Annexes+Avantages</div></div></div>";h+="<p style='margin-top:10px;color:var(--tx2);font-size:.84em'>Ratio cout/net : <b>"+r.ratio_cout_net+"x</b> - Pour 1 EUR net verse, l employeur depense "+r.ratio_cout_net+" EUR</p>";document.getElementById("sim-cout-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"));fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc green'><div class='val'>"+r.total_exonerations_mensuelles.toFixed(2)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+r.total_exonerations_annuelles.toFixed(2)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie</div></div></div>";h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.charges_patronales_normales.toFixed(2)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+r.charges_patronales_apres_exo.toFixed(2)+"</div><div class='lab'>Charges apres exo</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel</th><th class='num'>Annuel</th><th>Statut</th></tr>";var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"color:var(--green)":"color:var(--tx2)";h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.8em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"Applicable":"Non applicable")+"</td></tr>";}h+="</table>";h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Ratio SMIC: "+r.ratio_smic+" | Statut: "+r.statut_salarie+"</p>";document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function toggleLodeom(){var z=gv("exo-zone");document.getElementById("lodeom-bareme-wrap").style.display=z==="outremer"?"block":"none";}
+function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"))+"&nb_heures_mensuelles="+(gv("exo-heures")||"151.67")+"&temps_partiel_pct="+(gv("exo-tp")||"100")+"&jours_absence="+(gv("exo-abs-jours")||"0")+"&type_absence="+gv("exo-abs-type")+"&bareme_lodeom="+gv("exo-lodeom")+"&est_cadre="+gv("exo-cadre")+"&taux_at="+(gv("exo-at")||"0")+"&nb_salaries_simules="+(gv("exo-nb")||"1");
+fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){
+var h="<div class='g3'><div class='sc green'><div class='val'>"+fmtN(r.total_exonerations_mensuelles)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(r.total_exonerations_annuelles)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie charges</div></div></div>";
+h+="<div class='g4' style='margin-top:10px'><div class='sc'><div class='val'>"+fmtN(r.charges_patronales_normales)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+fmtN(r.charges_patronales_apres_exo)+"</div><div class='lab'>Charges apres exo</div></div><div class='sc'><div class='val'>"+r.ratio_smic+"</div><div class='lab'>Ratio SMIC</div></div><div class='sc'><div class='val'>"+fmtN(r.smic_retabli)+"</div><div class='lab'>SMIC retabli</div></div></div>";
+// Multi-salaries
+if(r.multi_salaries){var m=r.multi_salaries;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--p)'><strong>&#128101; Simulation groupee ("+m.nb+" salaries identiques)</strong><div class='g3' style='margin-top:8px'><div class='sc green'><div class='val'>"+fmtN(m.total_exonerations_mensuelles)+"</div><div class='lab'>Exo totales/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(m.total_exonerations_annuelles)+"</div><div class='lab'>Exo totales/an</div></div><div class='sc'><div class='val'>"+fmtN(m.charges_normales_totales-m.charges_apres_exo_totales)+"</div><div class='lab'>Economie totale/mois</div></div></div></div>";}
+// Taux patronaux detailles
+if(r.taux_patronal_detaille){var tp=r.taux_patronal_detaille;h+="<div style='margin-top:12px'><details><summary style='cursor:pointer;font-weight:600;font-size:.9em'>&#128200; Detail taux patronaux ("+( tp.total*100).toFixed(2)+"%)"+(r.est_cadre?" - Cadre":" - Non cadre")+"</summary><table style='margin-top:6px'><tr><th>Cotisation</th><th class='num'>Taux</th></tr>";
+for(var k in tp){if(k!=="total")h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+(tp[k]*100).toFixed(2)+"%</td></tr>";}
+h+="<tr style='font-weight:600;background:var(--bg2)'><td>TOTAL</td><td class='num'>"+(tp.total*100).toFixed(2)+"%</td></tr></table></details></div>";}
+// Absences
+if(r.info_absences){var ab=r.info_absences;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--o)'><strong>&#128197; Impact absences ("+ab.jours+" jours - "+ab.type+")</strong><div style='font-size:.84em;margin-top:4px'>IJSS estimees: <b>"+fmtN(ab.ijss_estimees)+" EUR</b>";if(ab.complement_employeur>0)h+=" | Complement employeur: <b>"+fmtN(ab.complement_employeur)+" EUR</b>";h+="<br>"+ab.impact_smic_retabli+" | "+ab.impact_ratio+"</div></div>";}
+// Tableau exonerations
+h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel (EUR)</th><th class='num'>Annuel (EUR)</th><th>Statut</th></tr>";
+var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"":"color:var(--tx2);opacity:.6";
+h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.78em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"<span class='badge badge-green'>Applicable</span>":"<span class='badge' style='background:var(--bg2)'>Non applicable</span>")+"</td></tr>";
+if(e.applicable&&e.conditions){h+="<tr style='"+cls+"'><td colspan='5' style='font-size:.78em;color:var(--tx2);padding:2px 8px 6px;border-top:none'>"+e.conditions+"</td></tr>";}}
+h+="</table>";
+h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Heures contrat: "+r.heures_contrat+"h | TP: "+r.temps_partiel_pct+"% | Presence: "+(r.coeff_presence*100).toFixed(0)+"%"+(r.bareme_lodeom?" | LODEOM: "+r.bareme_lodeom:"")+"</p>";
+document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMasse(){var p="brut_moyen="+gv("ms-brut")+"&effectif="+gv("ms-eff")+"&augmentation_pct="+gv("ms-aug")+"&inflation_pct="+gv("ms-infl")+"&frais_km_moyen="+gv("ms-km")+"&avantages_nature_moyen="+gv("ms-an")+"&primes_variables_pct="+gv("ms-primes")+"&turnover_pct="+gv("ms-turn");fetch("/api/simulation/masse-salariale?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+fmt(r.masse_actuelle)+"</div><div class='lab'>Masse actuelle</div></div><div class='sc amber'><div class='val'>"+fmt(r.masse_apres_augmentation)+"</div><div class='lab'>Apres augmentation</div></div><div class='sc'><div class='val'>"+fmt(r.cout_global_projete)+"</div><div class='lab'>Cout global projete</div></div><div class='sc "+(r.evolution_pct>0?"red":"green")+"'><div class='val'>"+(r.evolution_pct>0?"+":"")+r.evolution_pct+"%</div><div class='lab'>Evolution</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant annuel</th></tr>";h+="<tr><td>Masse actuelle (brut)</td><td class='num'>"+fmt(r.masse_actuelle)+"</td></tr>";h+="<tr><td>Charges patronales actuelles (45%)</td><td class='num'>"+fmt(r.charges_patronales_actuelles)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total actuel</td><td class='num'>"+fmt(r.cout_total_actuel)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Impact augmentation (+"+r.augmentation_pct+"%)</td></tr>";h+="<tr><td>Nouveau brut moyen</td><td class='num'>"+r.nouveau_brut_moyen.toFixed(2)+" EUR/mois</td></tr>";h+="<tr><td>Cout augmentation (brut)</td><td class='num'>"+fmt(r.cout_augmentation_brut)+"</td></tr>";h+="<tr><td>Charges supplementaires</td><td class='num'>"+fmt(r.cout_augmentation_charges)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total augmentation</td><td class='num'>"+fmt(r.cout_augmentation_total)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Autres postes</td></tr>";h+="<tr><td>Perte pouvoir achat (inflation "+r.augmentation_pct+"% vs "+gv("ms-infl")+"%)</td><td class='num'>"+fmt(r.perte_pouvoir_achat_inflation)+"</td></tr>";h+="<tr><td>Ecart augmentation/inflation</td><td class='num'>"+fmt(r.ecart_augmentation_inflation)+"</td></tr>";h+="<tr><td>Primes variables</td><td class='num'>"+fmt(r.primes_variables_total)+"</td></tr>";h+="<tr><td>Charges sur primes</td><td class='num'>"+fmt(r.charges_primes)+"</td></tr>";h+="<tr><td>Frais kilometriques (non soumis)</td><td class='num'>"+fmt(r.frais_km_total)+"</td></tr>";h+="<tr><td>Avantages en nature (soumis)</td><td class='num'>"+fmt(r.avantages_nature_total)+"</td></tr>";h+="<tr><td>Charges sur avantages</td><td class='num'>"+fmt(r.charges_avantages)+"</td></tr>";h+="<tr><td>Cout turnover estime</td><td class='num'>"+fmt(r.cout_turnover_estime)+"</td></tr>";h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT GLOBAL PROJETE</td><td class='num'>"+fmt(r.cout_global_projete)+"</td></tr></table>";document.getElementById("sim-masse-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simSeuils(){fetch("/api/simulation/seuils-effectif?effectif_actuel="+gv("se-eff")+"&masse_salariale_annuelle="+gv("se-masse")).then(safeJson).then(function(r){var h="";if(r.prochain_seuil){h+="<div class='g3'><div class='sc amber'><div class='val'>"+r.prochain_seuil+"</div><div class='lab'>Prochain seuil</div></div><div class='sc blue'><div class='val'>"+r.marge_avant_seuil+"</div><div class='lab'>Salaries avant seuil</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_prochain_seuil)+"</div><div class='lab'>Cout franchissement</div></div></div>";}h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.effectif_actuel+"</div><div class='lab'>Effectif actuel</div></div><div class='sc amber'><div class='val'>"+fmt(r.total_obligations_actuelles)+"</div><div class='lab'>Obligations actuelles</div></div></div>";var seuils=r.seuils||[];for(var i=0;i<seuils.length;i++){var s=seuils[i];var obligs=s.obligations||[];var franchi=obligs.length>0&&obligs[0].franchi;h+="<div style='margin-top:14px;padding:10px;border-radius:8px;background:"+(franchi?"var(--bg2)":"var(--bg1)")+";border:1px solid "+(franchi?"var(--green)":"var(--border)")+"'>";h+="<h3 style='margin:0 0 6px'>"+(franchi?"&#9989; ":"&#9898; ")+"Seuil "+s.seuil+" salaries</h3>";h+="<table style='margin:0'><tr><th>Obligation</th><th>Reference</th><th class='num'>Cout estime</th><th>Detail</th></tr>";for(var j=0;j<obligs.length;j++){var o=obligs[j];h+="<tr><td>"+o.nom+"</td><td style='font-size:.8em'>"+o.reference+"</td><td class='num'>"+fmt(o.cout_estime)+"</td><td style='font-size:.84em;color:var(--tx2)'>"+o.detail+"</td></tr>";}h+="</table></div>";}document.getElementById("sim-seuils-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simFinContrat(){var p="type_fin="+gv("fc-type")+"&salaire_brut="+gv("fc-brut")+"&anciennete_mois="+gv("fc-anc")+"&est_cadre="+gv("fc-cadre")+"&motif="+gv("fc-motif");fetch("/api/simulation/fin-contrat?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.type_fin.replace(/_/g," ")+"</div><div class='lab'>Type</div></div><div class='sc'><div class='val'>"+r.anciennete_ans+" ans</div><div class='lab'>Anciennete</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_total)+"</div><div class='lab'>Cout total</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";var skip={"type_fin":1,"salaire_brut":1,"anciennete_mois":1,"anciennete_ans":1,"cout_total":1,"reference":1,"motif":1,"note":1,"exceptions":1};for(var k in r){if(!skip[k]&&typeof r[k]==="number"){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+r[k].toFixed(2)+"</td></tr>";}}h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT TOTAL</td><td class='num'>"+r.cout_total.toFixed(2)+"</td></tr></table>";if(r.reference)h+="<p style='margin-top:8px;font-size:.82em;color:var(--tx2)'>Ref: "+r.reference+"</p>";if(r.note)h+="<p style='font-size:.82em;color:var(--amber)'>"+r.note+"</p>";if(r.exceptions)h+="<p style='font-size:.82em;color:var(--tx2)'>"+r.exceptions+"</p>";document.getElementById("sim-fc-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
