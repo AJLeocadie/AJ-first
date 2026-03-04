@@ -9338,34 +9338,77 @@ async def liste_echanges(offset: int = Query(0, ge=0), limit: int = Query(_DEFAU
 
 
 # ======================================================================
-# RH - PLANNING
+# RH - PLANNING (vues jour/hebdo/mensuelle/annuelle, filtrage, integration salaries)
 # ======================================================================
 
-@app.post("/api/rh/planning")
-async def ajouter_planning(
-    salarie_id: str = Form(...),
-    date: str = Form(...),
-    heure_debut: str = Form(...),
-    heure_fin: str = Form(...),
-    type_poste: str = Form("normal"),
-):
-    """Ajoute ou modifie une entree de planning pour un salarie."""
-    types_valides = ("normal", "astreinte", "nuit", "dimanche", "ferie")
-    if type_poste not in types_valides:
-        raise HTTPException(400, f"Type de poste invalide. Valeurs acceptees: {', '.join(types_valides)}")
+# Creneau par defaut applique a l'integration automatique (modifiable)
+_planning_creneau_defaut = {
+    "heure_debut": "09:00",
+    "heure_fin": "17:00",
+    "type_poste": "normal",
+}
 
-    planning_id = str(uuid.uuid4())[:8]
 
-    # Calcul de la duree
-    try:
-        h_deb = datetime.strptime(heure_debut, "%H:%M")
-        h_fin = datetime.strptime(heure_fin, "%H:%M")
-        duree_minutes = (h_fin - h_deb).seconds // 60
-        duree_heures = round(duree_minutes / 60, 2)
-    except (ValueError, TypeError):
-        duree_heures = 0
+def _resoudre_salarie(salarie_id: str) -> dict:
+    """Resout les infos d'un salarie depuis contrats RH et base de connaissances."""
+    # 1. Chercher dans les contrats RH
+    for c in _rh_contrats:
+        if c.get("id") == salarie_id or c.get("salarie_id") == salarie_id:
+            return {
+                "id": c.get("id", salarie_id),
+                "nom": c.get("nom", ""),
+                "prenom": c.get("prenom", ""),
+                "nom_complet": f"{c.get('prenom', '')} {c.get('nom', '')}".strip(),
+                "statut": c.get("categorie", c.get("statut", "")),
+                "type_contrat": c.get("type_contrat", ""),
+                "source": "contrat_rh",
+            }
+    # 2. Chercher dans la base de connaissances (salaries detectes)
+    kb = _biblio_knowledge
+    for nir, sal in kb.get("salaries", {}).items():
+        if nir == salarie_id or sal.get("nom", "") == salarie_id:
+            return {
+                "id": nir,
+                "nom": sal.get("nom", ""),
+                "prenom": sal.get("prenom", ""),
+                "nom_complet": f"{sal.get('prenom', '')} {sal.get('nom', '')}".strip(),
+                "statut": sal.get("statut", ""),
+                "type_contrat": "",
+                "source": "analyse_documents",
+            }
+    return {
+        "id": salarie_id,
+        "nom": salarie_id,
+        "prenom": "",
+        "nom_complet": salarie_id,
+        "statut": "",
+        "type_contrat": "",
+        "source": "manuel",
+    }
 
-    # Majorations applicables
+
+def _get_statut_jour(salarie_id: str, date_str: str) -> str:
+    """Determine le statut d'un salarie pour un jour donne (present, conge, absence, arret)."""
+    # Verifier conges
+    for c in _rh_conges:
+        if c.get("salarie_id") == salarie_id or c.get("nom_salarie") == salarie_id:
+            if c.get("statut") != "refuse":
+                deb = c.get("date_debut", "")
+                fin = c.get("date_fin", "")
+                if deb <= date_str <= fin:
+                    return f"conge_{c.get('type_conge', c.get('type', 'cp'))}"
+    # Verifier arrets
+    for a in _rh_arrets:
+        if a.get("salarie_id") == salarie_id:
+            deb = a.get("date_debut", "")
+            fin = a.get("date_fin", "")
+            if deb <= date_str <= fin:
+                return f"arret_{a.get('type_arret', a.get('type', 'maladie'))}"
+    return "present"
+
+
+def _calculer_majorations(type_poste: str) -> list[dict]:
+    """Calcule les majorations applicables selon le type de poste."""
     majorations = []
     if type_poste == "nuit":
         majorations.append({
@@ -9391,36 +9434,173 @@ async def ajouter_planning(
             "taux": "Compensation obligatoire (repos ou financiere)",
             "reference": "Art. L.3121-9 CT",
         })
+    return majorations
 
-    # Verifier s'il existe deja une entree pour ce salarie a cette date, et la remplacer
+
+def _semaine_iso_vers_dates(semaine: str):
+    """Convertit une semaine ISO (YYYY-Www) en tuple (lundi, dimanche)."""
+    from datetime import timedelta
+    parts = semaine.split("-W")
+    if len(parts) != 2:
+        raise ValueError("Format semaine invalide. Utiliser YYYY-Www (ex: 2026-W10)")
+    annee = int(parts[0])
+    num_semaine = int(parts[1])
+    jan4 = date(annee, 1, 4)
+    lundi_s1 = jan4 - timedelta(days=jan4.weekday())
+    lundi = lundi_s1 + timedelta(weeks=num_semaine - 1)
+    dimanche = lundi + timedelta(days=6)
+    return lundi, dimanche
+
+
+@app.get("/api/rh/salaries")
+async def liste_salaries():
+    """Liste tous les salaries connus (detectes par analyse + contrats RH + manuels).
+
+    Alimente la liste deroulante du planning.
+    Fusionne les sources : base de connaissances (OCR/DSN) et contrats RH.
+    """
+    salaries = {}
+
+    # 1. Salaries detectes lors de l'analyse documentaire
+    kb = _biblio_knowledge
+    for nir, sal in kb.get("salaries", {}).items():
+        nom_complet = f"{sal.get('prenom', '')} {sal.get('nom', '')}".strip()
+        salaries[nir] = {
+            "id": nir,
+            "nir": nir if not nir.startswith("unknown_") else "",
+            "nom": sal.get("nom", ""),
+            "prenom": sal.get("prenom", ""),
+            "nom_complet": nom_complet or nir,
+            "statut": sal.get("statut", ""),
+            "dernier_brut": sal.get("dernier_brut", 0),
+            "type_contrat": "",
+            "source": "analyse_documents",
+            "date_embauche": "",
+            "actif": True,
+        }
+
+    # 2. Salaries issus des contrats RH (enrichir ou ajouter)
+    for c in _rh_contrats:
+        cid = c.get("id", "")
+        nom_complet = f"{c.get('prenom', '')} {c.get('nom', '')}".strip()
+        # Chercher si deja present par NIR dans les salaries detectes
+        matched = False
+        for nir, sal in list(salaries.items()):
+            if sal["nom"] == c.get("nom", "") and sal["prenom"] == c.get("prenom", ""):
+                # Enrichir le salarie existant
+                salaries[nir]["type_contrat"] = c.get("type_contrat", "")
+                salaries[nir]["date_embauche"] = c.get("date_debut", "")
+                salaries[nir]["source"] = "contrat_rh+analyse"
+                salaries[nir]["actif"] = c.get("statut", "") != "termine"
+                matched = True
+                break
+        if not matched:
+            salaries[cid] = {
+                "id": cid,
+                "nir": c.get("nir", ""),
+                "nom": c.get("nom", ""),
+                "prenom": c.get("prenom", ""),
+                "nom_complet": nom_complet or cid,
+                "statut": c.get("categorie", c.get("statut", "")),
+                "dernier_brut": float(c.get("remuneration", 0)),
+                "type_contrat": c.get("type_contrat", ""),
+                "source": "contrat_rh",
+                "date_embauche": c.get("date_debut", ""),
+                "actif": c.get("statut", "") != "termine",
+            }
+
+    # 3. Salaries presents uniquement dans le planning (ajouts manuels)
+    for p in _rh_planning:
+        sid = p.get("salarie_id", "")
+        if sid and sid not in salaries:
+            salaries[sid] = {
+                "id": sid,
+                "nir": "",
+                "nom": p.get("salarie_nom", sid),
+                "prenom": "",
+                "nom_complet": p.get("salarie_nom", sid),
+                "statut": "",
+                "dernier_brut": 0,
+                "type_contrat": "",
+                "source": "planning_manuel",
+                "date_embauche": "",
+                "actif": True,
+            }
+
+    result = sorted(salaries.values(), key=lambda s: s.get("nom_complet", ""))
+    return {"total": len(result), "salaries": result}
+
+
+@app.post("/api/rh/planning")
+async def ajouter_planning(
+    salarie_id: str = Form(...),
+    date: str = Form(...),
+    heure_debut: str = Form(""),
+    heure_fin: str = Form(""),
+    type_poste: str = Form(""),
+    statut: str = Form(""),
+):
+    """Ajoute ou modifie une entree de planning pour un salarie.
+
+    Si heure_debut/heure_fin ne sont pas fournis, utilise le creneau par defaut.
+    Le statut peut etre force (conge_cp, arret_maladie...) ou determine automatiquement.
+    """
+    # Appliquer le creneau par defaut si non specifie
+    if not heure_debut:
+        heure_debut = _planning_creneau_defaut["heure_debut"]
+    if not heure_fin:
+        heure_fin = _planning_creneau_defaut["heure_fin"]
+    if not type_poste:
+        type_poste = _planning_creneau_defaut["type_poste"]
+
+    types_valides = ("normal", "astreinte", "nuit", "dimanche", "ferie")
+    if type_poste not in types_valides:
+        raise HTTPException(400, f"Type de poste invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    planning_id = str(uuid.uuid4())[:8]
+
+    # Calcul de la duree
+    try:
+        h_deb = datetime.strptime(heure_debut, "%H:%M")
+        h_fin = datetime.strptime(heure_fin, "%H:%M")
+        duree_minutes = (h_fin - h_deb).seconds // 60
+        duree_heures = round(duree_minutes / 60, 2)
+    except (ValueError, TypeError):
+        duree_heures = 0
+
+    majorations = _calculer_majorations(type_poste)
+
+    # Verifier s'il existe deja une entree pour ce salarie a cette date/heure
     index_existant = None
     for i, p in enumerate(_rh_planning):
         if p["salarie_id"] == salarie_id and p["date"] == date and p["heure_debut"] == heure_debut:
             index_existant = i
             break
 
-    # Resoudre le nom du salarie depuis les contrats
-    salarie_nom = salarie_id
-    for c in _rh_contrats:
-        if c.get("id") == salarie_id:
-            salarie_nom = f"{c.get('prenom', '')} {c.get('nom', '')}".strip() or salarie_id
-            break
+    # Resoudre le nom du salarie
+    sal_info = _resoudre_salarie(salarie_id)
+
+    # Determiner le statut automatiquement si non force
+    if not statut:
+        statut = _get_statut_jour(salarie_id, date)
 
     entree = {
         "id": planning_id,
         "salarie_id": salarie_id,
-        "salarie_nom": salarie_nom,
+        "salarie_nom": sal_info["nom_complet"],
+        "salarie_statut": sal_info["statut"],
         "date": date,
         "heure_debut": heure_debut,
         "heure_fin": heure_fin,
         "duree_heures": duree_heures,
         "type_poste": type_poste,
+        "statut": statut,
         "majorations": majorations,
         "date_creation": datetime.now().isoformat(),
     }
 
     if index_existant is not None:
-        entree["id"] = _rh_planning[index_existant]["id"]  # Conserver l'id original
+        entree["id"] = _rh_planning[index_existant]["id"]
         _rh_planning[index_existant] = entree
         log_action("utilisateur", "modification_planning", f"salarie {salarie_id} le {date} {heure_debut}-{heure_fin}")
     else:
@@ -9431,34 +9611,36 @@ async def ajouter_planning(
 
 
 @app.get("/api/rh/planning")
-async def liste_planning(semaine: Optional[str] = Query(None)):
-    """Liste le planning, avec filtre optionnel par semaine ISO (ex: 2026-W08).
+async def liste_planning(
+    semaine: Optional[str] = Query(None, description="Semaine ISO: YYYY-Www (ex: 2026-W10)"),
+    salarie_id: Optional[str] = Query(None, description="Filtrer par salarie"),
+    statut: Optional[str] = Query(None, description="Filtrer par statut (present, conge_cp, arret_maladie...)"),
+):
+    """Liste le planning hebdomadaire avec filtres optionnels.
 
-    Le format semaine est ISO 8601: YYYY-Www (ex: 2026-W08).
+    Filtres disponibles :
+    - semaine : format ISO 8601 YYYY-Www (ex: 2026-W10)
+    - salarie_id : identifiant du salarie
+    - statut : present, conge_cp, conge_maladie, arret_maladie, arret_accident_travail...
     """
+    data = list(_rh_planning)
+
+    # Filtre par salarie
+    if salarie_id:
+        data = [p for p in data if p.get("salarie_id") == salarie_id or p.get("salarie_nom", "").lower() == salarie_id.lower()]
+
+    # Filtre par statut
+    if statut:
+        data = [p for p in data if p.get("statut", "present") == statut]
+
     if not semaine:
-        return _paginate(_rh_planning, 0, _DEFAULT_PAGE_LIMIT)
+        return _paginate(data, 0, _DEFAULT_PAGE_LIMIT)
 
-    # Parser la semaine ISO pour determiner les dates lundi-dimanche
+    # Parser la semaine ISO
     try:
-        # Format: 2026-W08
-        parts = semaine.split("-W")
-        if len(parts) != 2:
-            raise HTTPException(400, "Format semaine invalide. Utiliser YYYY-Www (ex: 2026-W08)")
-        annee = int(parts[0])
-        num_semaine = int(parts[1])
-
-        # Calculer le lundi de la semaine ISO
-        # Le 4 janvier est toujours dans la semaine 1 ISO
-        jan4 = date(annee, 1, 4)
-        # Lundi de la semaine 1
-        lundi_s1 = jan4 - __import__("datetime").timedelta(days=jan4.weekday())
-        # Lundi de la semaine demandee
-        lundi = lundi_s1 + __import__("datetime").timedelta(weeks=num_semaine - 1)
-        dimanche = lundi + __import__("datetime").timedelta(days=6)
-
+        lundi, dimanche = _semaine_iso_vers_dates(semaine)
         resultats = []
-        for p in _rh_planning:
+        for p in data:
             try:
                 d = date.fromisoformat(p["date"])
                 if lundi <= d <= dimanche:
@@ -9475,6 +9657,340 @@ async def liste_planning(semaine: Optional[str] = Query(None)):
         }
     except (ValueError, TypeError) as e:
         raise HTTPException(400, f"Format semaine invalide: {e}")
+
+
+@app.get("/api/rh/planning/jour")
+async def planning_jour(
+    date_jour: str = Query(..., description="Date au format YYYY-MM-DD"),
+    salarie_id: Optional[str] = Query(None),
+    statut: Optional[str] = Query(None),
+):
+    """Vue journaliere du planning.
+
+    Retourne tous les creneaux planifies pour une date donnee,
+    enrichis du statut reel de chaque salarie (present, conge, arret...).
+    """
+    try:
+        d = date.fromisoformat(date_jour)
+    except ValueError:
+        raise HTTPException(400, "Format de date invalide (attendu: YYYY-MM-DD)")
+
+    entrees = []
+    for p in _rh_planning:
+        if p.get("date") != date_jour:
+            continue
+        if salarie_id and p.get("salarie_id") != salarie_id:
+            continue
+        # Enrichir avec le statut reel
+        st = _get_statut_jour(p["salarie_id"], date_jour)
+        entry = dict(p)
+        entry["statut_reel"] = st
+        if statut and st != statut:
+            continue
+        entrees.append(entry)
+
+    # Ajouter les salaries qui n'ont pas de creneau mais ont un statut specifique ce jour
+    ids_planifies = {p["salarie_id"] for p in entrees}
+    tous_salaries = set()
+    for c in _rh_contrats:
+        if c.get("statut") != "termine":
+            tous_salaries.add(c.get("id", ""))
+    for nir in _biblio_knowledge.get("salaries", {}):
+        tous_salaries.add(nir)
+
+    for sid in tous_salaries:
+        if sid in ids_planifies:
+            continue
+        st = _get_statut_jour(sid, date_jour)
+        if st != "present":
+            sal = _resoudre_salarie(sid)
+            entrees.append({
+                "id": "",
+                "salarie_id": sid,
+                "salarie_nom": sal["nom_complet"],
+                "salarie_statut": sal["statut"],
+                "date": date_jour,
+                "heure_debut": "",
+                "heure_fin": "",
+                "duree_heures": 0,
+                "type_poste": "",
+                "statut": st,
+                "statut_reel": st,
+                "majorations": [],
+            })
+
+    jour_semaine = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    return {
+        "date": date_jour,
+        "jour": jour_semaine[d.weekday()],
+        "entrees": entrees,
+        "nb_entrees": len(entrees),
+        "nb_presents": sum(1 for e in entrees if e.get("statut_reel", e.get("statut")) == "present"),
+        "nb_absents": sum(1 for e in entrees if e.get("statut_reel", e.get("statut")) != "present"),
+    }
+
+
+@app.get("/api/rh/planning/mois")
+async def planning_mois(
+    annee: int = Query(..., description="Annee"),
+    mois: int = Query(..., ge=1, le=12, description="Mois (1-12)"),
+    salarie_id: Optional[str] = Query(None),
+    statut: Optional[str] = Query(None),
+):
+    """Vue mensuelle du planning.
+
+    Retourne un calendrier mensuel avec pour chaque jour le nombre de
+    salaries presents/absents et le detail des creneaux.
+    """
+    import calendar
+    nb_jours = calendar.monthrange(annee, mois)[1]
+
+    jours = []
+    jour_semaine = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    total_heures = 0
+
+    for j in range(1, nb_jours + 1):
+        d = date(annee, mois, j)
+        date_str = d.isoformat()
+
+        entrees_jour = []
+        for p in _rh_planning:
+            if p.get("date") != date_str:
+                continue
+            if salarie_id and p.get("salarie_id") != salarie_id:
+                continue
+            st = _get_statut_jour(p["salarie_id"], date_str)
+            entry = {
+                "salarie_id": p["salarie_id"],
+                "salarie_nom": p.get("salarie_nom", ""),
+                "heure_debut": p.get("heure_debut", ""),
+                "heure_fin": p.get("heure_fin", ""),
+                "type_poste": p.get("type_poste", "normal"),
+                "statut": st,
+                "duree_heures": p.get("duree_heures", 0),
+            }
+            if statut and st != statut:
+                continue
+            entrees_jour.append(entry)
+            total_heures += p.get("duree_heures", 0)
+
+        jours.append({
+            "date": date_str,
+            "jour_semaine": jour_semaine[d.weekday()],
+            "nb_salaries": len(entrees_jour),
+            "nb_presents": sum(1 for e in entrees_jour if e["statut"] == "present"),
+            "nb_absents": sum(1 for e in entrees_jour if e["statut"] != "present"),
+            "entrees": entrees_jour,
+        })
+
+    return {
+        "annee": annee,
+        "mois": mois,
+        "nb_jours": nb_jours,
+        "jours": jours,
+        "total_heures_planifiees": round(total_heures, 2),
+    }
+
+
+@app.get("/api/rh/planning/annee")
+async def planning_annee(
+    annee: int = Query(..., description="Annee"),
+    salarie_id: Optional[str] = Query(None),
+):
+    """Vue annuelle du planning.
+
+    Retourne un resume par mois : jours travailles, heures, absences.
+    """
+    import calendar
+
+    mois_resume = []
+    total_heures_annee = 0
+    total_jours_travailles = 0
+    total_absences = 0
+
+    for m in range(1, 13):
+        nb_jours = calendar.monthrange(annee, m)[1]
+        heures_mois = 0
+        jours_travailles = 0
+        jours_absence = 0
+
+        for j in range(1, nb_jours + 1):
+            date_str = date(annee, m, j).isoformat()
+            entrees_jour = [p for p in _rh_planning if p.get("date") == date_str]
+            if salarie_id:
+                entrees_jour = [p for p in entrees_jour if p.get("salarie_id") == salarie_id]
+
+            if entrees_jour:
+                jours_travailles += 1
+                heures_mois += sum(p.get("duree_heures", 0) for p in entrees_jour)
+
+            # Compter les absences
+            if salarie_id:
+                st = _get_statut_jour(salarie_id, date_str)
+                if st != "present":
+                    jours_absence += 1
+
+        mois_noms = ["", "Janvier", "Fevrier", "Mars", "Avril", "Mai", "Juin",
+                      "Juillet", "Aout", "Septembre", "Octobre", "Novembre", "Decembre"]
+        mois_resume.append({
+            "mois": m,
+            "nom_mois": mois_noms[m],
+            "jours_travailles": jours_travailles,
+            "heures_planifiees": round(heures_mois, 2),
+            "jours_absence": jours_absence,
+        })
+        total_heures_annee += heures_mois
+        total_jours_travailles += jours_travailles
+        total_absences += jours_absence
+
+    return {
+        "annee": annee,
+        "salarie_id": salarie_id,
+        "mois": mois_resume,
+        "total_heures": round(total_heures_annee, 2),
+        "total_jours_travailles": total_jours_travailles,
+        "total_jours_absence": total_absences,
+    }
+
+
+@app.post("/api/rh/planning/integrer-salaries")
+async def integrer_salaries_planning(
+    date_debut: str = Form(..., description="Date de debut (YYYY-MM-DD)"),
+    date_fin: str = Form(..., description="Date de fin (YYYY-MM-DD)"),
+    heure_debut: str = Form(""),
+    heure_fin: str = Form(""),
+    type_poste: str = Form(""),
+    jours_semaine: str = Form("1,2,3,4,5"),
+):
+    """Integre automatiquement tous les salaries detectes et contractuels au planning.
+
+    Cree des creneaux par defaut pour chaque salarie actif sur la periode demandee.
+    Par defaut : lundi-vendredi, creneau par defaut (modifiable).
+    jours_semaine : liste des jours (1=lundi...7=dimanche), ex: "1,2,3,4,5"
+    """
+    from datetime import timedelta
+
+    if not heure_debut:
+        heure_debut = _planning_creneau_defaut["heure_debut"]
+    if not heure_fin:
+        heure_fin = _planning_creneau_defaut["heure_fin"]
+    if not type_poste:
+        type_poste = _planning_creneau_defaut["type_poste"]
+
+    try:
+        d_debut = date.fromisoformat(date_debut)
+        d_fin = date.fromisoformat(date_fin)
+    except ValueError:
+        raise HTTPException(400, "Format de date invalide (attendu: YYYY-MM-DD)")
+
+    if d_fin < d_debut:
+        raise HTTPException(400, "date_fin doit etre >= date_debut")
+    if (d_fin - d_debut).days > 366:
+        raise HTTPException(400, "Periode maximale: 366 jours")
+
+    try:
+        jours = [int(j.strip()) for j in jours_semaine.split(",")]
+    except ValueError:
+        raise HTTPException(400, "jours_semaine invalide (ex: 1,2,3,4,5)")
+
+    # Collecter tous les salaries actifs
+    salaries_actifs = {}
+    # Depuis les contrats RH
+    for c in _rh_contrats:
+        if c.get("statut") != "termine":
+            cid = c.get("id", "")
+            salaries_actifs[cid] = f"{c.get('prenom', '')} {c.get('nom', '')}".strip() or cid
+    # Depuis la base de connaissances
+    for nir, sal in _biblio_knowledge.get("salaries", {}).items():
+        if nir not in salaries_actifs:
+            nom = f"{sal.get('prenom', '')} {sal.get('nom', '')}".strip() or nir
+            salaries_actifs[nir] = nom
+
+    if not salaries_actifs:
+        return {"ok": True, "nb_entrees_creees": 0, "message": "Aucun salarie connu a integrer"}
+
+    # Calcul duree
+    try:
+        h_deb = datetime.strptime(heure_debut, "%H:%M")
+        h_fin_dt = datetime.strptime(heure_fin, "%H:%M")
+        duree_heures = round((h_fin_dt - h_deb).seconds / 3600, 2)
+    except (ValueError, TypeError):
+        duree_heures = 0
+
+    majorations = _calculer_majorations(type_poste)
+
+    # Generer les creneaux
+    nb_creees = 0
+    current = d_debut
+    while current <= d_fin:
+        # weekday(): 0=lundi, 6=dimanche => ISO: 1=lundi, 7=dimanche
+        jour_iso = current.weekday() + 1
+        if jour_iso in jours:
+            date_str = current.isoformat()
+            for sid, nom in salaries_actifs.items():
+                # Verifier si deja present dans le planning
+                deja = any(
+                    p["salarie_id"] == sid and p["date"] == date_str and p["heure_debut"] == heure_debut
+                    for p in _rh_planning
+                )
+                if deja:
+                    continue
+
+                st = _get_statut_jour(sid, date_str)
+                _rh_planning.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "salarie_id": sid,
+                    "salarie_nom": nom,
+                    "salarie_statut": "",
+                    "date": date_str,
+                    "heure_debut": heure_debut,
+                    "heure_fin": heure_fin,
+                    "duree_heures": duree_heures,
+                    "type_poste": type_poste,
+                    "statut": st,
+                    "majorations": majorations,
+                    "date_creation": datetime.now().isoformat(),
+                })
+                nb_creees += 1
+        current += timedelta(days=1)
+
+    log_action("utilisateur", "integration_planning",
+               f"{nb_creees} creneaux crees pour {len(salaries_actifs)} salaries du {date_debut} au {date_fin}")
+    return {
+        "ok": True,
+        "nb_salaries": len(salaries_actifs),
+        "nb_entrees_creees": nb_creees,
+        "periode": {"debut": date_debut, "fin": date_fin},
+        "creneau": {"heure_debut": heure_debut, "heure_fin": heure_fin, "type_poste": type_poste},
+        "salaries_integres": [{"id": k, "nom": v} for k, v in salaries_actifs.items()],
+    }
+
+
+@app.put("/api/rh/planning/creneau-defaut")
+async def modifier_creneau_defaut(request: Request):
+    """Modifie le creneau par defaut applique lors de l'integration automatique."""
+    global _planning_creneau_defaut
+    body = await request.json()
+    if "heure_debut" in body:
+        _planning_creneau_defaut["heure_debut"] = body["heure_debut"]
+    if "heure_fin" in body:
+        _planning_creneau_defaut["heure_fin"] = body["heure_fin"]
+    if "type_poste" in body:
+        if body["type_poste"] in ("normal", "astreinte", "nuit", "dimanche", "ferie"):
+            _planning_creneau_defaut["type_poste"] = body["type_poste"]
+    log_action("utilisateur", "modification_creneau_defaut", str(_planning_creneau_defaut))
+    return {"ok": True, "creneau_defaut": _planning_creneau_defaut}
+
+
+@app.delete("/api/rh/planning/{planning_id}")
+async def supprimer_planning(planning_id: str):
+    """Supprime une entree de planning."""
+    for i, p in enumerate(_rh_planning):
+        if p.get("id") == planning_id:
+            removed = _rh_planning.pop(i)
+            log_action("utilisateur", "suppression_planning", f"Planning {planning_id} supprime")
+            return {"ok": True, "supprime": removed}
+    raise HTTPException(404, "Entree de planning non trouvee")
 
 
 # ======================================================================
