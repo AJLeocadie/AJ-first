@@ -1,7 +1,6 @@
 # ============================================
 # NormaCheck - Docker Compose OVHcloud
 # ============================================
-version: "3.8"
 
 services:
   normacheck:
@@ -15,15 +14,8 @@ services:
     volumes:
       # Donnees persistantes (survive aux redemarrages/mises a jour)
       - normacheck_data:/data/normacheck
-    environment:
-      - NORMACHECK_ENV=production
-      - NORMACHECK_DATA_DIR=/data/normacheck
-      - NORMACHECK_WORKERS=4
-      - NORMACHECK_MAX_UPLOAD_MB=2000
-      - NORMACHECK_MAX_FILES=50
-      # Supabase (optionnel - decommenter si utilise)
-      # - SUPABASE_URL=${SUPABASE_URL}
-      # - SUPABASE_KEY=${SUPABASE_KEY}
+    env_file:
+      - .env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s

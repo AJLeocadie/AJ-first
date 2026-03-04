@@ -271,13 +271,16 @@ def generate_token(user: dict) -> str:
 
 
 def set_auth_cookie(response: Response, token: str):
+    # secure=True uniquement si HTTPS est configure (variable NORMACHECK_HTTPS=1)
+    # Sinon le navigateur rejette le cookie en HTTP → deconnexion immediate
+    _use_secure = os.getenv("NORMACHECK_HTTPS", "0") == "1"
     response.set_cookie(
         key="nc_token",
         value=token,
         httponly=True,
         samesite="lax",
         max_age=TOKEN_EXPIRY_HOURS * 3600,
-        secure=_IS_OVH,
+        secure=_use_secure,
     )
 
 
