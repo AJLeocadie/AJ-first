@@ -251,12 +251,21 @@ class AnomalyDetector(BaseAnalyzer):
         findings = []
 
         # Verification NIR format (13 chiffres + 2 cle)
+        # Gestion Corse : 2A -> substituer par 19, 2B -> substituer par 18
         for emp in decl.employes:
             if emp.nir and emp.nir.strip():
                 nir = emp.nir.strip().replace(" ", "")
                 if len(nir) >= 13:
                     nir_base = nir[:13]
-                    if not nir_base.isdigit():
+                    # Corse: departement 2A ou 2B dans les positions 1-2
+                    # (caractere alphabetique autorise)
+                    nir_for_check = nir_base
+                    is_corse = False
+                    if len(nir_base) >= 3 and nir_base[1:3].upper() in ("2A", "2B"):
+                        is_corse = True
+                        dept = nir_base[1:3].upper()
+                        nir_for_check = nir_base[0] + ("19" if dept == "2A" else "18") + nir_base[3:]
+                    if not is_corse and not nir_base.isdigit():
                         findings.append(Finding(
                             categorie=FindingCategory.ANOMALIE,
                             severite=Severity.HAUTE,
@@ -265,10 +274,11 @@ class AnomalyDetector(BaseAnalyzer):
                                 f"Le NIR de {emp.prenom} {emp.nom} ne contient pas "
                                 f"uniquement des chiffres : '{nir[:5]}...'.\\n\\n"
                                 f"Le NIR (numero de securite sociale) doit etre compose "
-                                f"de 13 chiffres + 2 chiffres de cle de controle."
+                                f"de 13 chiffres + 2 chiffres de cle de controle "
+                                f"(ou 2A/2B pour la Corse)."
                             ),
                             valeur_constatee=f"{nir[:5]}...",
-                            valeur_attendue="13 chiffres + 2 cle",
+                            valeur_attendue="13 chiffres + 2 cle (ou 2A/2B Corse)",
                             score_risque=75,
                             recommandation="Verifier et corriger le NIR du salarie.",
                             detecte_par=self.nom,
@@ -277,8 +287,9 @@ class AnomalyDetector(BaseAnalyzer):
                         ))
                     elif len(nir) >= 15:
                         # Verification cle de controle (97 - NIR mod 97)
+                        # Pour la Corse, utiliser le NIR substitue
                         try:
-                            nir_num = int(nir_base)
+                            nir_num = int(nir_for_check)
                             cle = int(nir[13:15])
                             cle_attendue = 97 - (nir_num % 97)
                             if cle != cle_attendue:

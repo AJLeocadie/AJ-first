@@ -131,11 +131,21 @@ class SupabaseClient:
         return result.data[0] if result.data else None
 
     def rechercher_entreprises(self, terme: str) -> list[dict]:
+        # Echapper les caracteres speciaux PostgREST pour eviter l'injection
+        import re
+        terme_safe = re.sub(r'[%_\\,.()\[\]{}]', '', terme).strip()
+        if not terme_safe:
+            return []
         result = (
             self.client.table("ua_entreprises")
             .select("*")
-            .or_(f"raison_sociale.ilike.%{terme}%,siret.ilike.%{terme}%,ville.ilike.%{terme}%")
+            .or_(
+                f"raison_sociale.ilike.%{terme_safe}%,"
+                f"siret.ilike.%{terme_safe}%,"
+                f"ville.ilike.%{terme_safe}%"
+            )
             .order("raison_sociale")
+            .limit(100)
             .execute()
         )
         return result.data or []

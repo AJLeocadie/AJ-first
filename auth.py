@@ -29,6 +29,10 @@ TOKEN_EXPIRY_HOURS = int(os.getenv("NORMACHECK_TOKEN_EXPIRY", "24"))
 PBKDF2_ITERATIONS = 150_000
 MIN_PASSWORD_LENGTH = 12
 
+# --- Token blacklist (revocation) ---
+# Stocke les JTI (JWT ID) des tokens revoques avec leur date d'expiration
+_token_blacklist: dict[str, float] = {}  # jti -> exp timestamp
+
 # --- Environment ---
 _IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
 
@@ -103,9 +107,34 @@ def jwt_decode(token: str) -> Optional[dict]:
         payload = json.loads(_b64url_decode(parts[1]))
         if payload.get("exp") and payload["exp"] < time.time():
             return None
+        # Verifier si le token a ete revoque
+        jti = payload.get("jti")
+        if jti and jti in _token_blacklist:
+            return None
         return payload
     except Exception:
         return None
+
+
+def revoke_token(token: str) -> bool:
+    """Revoque un token en ajoutant son JTI a la blacklist."""
+    payload = jwt_decode(token)
+    if not payload:
+        return False
+    jti = payload.get("jti")
+    if not jti:
+        return False
+    _token_blacklist[jti] = payload.get("exp", time.time() + 86400)
+    _cleanup_blacklist()
+    return True
+
+
+def _cleanup_blacklist():
+    """Supprime les entrees expirees de la blacklist."""
+    now = time.time()
+    expired = [jti for jti, exp in _token_blacklist.items() if exp < now]
+    for jti in expired:
+        del _token_blacklist[jti]
 
 
 # =========================================
@@ -202,6 +231,7 @@ def generate_token(user: dict) -> str:
         "prenom": user.get("prenom", ""),
         "exp": int(time.time()) + TOKEN_EXPIRY_HOURS * 3600,
         "iat": int(time.time()),
+        "jti": str(uuid.uuid4()),
     })
 
 

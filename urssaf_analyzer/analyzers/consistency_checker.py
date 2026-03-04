@@ -1059,8 +1059,9 @@ class ConsistencyChecker(BaseAnalyzer):
         annee, per = _annee_periode(decl)
         doc_label = _doc_label(decl)
 
-        # -- SIRET coherence --
+        # -- SIRET coherence + Luhn --
         if decl.employeur and decl.employeur.siret:
+            from urssaf_analyzer.utils.number_utils import valider_siret
             siret = decl.employeur.siret.replace(" ", "")
             # SIRET = 14 digits
             if len(siret) != 14 or not siret.isdigit():
@@ -1083,6 +1084,32 @@ class ConsistencyChecker(BaseAnalyzer):
                     detecte_par=self.nom,
                     documents_concernes=[decl.source_document_id],
                     reference_legale="Art. R243-14 CSS",
+                    details_technique=_details_technique(
+                        annee=annee, periode=per, document=doc_label,
+                        rubrique="SIRET employeur",
+                    ),
+                ))
+            elif not valider_siret(siret):
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.HAUTE,
+                    titre=f"SIRET invalide (cle Luhn) : {siret}",
+                    description=(
+                        f"Le SIRET '{siret}' echoue a la validation Luhn. "
+                        f"La somme de controle est incorrecte, ce qui indique "
+                        f"une erreur de saisie."
+                    ),
+                    valeur_constatee=siret,
+                    valeur_attendue="SIRET avec cle Luhn valide",
+                    montant_impact=Decimal("0"),
+                    score_risque=80,
+                    recommandation=(
+                        "Verifier le SIRET sur societe.com ou annuaire-entreprises.data.gouv.fr. "
+                        "Un SIRET invalide entraine un rejet DSN."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[decl.source_document_id],
+                    reference_legale="Art. R243-14 CSS - Decret SIRET (INSEE)",
                     details_technique=_details_technique(
                         annee=annee, periode=per, document=doc_label,
                         rubrique="SIRET employeur",

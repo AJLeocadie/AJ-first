@@ -129,8 +129,19 @@ class ProofChain:
                         pass  # Fallback: pas de jeton TSA
 
                 line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
-                with open(self.chain_path, "a", encoding="utf-8") as f:
+                # Ecriture atomique : ecrire dans un fichier temporaire puis
+                # appeler fsync + rename pour garantir la durabilite
+                tmp_path = self.chain_path.with_suffix(".tmp")
+                # Copier le contenu existant + nouvelle ligne
+                existing = ""
+                if self.chain_path.exists():
+                    existing = self.chain_path.read_text(encoding="utf-8")
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(existing)
                     f.write(line + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(str(tmp_path), str(self.chain_path))
 
                 return entry
             finally:

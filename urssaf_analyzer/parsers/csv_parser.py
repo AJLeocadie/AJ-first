@@ -97,11 +97,14 @@ class CSVParser(BaseParser):
                 dialect = csv.Sniffer().sniff(contenu[:4096])
             except csv.Error:
                 first_line = contenu.split("\n", 1)[0]
-                dialect = csv.excel
                 if ";" in first_line:
-                    dialect.delimiter = ";"
+                    class _SemiDialect(csv.excel):
+                        delimiter = ";"
+                    dialect = _SemiDialect()
                 elif "\t" in first_line:
                     dialect = csv.excel_tab
+                else:
+                    dialect = csv.excel
             reader = csv.reader(io.StringIO(contenu), dialect)
             header = next(reader, [])
             nb_lignes = sum(1 for _ in reader)
@@ -124,10 +127,12 @@ class CSVParser(BaseParser):
             dialect = csv.Sniffer().sniff(contenu[:4096])
         except csv.Error:
             # Detecter manuellement le separateur
+            # NB: ne PAS muter csv.excel (singleton global), creer un dialect local
             first_line = contenu.split("\n", 1)[0]
             if ";" in first_line:
-                dialect = csv.excel
-                dialect.delimiter = ";"
+                class _SemicolonDialect(csv.excel):
+                    delimiter = ";"
+                dialect = _SemicolonDialect()
             elif "\t" in first_line:
                 dialect = csv.excel_tab
             else:

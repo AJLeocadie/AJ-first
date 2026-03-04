@@ -47,7 +47,7 @@ from auth import (
     set_auth_cookie, clear_auth_cookie,
     get_current_user, get_optional_user, require_role,
     save_dashboard, load_dashboard, list_users_by_tenant, set_user_tenant,
-    jwt_decode,
+    jwt_decode, revoke_token,
 )
 
 # --- Detection environnement ---
@@ -58,6 +58,7 @@ _PROOF_DIR.mkdir(parents=True, exist_ok=True)
 _proof_chain = ProofChain(_PROOF_DIR / "score_proof_chain.jsonl")
 _MAX_FILES = int(os.getenv("NORMACHECK_MAX_FILES", "50" if _IS_OVH else "20"))
 _MAX_UPLOAD_MB = int(os.getenv("NORMACHECK_MAX_UPLOAD_MB", "2000" if _IS_OVH else "500"))
+_MAX_FILE_MB = int(os.getenv("NORMACHECK_MAX_FILE_MB", "50"))  # Limite par fichier
 
 # --- Persistence (OVHcloud: fichiers JSON / Vercel: in-memory) ---
 _persist = None
@@ -93,6 +94,81 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+# --- Middleware securite : CSP + en-tetes de protection ---
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Ajoute les en-tetes de securite (CSP, X-Frame-Options, etc.)."""
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
+
+
+# --- Middleware rate limiting ---
+_RATE_LIMIT_WINDOW = 60  # secondes
+_RATE_LIMIT_MAX = int(os.getenv("NORMACHECK_RATE_LIMIT", "60"))  # requetes/minute
+_RATE_LIMIT_AUTH_MAX = 10  # tentatives auth/minute
+_rate_store: dict[str, list[float]] = {}
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(key: str, max_requests: int) -> bool:
+    """Retourne True si la requete est autorisee, False si rate limited."""
+    now = time.time()
+    timestamps = _rate_store.get(key, [])
+    # Nettoyer les entrees expirees
+    timestamps = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
+    if len(timestamps) >= max_requests:
+        _rate_store[key] = timestamps
+        return False
+    timestamps.append(now)
+    _rate_store[key] = timestamps
+    return True
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Limite le debit des requetes par IP."""
+    client_ip = _get_client_ip(request)
+    path = request.url.path
+
+    # Limite stricte sur les endpoints d'authentification
+    if path in ("/api/auth/login", "/api/auth/register"):
+        if not _check_rate_limit(f"auth:{client_ip}", _RATE_LIMIT_AUTH_MAX):
+            return JSONResponse(
+                {"detail": "Trop de tentatives. Reessayez dans une minute."},
+                status_code=429,
+            )
+    else:
+        if not _check_rate_limit(f"global:{client_ip}", _RATE_LIMIT_MAX):
+            return JSONResponse(
+                {"detail": "Trop de requetes. Reessayez dans une minute."},
+                status_code=429,
+            )
+
+    response = await call_next(request)
+    return response
 
 
 # --- Middleware authentification (protege /api/* sauf whitelist) ---
@@ -239,6 +315,17 @@ def _save_state():
     entete_config_store.save(_entete_config)
 
 
+_DEFAULT_PAGE_LIMIT = 200
+
+
+def _paginate(items: list, offset: int = 0, limit: int = _DEFAULT_PAGE_LIMIT) -> dict:
+    """Pagine une liste avec offset/limit et retourne total + items."""
+    total = len(items)
+    limit = min(limit, 500)  # cap absolu
+    page = items[offset:offset + limit]
+    return {"total": total, "offset": offset, "limit": limit, "items": page}
+
+
 def get_db() -> Database:
     global _db
     if _db is None:
@@ -366,7 +453,15 @@ async def auth_register(
 
 
 @app.post("/api/auth/logout")
-async def auth_logout():
+async def auth_logout(request: Request):
+    # Revoquer le token actuel pour empecher sa reutilisation
+    token = request.cookies.get("nc_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if token:
+        revoke_token(token)
     response = JSONResponse({"status": "ok"})
     clear_auth_cookie(response)
     return response
@@ -1351,6 +1446,8 @@ async def analyser_documents(
         total_size = 0
         for f in fichiers:
             data = await f.read()
+            if len(data) > _MAX_FILE_MB * 1024 * 1024:
+                raise HTTPException(400, f"Fichier '{f.filename}' depasse la limite de {_MAX_FILE_MB} Mo.")
             total_size += len(data)
             if total_size > _MAX_UPLOAD_MB * 1024 * 1024:
                 raise HTTPException(400, f"Taille totale depasse {_MAX_UPLOAD_MB} Mo.")
@@ -4005,8 +4102,8 @@ async def declarations_entreprise(
 # ==============================
 
 @app.get("/api/documents/bibliotheque")
-async def bibliotheque():
-    return _doc_library
+async def bibliotheque(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
+    return _paginate(_doc_library, offset, limit)
 
 
 @app.get("/api/bibliotheque/knowledge")
@@ -5291,9 +5388,9 @@ async def creer_contrat(
 
 
 @app.get("/api/rh/contrats")
-async def liste_contrats():
+async def liste_contrats(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les contrats de travail."""
-    return _rh_contrats
+    return _paginate(_rh_contrats, offset, limit)
 
 
 @app.get("/api/rh/contrats/{contrat_id}")
@@ -5592,9 +5689,9 @@ async def generer_bulletin(
 
 
 @app.get("/api/rh/bulletins")
-async def liste_bulletins():
+async def liste_bulletins(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les bulletins de paie generes."""
-    return _rh_bulletins
+    return _paginate(_rh_bulletins, offset, limit)
 
 
 @app.get("/api/rh/bulletins/{bulletin_id}/document")
@@ -5875,9 +5972,9 @@ async def creer_avenant(
 
 
 @app.get("/api/rh/avenants")
-async def liste_avenants():
+async def liste_avenants(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les avenants."""
-    return _rh_avenants
+    return _paginate(_rh_avenants, offset, limit)
 
 
 # ======================================================================
@@ -5940,11 +6037,10 @@ async def enregistrer_conge(
 
 
 @app.get("/api/rh/conges")
-async def liste_conges(salarie_id: Optional[str] = Query(None)):
+async def liste_conges(salarie_id: Optional[str] = Query(None), offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste les conges, avec filtre optionnel par salarie."""
-    if salarie_id:
-        return [c for c in _rh_conges if c["salarie_id"] == salarie_id]
-    return _rh_conges
+    data = [c for c in _rh_conges if c["salarie_id"] == salarie_id] if salarie_id else _rh_conges
+    return _paginate(data, offset, limit)
 
 
 # ======================================================================
@@ -6021,9 +6117,9 @@ async def enregistrer_arret(
 
 
 @app.get("/api/rh/arrets")
-async def liste_arrets():
+async def liste_arrets(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les arrets de travail."""
-    return _rh_arrets
+    return _paginate(_rh_arrets, offset, limit)
 
 
 # ======================================================================
@@ -6095,9 +6191,9 @@ async def enregistrer_sanction(
 
 
 @app.get("/api/rh/sanctions")
-async def liste_sanctions():
+async def liste_sanctions(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste toutes les sanctions disciplinaires."""
-    return _rh_sanctions
+    return _paginate(_rh_sanctions, offset, limit)
 
 
 # ======================================================================
@@ -6271,9 +6367,9 @@ async def generer_attestation(
 
 
 @app.get("/api/rh/attestations")
-async def liste_attestations():
+async def liste_attestations(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste toutes les attestations generees."""
-    return _rh_attestations
+    return _paginate(_rh_attestations, offset, limit)
 
 
 # ======================================================================
@@ -6360,9 +6456,9 @@ async def enregistrer_entretien(
 
 
 @app.get("/api/rh/entretiens")
-async def liste_entretiens():
+async def liste_entretiens(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les entretiens professionnels."""
-    return _rh_entretiens
+    return _paginate(_rh_entretiens, offset, limit)
 
 
 # ======================================================================
@@ -6453,9 +6549,9 @@ async def enregistrer_visite_medicale(
 
 
 @app.get("/api/rh/visites-medicales")
-async def liste_visites_medicales():
+async def liste_visites_medicales(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste toutes les visites medicales."""
-    return _rh_visites_med
+    return _paginate(_rh_visites_med, offset, limit)
 
 
 # ======================================================================
@@ -6983,9 +7079,9 @@ async def enregistrer_echange(
 
 
 @app.get("/api/rh/echanges")
-async def liste_echanges():
+async def liste_echanges(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les echanges enregistres."""
-    return _rh_echanges
+    return _paginate(_rh_echanges, offset, limit)
 
 
 # ======================================================================
@@ -7088,7 +7184,7 @@ async def liste_planning(semaine: Optional[str] = Query(None)):
     Le format semaine est ISO 8601: YYYY-Www (ex: 2026-W08).
     """
     if not semaine:
-        return _rh_planning
+        return _paginate(_rh_planning, 0, _DEFAULT_PAGE_LIMIT)
 
     # Parser la semaine ISO pour determiner les dates lundi-dimanche
     try:
@@ -7368,8 +7464,8 @@ async def generer_dsn(
 
 
 @app.get("/api/dsn/brouillons")
-async def liste_dsn_brouillons():
-    return _dsn_drafts
+async def liste_dsn_brouillons(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
+    return _paginate(_dsn_drafts, offset, limit)
 
 
 @app.get("/api/dsn/telecharger/{draft_id}")
