@@ -25,6 +25,11 @@ venv/
 *.swp
 *.swo
 
+# Test/Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
 # OS
 .DS_Store
 Thumbs.db
