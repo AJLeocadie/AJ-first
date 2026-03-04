@@ -300,7 +300,7 @@ class AnomalyDetector(BaseAnalyzer):
                                     recommandation="Corriger le NIR. Verifier aupres du salarie avec sa carte vitale.",
                                     detecte_par=self.nom,
                                     documents_concernes=[decl.source_document_id or decl.id],
-                                    reference_legale="Decret 92-556 - Format NIR",
+                                    reference_legale="Decret n°82-103 du 22/01/1982 - Format NIR",
                                 ))
                         except (ValueError, IndexError):
                             pass

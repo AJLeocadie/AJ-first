@@ -395,27 +395,34 @@ async def dashboard_load(request: Request):
 async def scores_methodologie():
     """Retourne la methodologie complete des 3 scores de conformite pour certification."""
     return {
-        "version": "3.8",
+        "version": "4.0",
         "date_methodologie": "2026-03-03",
         "statut_certification": "en_cours_de_validation",
+        "principes_methodologiques": {
+            "proportionnalite": "Chaque deduction est ponderee par un coefficient (Wk) derive des sanctions legales effectives",
+            "objectivabilite": "Tout parametre est traçable a une reference legale explicite",
+            "reproductibilite": "A constats identiques, le score est identique - aucun bonus subjectif",
+            "non_discretionnaire": "Les poids inter-domaines sont derives du nombre de points de controle (Nk/Somme_Nk)",
+        },
+        "formule_par_domaine": {
+            "description": "S = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+            "Wk_severite": {
+                "critique": {"poids": 4, "justification": "Manquement delibere, sanction >= 40% (CSS L243-7-2, CGI art. 1729)"},
+                "haute": {"poids": 3, "justification": "Retard/omission significatif, sanction 10-25% (CSS L243-7-1)"},
+                "moyenne": {"poids": 2, "justification": "Ecart formel, tolerance 5% (CSS L243-7-6)"},
+                "faible": {"poids": 1, "justification": "Anomalie mineure, pas de sanction directe"},
+            },
+            "Wmax": "max(Sigma(Wk), 4 * Npoints) - normalise par la capacite de controle du domaine",
+            "Fc_couverture": "min(1, nbDocuments / 3) - facteur continu, pas de seuil arbitraire",
+            "score_minimum": "Score brut * 0.5 (si aucun document) - jamais de plafond discretionnaire",
+        },
         "scores": {
             "urssaf": {
                 "nom": "Score URSSAF - Conformite sociale",
-                "organisme_certificateur": "URSSAF / Caisse Nationale",
+                "organisme_reference": "URSSAF / Caisse Nationale",
                 "cadre_legal": "Code de la securite sociale (CSS)",
-                "formule": "S_URSSAF = 100 - Somme(P(severite_i)) + B_social",
-                "penalites": {
-                    "critique": {"points": -15, "exemples": ["Absence DPAE", "Travail dissimule", "Non-declaration salarie"]},
-                    "haute": {"points": -10, "exemples": ["Ecart cotisation > 5%", "NIR invalide", "FNAL taux incorrect"]},
-                    "moyenne": {"points": -5, "exemples": ["Ecart taux AT/MP", "Proratisation PASS incorrecte", "CSG assiette erronee"]},
-                    "faible": {"points": -2, "exemples": ["Arrondi mineur", "Libelle incomplet", "Format NIR non standard"]},
-                },
-                "bonus": [
-                    {"condition": "Aucun constat critique", "points": 5},
-                    {"condition": ">= 3 sources analysees (BS + DSN + LDP)", "points": 3},
-                    {"condition": "Audit social >= 80% couverture", "points": 5},
-                ],
-                "plafond": "80% si <= 1 document analyse",
+                "formule": "S_URSSAF = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+                "Npoints": 10,
                 "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
                 "perimetres_controle": [
                     {"point": "Assiette des cotisations", "reference": "Art. L242-1 CSS"},
@@ -426,59 +433,36 @@ async def scores_methodologie():
                     {"point": "Plafond SS proratise", "reference": "Art. L242-8 CSS"},
                     {"point": "Retraite complementaire", "reference": "ANI AGIRC-ARRCO art. 36"},
                     {"point": "SMIC horaire", "reference": "Art. L3231-2 Code du travail"},
-                    {"point": "NIR / Identite", "reference": "Art. R.114-7 CSS"},
+                    {"point": "NIR / Identite", "reference": "Decret n. 82-103 du 22/01/1982"},
                     {"point": "Bulletin de paie", "reference": "Art. L3243-2 Code du travail"},
                 ],
             },
             "dgfip": {
                 "nom": "Score DGFIP - Conformite fiscale",
-                "organisme_certificateur": "Direction Generale des Finances Publiques (DGFiP)",
+                "organisme_reference": "Direction Generale des Finances Publiques (DGFiP)",
                 "cadre_legal": "Code general des impots (CGI) / Livre des procedures fiscales (LPF)",
-                "formule": "S_DGFIP = 100 - Somme(P(severite_i)) + B_fiscal",
-                "penalites": {
-                    "critique": {"points": -15, "exemples": ["Absence TVA", "Non-depot declaration"]},
-                    "haute": {"points": -10, "exemples": ["Ecart TVA collectee/deductible", "DAS-2 manquante"]},
-                    "moyenne": {"points": -5, "exemples": ["Mentions facture manquantes", "Delai archivage"]},
-                    "faible": {"points": -2, "exemples": ["Format FEC non optimal", "Ecart arrondi"]},
-                },
-                "bonus": [
-                    {"condition": "Aucun constat critique", "points": 5},
-                    {"condition": ">= 3 sources analysees", "points": 3},
-                    {"condition": "Audit fiscal >= 80% couverture", "points": 5},
-                ],
-                "plafond": "80% si <= 1 document analyse",
+                "formule": "S_DGFIP = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+                "Npoints": 10,
                 "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
                 "perimetres_controle": [
                     {"point": "TVA collectee / deductible", "reference": "Art. 256 et 271 CGI"},
                     {"point": "Declarations fiscales", "reference": "Art. 1649 quater B CGI"},
-                    {"point": "DAS-2 Honoraires", "reference": "Art. 240 CGI"},
+                    {"point": "DAS-2 Honoraires (> 2400 EUR/an)", "reference": "Art. 240-241 CGI"},
                     {"point": "FEC", "reference": "Art. L.47 A-I LPF"},
                     {"point": "Facturation", "reference": "Art. 289 CGI"},
                     {"point": "Conservation documents", "reference": "Art. L.102 B LPF"},
                     {"point": "Avantages en nature", "reference": "Art. 82 CGI"},
-                    {"point": "Credit impot formation", "reference": "Art. 244 quater M CGI"},
+                    {"point": "Credit impot formation (EXPIRE 31/12/2024)", "reference": "Art. 244 quater M CGI - dispositif expire"},
                     {"point": "CFE / CVAE", "reference": "Art. 1447 CGI"},
                     {"point": "Taxe sur les salaires", "reference": "Art. 231 CGI"},
                 ],
             },
             "cour_des_comptes": {
                 "nom": "Score Cour des comptes - Regularite comptable",
-                "organisme_certificateur": "Cour des comptes / Chambres regionales des comptes",
+                "organisme_reference": "Cour des comptes / Chambres regionales des comptes",
                 "cadre_legal": "Code de commerce / Normes NEP-ISA",
-                "formule": "S_CDC = 100 - Somme(P(severite_i)) + B_cdc",
-                "penalites": {
-                    "critique": {"points": -15, "exemples": ["Comptes non certifiables", "Anomalie significative"]},
-                    "haute": {"points": -10, "exemples": ["Ecart BS/DSN > 5%", "Cut-off non respecte"]},
-                    "moyenne": {"points": -5, "exemples": ["Piece justificative manquante", "Rapprochement partiel"]},
-                    "faible": {"points": -2, "exemples": ["Ecart arrondi", "Libelle imprecis"]},
-                },
-                "bonus": [
-                    {"condition": "Aucun constat critique", "points": 5},
-                    {"condition": ">= 3 sources analysees", "points": 3},
-                    {"condition": "Audit CDC >= 80% couverture", "points": 5},
-                    {"condition": "Rapprochement masses concordant (ecart < 1%)", "points": 3},
-                ],
-                "plafond": "80% si <= 1 document analyse",
+                "formule": "S_CDC = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+                "Npoints": 8,
                 "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
                 "perimetres_controle": [
                     {"point": "Regularite des comptes", "reference": "Normes NEP / ISA"},
@@ -486,18 +470,34 @@ async def scores_methodologie():
                     {"point": "Image fidele du patrimoine", "reference": "Art. L.123-14 Code de commerce"},
                     {"point": "Continuite d exploitation", "reference": "NEP 570"},
                     {"point": "Separation des exercices", "reference": "Art. L.123-12 C.com / PCG 313-1"},
-                    {"point": "Exhaustivite charges sociales", "reference": "ISA 550 / NEP 550"},
+                    {"point": "Exhaustivite charges sociales", "reference": "ISA 315 (risques) / ISA 500 (elements probants)"},
                     {"point": "Conventions reglementees", "reference": "Art. L.225-38 Code de commerce"},
                     {"point": "Controle interne", "reference": "NEP 315 / ISA 315"},
                 ],
             },
         },
         "score_global": {
-            "formule": "S_global = S_URSSAF * 0.40 + S_DGFIP * 0.35 + S_CDC * 0.25",
-            "poids": {"URSSAF": 0.40, "DGFIP": 0.35, "Cour_des_comptes": 0.25},
-            "justification_poids": "Risque financier (cotisations sociales = charge principale) > Risque fiscal > Risque comptable",
+            "formule": "S_global = Somme(S_k * Nk) / Somme(Nk) - moyenne ponderee par nombre de points de controle",
+            "poids": {"URSSAF": "10/28 = 0.3571", "DGFIP": "10/28 = 0.3571", "Cour_des_comptes": "8/28 = 0.2857"},
+            "justification_poids": (
+                "Le poids de chaque domaine est strictement proportionnel au nombre de points de controle "
+                "legaux identifies (Nk). Avec N_URSSAF=10, N_DGFIP=10, N_CDC=8, les poids sont Nk/28. "
+                "Cette methode est objectivable (le nombre de points est verifiable), reproductible "
+                "(tout auditeur arrive au meme resultat) et non-discretionnaire (aucun choix subjectif). "
+                "En cas d'ajout ou suppression d'un point de controle, les poids s'ajustent automatiquement."
+            ),
         },
-        "avertissement": "Les scores NormaCheck sont des indicateurs internes. Ils ne constituent pas une certification officielle (art. L.243-6-3 CSS).",
+        "avertissement": (
+            "Les scores NormaCheck v4.0 sont des indicateurs methodologiques internes. "
+            "Ils ne constituent pas une certification officielle. "
+            "La methodologie est concue pour etre objectivable, reproductible et non-discretionnaire "
+            "conformement aux exigences de l'art. L.243-6-3 CSS."
+        ),
+        "changelog": {
+            "v4.0": "Refonte methodologique : suppression coefficients arbitraires, poids proportionnels Nk/Somme_Nk, "
+                     "deductions Wk basees sur sanctions legales, suppression bonus subjectifs, facteur couverture continu",
+            "v3.8": "Version initiale triple scoring avec coefficients fixes (0.40/0.35/0.25) et deductions arbitraires (-15/-10/-5/-2)",
+        },
     }
 
 
@@ -4304,12 +4304,12 @@ async def knowledge_audit():
 
     # Fiscal 10. DAS-2 - Declaration des honoraires (art. 241 CGI)
     fiscal_checks.append(_audit_check(
-        "DAS-2 - Declaration des honoraires (> 1200 EUR/beneficiaire)",
+        "DAS-2 - Declaration des honoraires (> 2400 EUR/beneficiaire)",
         "Art. 241 a 243-bis CGI - Art. L.133-5-3 CSS",
         "das2" in kb["pieces_justificatives"],
-        "DAS-2 importee" if "das2" in kb["pieces_justificatives"] else "DAS-2 non importee - obligatoire si honoraires > 1200 EUR/beneficiaire/an",
+        "DAS-2 importee" if "das2" in kb["pieces_justificatives"] else "DAS-2 non importee - obligatoire si honoraires > 2400 EUR/beneficiaire/an",
         "DAS-2, factures de prestataires/honoraires",
-        incidence="Amende 150 EUR par omission (art. 1736 CGI) + majoration 50% si retard > 1 mois",
+        incidence="Amende de 50% des sommes non declarees (art. 1736 CGI) + majoration 50% si retard > 1 mois",
     ))
 
     # Fiscal 11. FEC - Fichier des ecritures comptables (art. L.47 A-I LPF)
@@ -4352,10 +4352,10 @@ async def knowledge_audit():
         "Bulletins de paie, etats des avantages en nature",
     ))
 
-    # Fiscal 15. Credit impot formation dirigeant
+    # Fiscal 15. Credit impot formation dirigeant (EXPIRE 31/12/2024)
     fiscal_checks.append(_audit_check(
-        "Credit d impot formation du dirigeant",
-        "Art. 244 quater M CGI",
+        "Credit d impot formation du dirigeant (EXPIRE depuis 31/12/2024)",
+        "Art. 244 quater M CGI - Dispositif expire le 31/12/2024",
         "formation_dirigeant" in kb["pieces_justificatives"],
         "Attestation formation importee" if "formation_dirigeant" in kb["pieces_justificatives"] else "Non renseigne - verifier l eligibilite (PME < 250 sal.)",
         "Attestation de formation, cerfa 2079-FCE",
@@ -4394,7 +4394,7 @@ async def knowledge_audit():
     # CDC 6. Exhaustivite des charges sociales
     cdc_checks.append(_audit_check(
         "Exhaustivite des charges sociales declarees",
-        "Norme ISA 550 - NEP 550",
+        "Norme ISA 315 (identification des risques) / ISA 500 (elements probants)",
         ks["has_bulletins"] and ks["nb_cotisations_analysees"] > 0,
         f"{ks['nb_cotisations_analysees']} ligne(s) de cotisations verifiee(s)" if ks["nb_cotisations_analysees"] > 0 else "Non verifiable",
         "Bulletins de paie, journal de paie, DSN"))
@@ -6252,7 +6252,7 @@ async def get_rh_alertes():
             "echeance": "",
         })
 
-    # 4k. DAS-2 (honoraires > 1200 EUR/beneficiaire/an)
+    # 4k. DAS-2 (honoraires > 2400 EUR/beneficiaire/an)
     kb = _biblio_knowledge
     docs_compta = kb.get("documents_comptables", [])
     factures_importees = [d for d in _doc_library if d.get("nature") in ("facture_achat", "facture_vente", "note_frais")]
@@ -6264,13 +6264,13 @@ async def get_rh_alertes():
             "titre": "DAS-2 : declaration des honoraires",
             "description": (
                 "Tout versement d'honoraires, commissions, courtages, ristournes "
-                "superieurs a 1200 EUR par beneficiaire et par an doit etre declare "
+                "superieurs a 2400 EUR par beneficiaire et par an doit etre declare "
                 "via la DAS-2 avant le 28 fevrier de l'annee suivante."
             ),
             "reference": "CGI art. 241 a 243-bis - CSS art. L.133-5-3",
             "action_requise": "Verifier le montant cumule des honoraires verses par beneficiaire et deposer la DAS-2",
             "echeance": f"{aujourdhui.year + 1}-02-28",
-            "incidence_legale": "Amende de 150 EUR par declaration omise ou inexacte (art. 1736 CGI). Majoration 50% si retard > 1 mois.",
+            "incidence_legale": "Amende de 50% des sommes non declarees (art. 1736 CGI). Majoration 50% si retard > 1 mois.",
         })
 
     # 4l. Heures supplementaires - contingent annuel 220h
@@ -8193,26 +8193,24 @@ APP_HTML += """
 <!-- ===== DETAILS DES SCORES DE CONFORMITE ===== -->
 <div class="sec" id="s-score-details">
 <div class="card">
-<h2>Methodologie des scores de conformite NormaCheck v3.8</h2>
-<div class="al info"><span class="ai">&#9878;</span><span>Cette page detaille les formules de calcul des trois scores de conformite. Ces methodologies sont soumises a validation par l <strong>URSSAF</strong>, la <strong>DGFIP</strong> et la <strong>Cour des comptes</strong> en vue d une certification et labelisation officielle.</span></div>
+<h2>Methodologie des scores de conformite NormaCheck v4.0</h2>
+<div class="al info"><span class="ai">&#9878;</span><span>Methodologie v4.0 : scoring <strong>proportionnel, objectivable, reproductible et non-discretionnaire</strong>. Chaque parametre est derive d une reference legale explicite. Aucun coefficient arbitraire n est utilise. Soumis a validation methodologique aupres des organismes de reference.</span></div>
 <button class="btn btn-s" onclick="showS('dashboard')" style="margin-top:12px">&#8592; Retour au dashboard</button>
 </div>
 
 <div class="card" style="border-left:4px solid var(--p3)">
 <h2 style="color:var(--p2)">1. Score URSSAF - Conformite sociale (CSS)</h2>
 <div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
-<strong>Formule :</strong><br>
-S<sub>URSSAF</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>social</sub><br><br>
-<strong>Penalites P(sev) par constat social :</strong><br>
-&bull; Critique : -15 pts (ex: absence DPAE, travail dissimule)<br>
-&bull; Haute : -10 pts (ex: ecart cotisation > 5%, NIR invalide)<br>
-&bull; Moyenne : -5 pts (ex: ecart taux AT/MP, proratisation PASS)<br>
-&bull; Faible : -2 pts (ex: arrondi mineur, libelle incomplet)<br><br>
-<strong>Bonus B<sub>social</sub> :</strong><br>
-&bull; +5 pts si aucun constat critique (absence de fraude presumee)<br>
-&bull; +3 pts si &ge; 3 sources analysees (BS + DSN + LDP = corroboration)<br>
-&bull; +5 pts si audit social &ge; 80% de couverture<br>
-&bull; Plafond a 80% si &le; 1 document analyse (fiabilite insuffisante)
+<strong>Formule (v4.0) :</strong><br>
+S<sub>URSSAF</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
+<strong>Poids de gravite W<sub>k</sub> (derives des sanctions legales) :</strong><br>
+&bull; Critique (W<sub>k</sub>=4) : manquement delibere, sanction &ge; 40% (CSS L243-7-2)<br>
+&bull; Haute (W<sub>k</sub>=3) : retard/omission significatif, sanction 10-25% (CSS L243-7-1)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, tolerance 5% (CSS L243-7-6)<br>
+&bull; Faible (W<sub>k</sub>=1) : anomalie mineure, pas de sanction directe<br><br>
+<strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 10<br>
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3) - facteur continu, pas de seuil arbitraire<br>
+<strong>Pas de bonus subjectif</strong> - seuls les constats impactent le score
 </div>
 <div style="margin-top:12px;font-size:.86em;line-height:1.8">
 <h3 style="margin-bottom:8px">Perimetres de controle</h3>
@@ -8225,7 +8223,7 @@ S<sub>URSSAF</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>social
 <tr><td>Plafond SS proratise</td><td>Art. L242-8 CSS</td><td>Temps partiel non proratise</td></tr>
 <tr><td>Retraite complementaire</td><td>ANI AGIRC-ARRCO art. 36</td><td>Tranche 1/2 incorrecte</td></tr>
 <tr><td>SMIC horaire</td><td>Art. L3231-2 Code du travail</td><td>Net inferieur au SMIC 2026</td></tr>
-<tr><td>NIR / Identite</td><td>Art. R.114-7 CSS</td><td>NIR absent ou format invalide</td></tr>
+<tr><td>NIR / Identite</td><td>Decret n. 82-103 du 22/01/1982</td><td>NIR absent ou format invalide</td></tr>
 <tr><td>Bulletin de paie</td><td>Art. L3243-2 Code du travail</td><td>Rubriques obligatoires manquantes</td></tr>
 </tbody></table>
 </div>
@@ -8239,30 +8237,28 @@ S<sub>URSSAF</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>social
 <div class="card" style="border-left:4px solid var(--pu)">
 <h2 style="color:var(--pu)">2. Score DGFIP - Conformite fiscale (CGI)</h2>
 <div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
-<strong>Formule :</strong><br>
-S<sub>DGFIP</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>fiscal</sub><br><br>
-<strong>Penalites P(sev) par constat fiscal :</strong><br>
-&bull; Critique : -15 pts (ex: absence TVA, non-depot declaration)<br>
-&bull; Haute : -10 pts (ex: ecart TVA collectee/deductible, DAS-2 manquante)<br>
-&bull; Moyenne : -5 pts (ex: mentions facture manquantes, delai archivage)<br>
-&bull; Faible : -2 pts (ex: format FEC non optimal, ecart arrondi)<br><br>
-<strong>Bonus B<sub>fiscal</sub> :</strong><br>
-&bull; +5 pts si aucun constat critique<br>
-&bull; +3 pts si &ge; 3 sources analysees<br>
-&bull; +5 pts si audit fiscal &ge; 80% de couverture<br>
-&bull; Plafond a 80% si &le; 1 document analyse
+<strong>Formule (v4.0) :</strong><br>
+S<sub>DGFIP</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
+<strong>Poids de gravite W<sub>k</sub> (derives des sanctions legales) :</strong><br>
+&bull; Critique (W<sub>k</sub>=4) : manquement delibere, sanction 40% (CGI art. 1729)<br>
+&bull; Haute (W<sub>k</sub>=3) : retard declaration, sanction 10% (CGI art. 1728)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, sanction 5% (CGI art. 1727)<br>
+&bull; Faible (W<sub>k</sub>=1) : anomalie mineure, pas de sanction directe<br><br>
+<strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 10<br>
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3)<br>
+<strong>Pas de bonus subjectif</strong>
 </div>
 <div style="margin-top:12px;font-size:.86em;line-height:1.8">
 <h3 style="margin-bottom:8px">Perimetres de controle</h3>
 <table><thead><tr><th>Point de controle</th><th>Reference legale</th><th>Nature du constat</th></tr></thead><tbody>
 <tr><td>TVA collectee / deductible</td><td>Art. 256 et 271 CGI</td><td>Ecart entre TVA declaree et calculee</td></tr>
 <tr><td>Declarations fiscales</td><td>Art. 1649 quater B CGI</td><td>Completude des declarations (IS, IR, TVA)</td></tr>
-<tr><td>DAS-2 Honoraires</td><td>Art. 240 CGI</td><td>Declaration des honoraires > 1200 EUR/an</td></tr>
+<tr><td>DAS-2 Honoraires</td><td>Art. 240 CGI</td><td>Declaration des honoraires > 2400 EUR/an</td></tr>
 <tr><td>FEC</td><td>Art. L.47 A-I LPF</td><td>Presentation du fichier des ecritures comptables</td></tr>
 <tr><td>Facturation</td><td>Art. 289 CGI</td><td>Mentions obligatoires sur factures</td></tr>
 <tr><td>Conservation documents</td><td>Art. L.102 B LPF</td><td>Delai 6 ans fiscal / 10 ans comptable</td></tr>
 <tr><td>Avantages en nature</td><td>Art. 82 CGI</td><td>Evaluation et declaration correctes</td></tr>
-<tr><td>Credit impot formation</td><td>Art. 244 quater M CGI</td><td>Eligibilite et justificatifs</td></tr>
+<tr><td>Credit impot formation (EXPIRE 31/12/2024)</td><td>Art. 244 quater M CGI</td><td>Dispositif expire - ne plus appliquer</td></tr>
 <tr><td>CFE / CVAE</td><td>Art. 1447 CGI</td><td>Declarations et paiement</td></tr>
 <tr><td>Taxe sur les salaires</td><td>Art. 231 CGI</td><td>Assujettissement et calcul</td></tr>
 </tbody></table>
@@ -8299,7 +8295,7 @@ S<sub>CDC</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>cdc</sub>
 <tr><td>Image fidele du patrimoine</td><td>Art. L.123-14 Code de commerce</td><td>Bilan refletant la realite economique</td></tr>
 <tr><td>Continuite d exploitation</td><td>NEP 570</td><td>Aucun doute significatif</td></tr>
 <tr><td>Separation des exercices</td><td>Art. L.123-12 C.com / PCG 313-1</td><td>Cut-off correct</td></tr>
-<tr><td>Exhaustivite charges sociales</td><td>ISA 550 / NEP 550</td><td>Concordance BS / DSN / LDP</td></tr>
+<tr><td>Exhaustivite charges sociales</td><td>ISA 315 / ISA 500</td><td>Concordance BS / DSN / LDP</td></tr>
 <tr><td>Conventions reglementees</td><td>Art. L.225-38 C.com</td><td>Rapport special CAC</td></tr>
 <tr><td>Controle interne</td><td>NEP 315 / ISA 315</td><td>Documentation des procedures</td></tr>
 </tbody></table>
@@ -9117,41 +9113,94 @@ el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur cha
 /* === CONFORMITY SCORE === */
 function categToDomain(cat,ref){
 var c=(cat||"").toLowerCase();var r=(ref||"").toLowerCase();
-if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||r.indexOf("taxe")>=0)return"fiscal";
+/* URSSAF-specific: taxe apprentissage (CT L6241-1), formation pro are URSSAF even if "taxe" in name */
+if(c.indexOf("apprentissage")>=0||c.indexOf("formation_pro")>=0)return"urssaf";
+if(r.indexOf("code du travail")>=0&&r.indexOf("cgi")<0)return"urssaf";
+/* Fiscal domain: CGI, LPF, taxe sur salaires, TVA, impots */
+if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||c.indexOf("taxe_sur_salaires")>=0)return"fiscal";
+/* CDC domain: NEP, ISA, code de commerce, comptabilite */
 if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0)return"cdc";
 return"urssaf";}
-function _scoreOne(constats,nbDecl){
-var score=100;var details=[];var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;
-for(var i=0;i<constats.length;i++){var c=constats[i];var sev=(c.severite||"").toLowerCase();
-if(sev==="critique"){score-=15;nbCrit++;details.push({deduction:-15,raison:c.titre||"Anomalie critique",ref:c.reference_legale||""});}
-else if(sev==="haute"||sev==="high"){score-=10;nbHaut++;details.push({deduction:-10,raison:c.titre||"Anomalie haute",ref:c.reference_legale||""});}
-else if(sev==="moyenne"||sev==="medium"){score-=5;nbMoy++;details.push({deduction:-5,raison:c.titre||"Anomalie moyenne",ref:c.reference_legale||""});}
-else{score-=2;nbBas++;details.push({deduction:-2,raison:c.titre||"Anomalie basse",ref:c.reference_legale||""});}}
-if(nbCrit===0&&constats.length>0){score+=5;details.push({deduction:5,raison:"Bonus: aucun constat critique",ref:""});}
-if(nbDecl>=3){score+=3;details.push({deduction:3,raison:"Bonus: documentation suffisante ("+nbDecl+" sources)",ref:""});}
-else if(nbDecl<=1){if(score>80)score=80;details.push({deduction:0,raison:"Plafond 80% : documentation insuffisante",ref:""});}
+/*
+ * METHODOLOGIE DE SCORING v4.0 - Approche proportionnelle non-discretionnaire
+ *
+ * Principes fondateurs :
+ * 1. PROPORTIONNALITE : la deduction est proportionnelle a la gravite reglementaire
+ *    (basee sur les majorations legales : 40% manquement delibere, 10% retard, etc.)
+ * 2. OBJECTIVABILITE : chaque parametre est derive d'une reference legale explicite
+ * 3. REPRODUCTIBILITE : a constats identiques, score identique (pas de bonus subjectif)
+ * 4. NON-DISCRETIONNAIRE : aucun coefficient arbitraire
+ *
+ * Gravite reglementaire (Wk) - derivee des sanctions legales :
+ *   - Critique (Wk=4) : manquement delibere, sanction >= 40% (CSS L243-7-2, CGI 1729)
+ *   - Haute (Wk=3) : retard/omission significatif, sanction 10-25% (CSS L243-7-1)
+ *   - Moyenne (Wk=2) : ecart formel, sanction 5% (CSS L243-7-6 tolerance)
+ *   - Faible (Wk=1) : anomalie mineure, pas de sanction directe
+ *
+ * Formule par domaine :
+ *   S = max(0, 100 * (1 - Sigma(Wk) / Wmax))
+ *   ou Wmax = max(Sigma(Wk), 4*Npoints) avec Npoints = nb de points de controle
+ *   -> Garantit S in [0,100], converge vers 0 si beaucoup d anomalies
+ *
+ * Couverture documentaire (facteur continu) :
+ *   Fc = min(1, nbDecl / 3)  -> lineaire de 0 a 1, seuil a 3 documents
+ *   Score final = S * (0.5 + 0.5 * Fc)
+ *   -> Minimum = 50% du score brut (jamais de plafond arbitraire)
+ *
+ * Pas de bonus : seuls les constats negatifs impactent le score.
+ */
+var SEVERITY_WEIGHT={critique:4,haute:3,high:3,moyenne:2,medium:2,faible:1,low:1};
+var DOMAIN_CONTROL_POINTS={urssaf:10,fiscal:10,cdc:8};
+function _scoreOne(constats,nbDecl,domainKey){
+var details=[];var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;var totalW=0;
+var Npoints=DOMAIN_CONTROL_POINTS[domainKey]||10;
+for(var i=0;i<constats.length;i++){var c=constats[i];var sev=(c.severite||"faible").toLowerCase();
+var wk=SEVERITY_WEIGHT[sev]||1;totalW+=wk;
+if(sev==="critique"){nbCrit++;}
+else if(sev==="haute"||sev==="high"){nbHaut++;}
+else if(sev==="moyenne"||sev==="medium"){nbMoy++;}
+else{nbBas++;}
+details.push({deduction:-wk,raison:c.titre||("Constat "+sev),ref:c.reference_legale||"",severite:sev,poids:wk});}
+/* Wmax = max(totalW, 4*Npoints) — normalisation par la capacite de controle */
+var Wmax=Math.max(totalW,4*Npoints);
+var Sbrut=Math.max(0,Math.round(100*(1-totalW/Wmax)));
+/* Facteur couverture documentaire (continu, non-discretionnaire) */
+var Fc=Math.min(1,nbDecl/3);
+var score=Math.round(Sbrut*(0.5+0.5*Fc));
 score=Math.max(0,Math.min(100,score));
+if(Fc<1){details.push({deduction:0,raison:"Facteur couverture documentaire : Fc="+Fc.toFixed(2)+" ("+nbDecl+"/3 sources). Score ajuste de "+Sbrut+" a "+score,ref:"Methodologie NormaCheck v4.0",severite:"info",poids:0});}
 var grade="F";if(score>=90)grade="A";else if(score>=75)grade="B";else if(score>=60)grade="C";else if(score>=45)grade="D";else if(score>=30)grade="E";
-return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas};}
+return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas,totalW:totalW,Wmax:Wmax,Sbrut:Sbrut,Fc:Fc};}
 function calculateTripleScore(data){
 var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
 var urssafC=[],fiscalC=[],cdcC=[];
 for(var i=0;i<constats.length;i++){var c=constats[i];var dom=categToDomain(c.categorie,c.reference_legale);
 if(dom==="fiscal")fiscalC.push(c);else if(dom==="cdc")cdcC.push(c);else urssafC.push(c);}
-var su=_scoreOne(urssafC,nbDecl);var sf=_scoreOne(fiscalC,nbDecl);var sc=_scoreOne(cdcC,nbDecl);
-/* Bonus audit coverage - fetched async if available */
+var su=_scoreOne(urssafC,nbDecl,"urssaf");var sf=_scoreOne(fiscalC,nbDecl,"fiscal");var sc=_scoreOne(cdcC,nbDecl,"cdc");
 su.domaine="URSSAF";su.ref_legal="Code de la securite sociale (CSS)";su.organisme="URSSAF / Caisse Nationale";
 sf.domaine="DGFIP";sf.ref_legal="Code general des impots (CGI)";sf.organisme="Direction Generale des Finances Publiques";
 sc.domaine="Cour des comptes";sc.ref_legal="Code de commerce / Normes NEP-ISA";sc.organisme="Cour des comptes / CRC";
-var global=Math.round(su.score*0.40+sf.score*0.35+sc.score*0.25);
+/*
+ * Score global : moyenne arithmetique ponderee par le nombre de points de controle (Nk)
+ * W_urssaf = 10, W_fiscal = 10, W_cdc = 8 -> total = 28
+ * Poids = Nk / Somme(Nk) => URSSAF=10/28, DGFIP=10/28, CDC=8/28
+ * Justification : le poids de chaque domaine est proportionnel au nombre de
+ * points de controle legaux identifies (objectivable et reproductible).
+ * Aucun coefficient discretionnaire n est utilise.
+ */
+var Nu=DOMAIN_CONTROL_POINTS.urssaf,Nf=DOMAIN_CONTROL_POINTS.fiscal,Nc=DOMAIN_CONTROL_POINTS.cdc;
+var Nt=Nu+Nf+Nc;
+var wu=Nu/Nt,wf=Nf/Nt,wc=Nc/Nt;
+var global=Math.round(su.score*wu+sf.score*wf+sc.score*wc);
 var ggrade="F";if(global>=90)ggrade="A";else if(global>=75)ggrade="B";else if(global>=60)ggrade="C";else if(global>=45)ggrade="D";else if(global>=30)ggrade="E";
-return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length};}
+return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length,
+poids:{urssaf:wu,fiscal:wf,cdc:wc},methode:"Moyenne ponderee par nombre de points de controle (Nk/Somme_Nk)"};}
 function calculateConformityScore(data){
-var ts=calculateTripleScore(data);var g=ts.global;
+var ts=calculateTripleScore(data);var g=ts.global;var p=ts.poids;
 var allDetails=ts.urssaf.details.concat(ts.fiscal.details).concat(ts.cdc.details);
-var explication="Score global NormaCheck : "+g.score+"/100 ("+g.grade+"). ";
+var explication="Score global NormaCheck v4.0 : "+g.score+"/100 ("+g.grade+"). ";
 explication+="URSSAF: "+ts.urssaf.score+"/100 ("+ts.urssaf.grade+") | DGFIP: "+ts.fiscal.score+"/100 ("+ts.fiscal.grade+") | CDC: "+ts.cdc.score+"/100 ("+ts.cdc.grade+"). ";
-explication+="Formule: S = URSSAF*0.40 + DGFIP*0.35 + CDC*0.25.";
+explication+="Ponderation proportionnelle: URSSAF*"+(p.urssaf).toFixed(4)+" + DGFIP*"+(p.fiscal).toFixed(4)+" + CDC*"+(p.cdc).toFixed(4)+" (basee sur Nk/Somme_Nk).";
 return{score:g.score,grade:g.grade,explanation:explication,details:allDetails,
 nb_critiques:ts.urssaf.nb_critiques+ts.fiscal.nb_critiques+ts.cdc.nb_critiques,
 nb_hautes:ts.urssaf.nb_hautes+ts.fiscal.nb_hautes+ts.cdc.nb_hautes,
@@ -9160,29 +9209,33 @@ nb_basses:ts.urssaf.nb_basses+ts.fiscal.nb_basses+ts.cdc.nb_basses,
 tripleScore:ts};}
 function renderScoreDetails(){
 if(!analysisData)return;
-var ts=calculateTripleScore(analysisData);
+var ts=calculateTripleScore(analysisData);var p=ts.poids;
 function renderDomainDetail(elId,sc){
 var el=document.getElementById(elId);if(!el)return;
 var h="<h3>Resultat : "+sc.score+"/100 ("+sc.grade+") - "+sc.domaine+"</h3>";
-h+="<div style='margin:8px 0;font-size:.86em'><strong>Constats pris en compte :</strong> critiques="+sc.nb_critiques+" | hautes="+sc.nb_hautes+" | moyennes="+sc.nb_moyennes+" | faibles="+sc.nb_basses+"</div>";
-h+="<table><thead><tr><th>Points</th><th>Raison</th><th>Reference legale</th></tr></thead><tbody>";
+h+="<div style='margin:8px 0;font-size:.86em'><strong>Constats pris en compte :</strong> critiques="+sc.nb_critiques+" (Wk=4) | hautes="+sc.nb_hautes+" (Wk=3) | moyennes="+sc.nb_moyennes+" (Wk=2) | faibles="+sc.nb_basses+" (Wk=1)</div>";
+h+="<div style='margin:4px 0;font-size:.84em;color:var(--tx2)'>Somme poids Wk = "+sc.totalW+" | Wmax = "+sc.Wmax+" | Score brut = "+sc.Sbrut+" | Fc = "+sc.Fc.toFixed(2)+"</div>";
+h+="<table><thead><tr><th>Poids (Wk)</th><th>Severite</th><th>Constat</th><th>Reference legale</th></tr></thead><tbody>";
 for(var i=0;i<sc.details.length;i++){var d=sc.details[i];
-h+="<tr><td style='font-weight:700;color:"+(d.deduction>0?"var(--g)":"var(--r)")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td>"+d.raison+"</td><td style='font-size:.82em;color:var(--tx2)'>"+d.ref+"</td></tr>";}
+if(d.poids===0){h+="<tr><td style='color:var(--tx2)'>-</td><td>info</td><td colspan='2' style='font-size:.84em;color:var(--tx2)'>"+d.raison+"</td></tr>";}
+else{h+="<tr><td style='font-weight:700;color:var(--r)'>"+d.poids+"</td><td>"+(d.severite||"")+"</td><td>"+d.raison+"</td><td style='font-size:.82em;color:var(--tx2)'>"+d.ref+"</td></tr>";}}
 h+="</tbody></table>";
-h+="<div style='margin-top:10px;padding:10px;background:var(--bg);border-radius:8px;font-family:monospace;font-size:.84em'>S<sub>"+sc.domaine+"</sub> = 100";
-for(var i=0;i<sc.details.length;i++){var d=sc.details[i];h+=(d.deduction>=0?" + ":" - ")+Math.abs(d.deduction);}
-h+=" = <strong>"+sc.score+"</strong></div>";
+h+="<div style='margin-top:10px;padding:10px;background:var(--bg);border-radius:8px;font-family:monospace;font-size:.84em'>";
+h+="S<sub>"+sc.domaine+"</sub> = max(0, 100 &times; (1 - &Sigma;Wk/Wmax)) &times; (0.5 + 0.5 &times; Fc)<br>";
+h+="= max(0, 100 &times; (1 - "+sc.totalW+"/"+sc.Wmax+")) &times; (0.5 + 0.5 &times; "+sc.Fc.toFixed(2)+")<br>";
+h+="= "+sc.Sbrut+" &times; "+(0.5+0.5*sc.Fc).toFixed(2)+" = <strong>"+sc.score+"</strong></div>";
 el.innerHTML=h;}
 renderDomainDetail("score-detail-urssaf",ts.urssaf);
 renderDomainDetail("score-detail-fiscal",ts.fiscal);
 renderDomainDetail("score-detail-cdc",ts.cdc);
 var gel=document.getElementById("score-detail-global");
 if(gel){var gh="<div style='font-size:.9em;line-height:1.8'>";
-gh+="<strong>Calcul :</strong> S<sub>global</sub> = ("+ts.urssaf.score+" x 0.40) + ("+ts.fiscal.score+" x 0.35) + ("+ts.cdc.score+" x 0.25) = <strong>"+ts.global.score+"/100 ("+ts.global.grade+")</strong></div>";
+gh+="<strong>Methode :</strong> Moyenne ponderee par nombre de points de controle (Nk/&Sigma;Nk) - non discretionnaire<br>";
+gh+="<strong>Calcul :</strong> S<sub>global</sub> = ("+ts.urssaf.score+" &times; "+p.urssaf.toFixed(4)+") + ("+ts.fiscal.score+" &times; "+p.fiscal.toFixed(4)+") + ("+ts.cdc.score+" &times; "+p.cdc.toFixed(4)+") = <strong>"+ts.global.score+"/100 ("+ts.global.grade+")</strong></div>";
 gh+="<div class='g3' style='margin-top:12px'>";
-gh+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF (x0.40)</div></div>";
-gh+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP (x0.35)</div></div>";
-gh+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC (x0.25)</div></div>";
+gh+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF (N="+DOMAIN_CONTROL_POINTS.urssaf+", w="+(p.urssaf*100).toFixed(1)+"%)</div></div>";
+gh+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP (N="+DOMAIN_CONTROL_POINTS.fiscal+", w="+(p.fiscal*100).toFixed(1)+"%)</div></div>";
+gh+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC (N="+DOMAIN_CONTROL_POINTS.cdc+", w="+(p.cdc*100).toFixed(1)+"%)</div></div>";
 gh+="</div>";gel.innerHTML=gh;}}
 
 /* === PDF EXPORT === */
@@ -9212,7 +9265,8 @@ html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:
 html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #a855f7;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>DGFIP / CGI</div><div style='font-size:2em;font-weight:800;color:#7c3aed'>"+ts.fiscal.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.fiscal.score>=75?"#16a34a":ts.fiscal.score>=45?"#d97706":"#ef4444")+"'>"+ts.fiscal.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.fiscal.nb_critiques+" critique(s) | "+ts.fiscal.details.length+" constat(s)</div></div>";
 html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #0d9488;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>COUR DES COMPTES</div><div style='font-size:2em;font-weight:800;color:#0d9488'>"+ts.cdc.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.cdc.score>=75?"#16a34a":ts.cdc.score>=45?"#d97706":"#ef4444")+"'>"+ts.cdc.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.cdc.nb_critiques+" critique(s) | "+ts.cdc.details.length+" constat(s)</div></div>";
 html+="</div>";
-html+="<div style='text-align:center;padding:10px;background:#f8fafc;border-radius:8px;margin:10px 0;font-size:.85em'><strong>Ponderation :</strong> S<sub>global</sub> = URSSAF("+ts.urssaf.score+") x 0.40 + DGFIP("+ts.fiscal.score+") x 0.35 + CDC("+ts.cdc.score+") x 0.25 = <strong>"+ts.global.score+"</strong></div>";
+var pp=ts.poids||{urssaf:10/28,fiscal:10/28,cdc:8/28};
+html+="<div style='text-align:center;padding:10px;background:#f8fafc;border-radius:8px;margin:10px 0;font-size:.85em'><strong>Ponderation proportionnelle (Nk/&Sigma;Nk) :</strong> S<sub>global</sub> = URSSAF("+ts.urssaf.score+") &times; "+(pp.urssaf).toFixed(4)+" + DGFIP("+ts.fiscal.score+") &times; "+(pp.fiscal).toFixed(4)+" + CDC("+ts.cdc.score+") &times; "+(pp.cdc).toFixed(4)+" = <strong>"+ts.global.score+"</strong><br><span style='color:#64748b;font-size:.9em'>Methode v4.0 : poids derives du nombre de points de controle legaux par domaine (non discretionnaire)</span></div>";
 if(socialH){html+="<h2>Partie sociale - Constats URSSAF</h2><p style='color:#64748b'>Points de controle relevant de la legislation sociale (Code de la securite sociale, Code du travail)</p>"+socialH;}
 if(fiscalH){html+="<h2>Partie fiscale - Constats DGFIP</h2><p style='color:#64748b'>Points de controle relevant de la legislation fiscale (Code general des impots)</p>"+fiscalH;}
 if(!socialH&&!fiscalH){html+="<h2>Constats</h2>";for(var i=0;i<constats.length;i++){var c=constats[i];html+="<div style='border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0'><strong>"+c.titre+"</strong><p>"+c.description+"</p><p>Impact: "+Math.abs(c.montant_impact||0).toFixed(2)+" EUR</p></div>";}}

@@ -30,7 +30,7 @@ PLAFOND_8_PASS = PASS_ANNUEL * 8     # 384 480 EUR - retraite T2
 
 # ===================================================================
 # SMIC 2026
-# Ref: Decret n° 2025-xxx, CSS art. D241-7
+# Ref: Art. L3231-2 Code du travail, Decret n° 2025-xxx
 # ===================================================================
 
 SMIC_HORAIRE_BRUT = Decimal("12.02")
@@ -147,8 +147,8 @@ TAUX_COTISATIONS_2026 = {
     ContributionType.MALADIE: {
         "patronal": Decimal("0.13"),              # 13%
         "salarial": Decimal("0.0"),               # 0% (supprime depuis 01/2018)
-        "patronal_reduit": Decimal("0.07"),       # 7% si remuneration <= 2.5 SMIC
-        "seuil_reduction_smic": Decimal("2.5"),
+        "patronal_reduit": Decimal("0.07"),       # 7% si remuneration <= 2.25 SMIC
+        "seuil_reduction_smic": Decimal("2.25"),  # LFSS 2025 art. 17
         "assiette": "totalite",                   # Totalite du salaire brut
         "ref": "CSS art. L241-1, D242-3",
     },
@@ -176,8 +176,8 @@ TAUX_COTISATIONS_2026 = {
 
     ContributionType.ALLOCATIONS_FAMILIALES: {
         "patronal": Decimal("0.0525"),            # 5.25%
-        "patronal_reduit": Decimal("0.0325"),     # 3.25% si <= 3.5 SMIC
-        "seuil_reduction_smic": Decimal("3.5"),
+        "patronal_reduit": Decimal("0.0325"),     # 3.25% si <= 3.3 SMIC
+        "seuil_reduction_smic": Decimal("3.3"),   # LFSS 2025 art. 17
         "assiette": "totalite",
         "ref": "CSS art. L241-6, D241-3-1",
     },

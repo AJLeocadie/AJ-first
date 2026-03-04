@@ -162,7 +162,7 @@ class PatternAnalyzer(BaseAnalyzer):
                     "correctement transmises pour les mois concernes."
                 ),
                 detecte_par=self.nom,
-                reference_legale="Art. R243-14 CSS - Obligation de declaration mensuelle",
+                reference_legale="Art. L133-5-3 CSS - Obligation de declaration mensuelle (DSN)",
             ))
 
         return findings
