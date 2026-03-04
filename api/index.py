@@ -40,6 +40,7 @@ from urssaf_analyzer.veille.legifrance_client import get_legislation_par_annee, 
 from urssaf_analyzer.comptabilite.plan_comptable import PlanComptable
 from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, TypeJournal
 from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
+from urssaf_analyzer.security.proof_chain import ProofChain, ScoreProofRecord, ConstantsVersioner
 
 from auth import (
     create_user, authenticate, get_user, generate_token,
@@ -52,6 +53,9 @@ from auth import (
 # --- Detection environnement ---
 _IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
 _DATA_DIR = Path(os.getenv("NORMACHECK_DATA_DIR", "/data/normacheck")) if _IS_OVH else Path("/tmp/normacheck_data")
+_PROOF_DIR = _DATA_DIR / "proof"
+_PROOF_DIR.mkdir(parents=True, exist_ok=True)
+_proof_chain = ProofChain(_PROOF_DIR / "score_proof_chain.jsonl")
 _MAX_FILES = int(os.getenv("NORMACHECK_MAX_FILES", "50" if _IS_OVH else "20"))
 _MAX_UPLOAD_MB = int(os.getenv("NORMACHECK_MAX_UPLOAD_MB", "2000" if _IS_OVH else "500"))
 
@@ -519,6 +523,118 @@ async def scores_methodologie():
             "v3.8": "Version initiale triple scoring avec coefficients fixes (0.40/0.35/0.25) et deductions arbitraires (-15/-10/-5/-2)",
         },
     }
+
+
+# ==============================
+# CHAINE DE PREUVE NUMERIQUE
+# ==============================
+
+@app.post("/api/proof/seal-score")
+async def seal_score(request: Request):
+    """Scelle un score triple dans la chaine de preuve (appele par le frontend apres calcul JS).
+
+    Permet de tracer le score calcule cote client avec tous ses parametres,
+    formant un enregistrement probant reconstitutable a posteriori.
+    Conforme art. 1366 C.civ (integrite), reglement eIDAS (horodatage).
+    """
+    user = get_optional_user(request)
+    body = await request.json()
+    session_id = body.get("session_id", "")
+    scores = body.get("scores", {})
+    constats = body.get("constats", [])
+    nb_documents = body.get("nb_documents", 0)
+
+    entry = _proof_chain.append("score_triple_scelle", {
+        "session_id": session_id,
+        "operateur": user["email"] if user else "anonyme",
+        "version_moteur": "4.0",
+        "nb_documents": nb_documents,
+        "nb_constats": len(constats),
+        "scores": {
+            "urssaf": {"score": scores.get("urssaf", {}).get("score", 0),
+                       "grade": scores.get("urssaf", {}).get("grade", ""),
+                       "totalW": scores.get("urssaf", {}).get("totalW", 0),
+                       "Wmax": scores.get("urssaf", {}).get("Wmax", 0),
+                       "Fc": scores.get("urssaf", {}).get("Fc", 0)},
+            "fiscal": {"score": scores.get("fiscal", {}).get("score", 0),
+                       "grade": scores.get("fiscal", {}).get("grade", ""),
+                       "totalW": scores.get("fiscal", {}).get("totalW", 0),
+                       "Wmax": scores.get("fiscal", {}).get("Wmax", 0),
+                       "Fc": scores.get("fiscal", {}).get("Fc", 0)},
+            "cdc": {"score": scores.get("cdc", {}).get("score", 0),
+                    "grade": scores.get("cdc", {}).get("grade", ""),
+                    "totalW": scores.get("cdc", {}).get("totalW", 0),
+                    "Wmax": scores.get("cdc", {}).get("Wmax", 0),
+                    "Fc": scores.get("cdc", {}).get("Fc", 0)},
+            "global": scores.get("global", {}),
+        },
+        "formule": "S = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+        "poids_severite": {"critique": 4, "haute": 3, "moyenne": 2, "faible": 1},
+    })
+
+    return {"status": "ok", "seq": entry["seq"], "hash": entry["hash"],
+            "timestamp": entry["timestamp"]}
+
+
+@app.get("/api/proof/verify")
+async def verify_proof_chain():
+    """Verifie l'integrite de la chaine de preuve.
+
+    Retourne si la chaine est intacte ou si une alteration a ete detectee.
+    Conforme NF Z42-013 (verification d'integrite archivage probant).
+    """
+    result = _proof_chain.verify()
+    return result
+
+
+@app.get("/api/proof/chain")
+async def get_proof_chain(
+    event_type: str = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Consulte la chaine de preuve (lecture seule).
+
+    Chaque entree est chainee cryptographiquement (hash SHA-256).
+    Toute modification d'une entree passee invalide la chaine entiere.
+    """
+    entries = _proof_chain.get_entries(event_type=event_type, limit=limit)
+    verification = _proof_chain.verify()
+    return {
+        "entries": entries,
+        "total": verification["entries"],
+        "chain_valid": verification["valid"],
+        "verification_detail": verification["detail"],
+    }
+
+
+@app.get("/api/proof/entry/{seq}")
+async def get_proof_entry(seq: int):
+    """Recupere une entree specifique de la chaine de preuve par sequence."""
+    entry = _proof_chain.get_entry_by_seq(seq)
+    if not entry:
+        raise HTTPException(404, "Entree non trouvee")
+    return entry
+
+
+@app.post("/api/proof/snapshot-constants")
+async def snapshot_constants(request: Request):
+    """Scelle un snapshot des constantes reglementaires dans la chaine de preuve.
+
+    Permet de reconstituer les taux/seuils applicables a une date donnee.
+    Indispensable pour la reproductibilite des scores (art. L102 B LPF).
+    """
+    user = get_optional_user(request)
+    snapshot = ConstantsVersioner.snapshot_constants()
+    legal_refs = ConstantsVersioner.snapshot_legal_references()
+
+    entry = _proof_chain.append("snapshot_constantes", {
+        "operateur": user["email"] if user else "systeme",
+        "constantes": snapshot,
+        "references_legales": legal_refs,
+    })
+
+    return {"status": "ok", "seq": entry["seq"], "hash": entry["hash"],
+            "snapshot_hash": snapshot["snapshot_hash"]}
 
 
 # ==============================
@@ -1715,7 +1831,7 @@ async def analyser_documents(
         nb_non_reconnus = sum(1 for fi in fichiers_info if fi.get("statut") == "non_reconnu")
         nb_erreurs = sum(1 for fi in fichiers_info if fi.get("statut") in ("format_non_supporte", "erreur_analyse"))
 
-        return {
+        response_data = {
             "synthese": {
                 "nb_constats": len(findings),
                 "nb_anomalies": result.nb_anomalies,
@@ -1751,6 +1867,38 @@ async def analyser_documents(
                 "log": _integration_log,
             },
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
+
+        response_data["session_id"] = result.session_id
+
+        # --- Scellement dans la chaine de preuve ---
+        try:
+            doc_list = [{"nom_fichier": fi.get("nom", ""), "sha256": fi.get("sha256", ""),
+                         "taille": fi.get("taille", 0)} for fi in fichiers_info]
+            proof_record = ScoreProofRecord.create(
+                session_id=result.session_id,
+                documents=doc_list,
+                constats=constats,
+                scores={},  # Score triple calcule cote client — sera scelle via /api/proof/seal-score
+                version_moteur="4.0",
+                version_constantes=hashlib.sha256(
+                    open(Path(__file__).parent.parent / "urssaf_analyzer" / "config" / "constants.py", "rb").read()
+                ).hexdigest()[:16],
+                operateur=user_email,
+            )
+            _proof_chain.append("analyse_complete", {
+                "session_id": result.session_id,
+                "nb_documents": len(result.documents_analyses),
+                "nb_constats": len(findings),
+                "score_risque_global": result.score_risque_global,
+                "impact_financier_total": float(result.impact_total),
+                "documents_hashes": [d["sha256"] for d in doc_list if d["sha256"]],
+                "operateur": user_email,
+                "proof_record_hash": proof_record["record_hash"],
+            })
+        except Exception as e:
+            logger.warning("Erreur scellement preuve: %s", e)
+
+        return response_data
 
 
 # ==============================
@@ -9240,9 +9388,20 @@ nb_hautes:ts.urssaf.nb_hautes+ts.fiscal.nb_hautes+ts.cdc.nb_hautes,
 nb_moyennes:ts.urssaf.nb_moyennes+ts.fiscal.nb_moyennes+ts.cdc.nb_moyennes,
 nb_basses:ts.urssaf.nb_basses+ts.fiscal.nb_basses+ts.cdc.nb_basses,
 tripleScore:ts};}
+/* --- Scellement du score dans la chaine de preuve --- */
+function sealScoreProof(data,ts){
+try{var sid=data.session_id||"";
+fetch("/api/proof/seal-score",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sid,scores:{urssaf:ts.urssaf,fiscal:ts.fiscal,cdc:ts.cdc,global:ts.global},
+constats:data.constats||[],nb_documents:(data.declarations||[]).length}),
+credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+if(d.status==="ok")console.info("Score scelle dans la chaine de preuve: seq="+d.seq+", hash="+d.hash);
+}).catch(function(e){console.warn("Erreur scellement preuve:",e);});}catch(e){}}
 function renderScoreDetails(){
 if(!analysisData)return;
 var ts=calculateTripleScore(analysisData);var p=ts.poids;
+/* Sceller le score dans la chaine de preuve a chaque affichage */
+sealScoreProof(analysisData,ts);
 function renderDomainDetail(elId,sc){
 var el=document.getElementById(elId);if(!el)return;
 var h="<h3>Resultat : "+sc.score+"/100 ("+sc.grade+") - "+sc.domaine+"</h3>";
