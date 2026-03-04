@@ -143,7 +143,7 @@ Finding
 | `config/` | Constantes reglementaires 2026 (PASS, SMIC, taux), settings |
 | `models/` | Modeles de donnees (Declaration, Finding, Employe, Cotisation) |
 | `parsers/` | Extraction de donnees (PDF, CSV, XML, DSN) |
-| `security/` | Chaine de preuve, chiffrement AES-256, audit logger, stockage securise |
+| `security/` | Chaine de preuve, chiffrement AES-256, audit logger, stockage securise, alertes securite (PSSI §6.3), horodatage RFC 3161 |
 | `rules/` | Regles de contribution, regimes speciaux, travailleurs detaches |
 | `regimes/` | Regimes specifiques (independants, GUSO/AGESSA) |
 | `compliance/` | Verification de completude documentaire |
@@ -225,6 +225,33 @@ S_domaine = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)
 - **Audit logger :** JSON Lines append-only (`audit_logger.py`)
 - **Operations tracees :** import_document, analyse, generation_rapport, chiffrement, erreurs
 - **Integrite :** Hash SHA-256 des fichiers importes
+
+### 4.5 Systeme d'alertes de securite (PSSI §6.3)
+
+Implementation : `alert_manager.py`
+
+| Composant | Responsabilite |
+|-----------|---------------|
+| `AlertManager` | Detection centralisee, persistance, notification |
+| `LoginTracker` | Detection brute force (fenetre glissante par IP/email) |
+| `VolumeTracker` | Detection exfiltration/injection (compteurs horaires) |
+| Callback `on_alert` | Hook pour notification externe (webhook, email, SIEM) |
+
+**4 types d'alertes implementes :**
+- Rupture chaine de preuve (CRITIQUE)
+- Tentatives de connexion excessives (HAUTE)
+- Erreurs de dechiffrement repetees (HAUTE)
+- Volumes anormaux d'operations (MOYENNE)
+
+### 4.6 Horodatage certifie RFC 3161
+
+Implementation : `timestamp_authority.py`
+
+- **Client RFC 3161 :** Construction de requetes TSA (ASN.1/DER), interrogation de TSA publics
+- **Fallback :** Horloge systeme UTC si TSA injoignable (annote "non certifie")
+- **Integration :** Chaque entree de la chaine de preuve peut recevoir un jeton TSA
+- **Verification :** Hash SHA-256 + verification locale (signature TSA via `openssl ts`)
+- **Conformite :** eIDAS art. 41-42, RFC 3161, RFC 5816
 
 ---
 

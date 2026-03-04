@@ -56,10 +56,19 @@ class ProofChain:
 
     GENESIS_HASH = "0" * 64  # Hash initial de la chaine
 
-    def __init__(self, chain_path: Path):
+    def __init__(self, chain_path: Path, tsa_enabled: bool = False):
         self.chain_path = chain_path
         self.lock_path = chain_path.with_suffix(".lock")
+        self.tsa_enabled = tsa_enabled
+        self._tsa = None
         chain_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if tsa_enabled:
+            try:
+                from urssaf_analyzer.security.timestamp_authority import TimestampAuthority
+                self._tsa = TimestampAuthority(enabled=True)
+            except ImportError:
+                pass
 
     def _compute_hash(self, entry: dict) -> str:
         """Calcule le hash d'une entree (sans le champ 'hash' lui-meme)."""
@@ -107,6 +116,15 @@ class ProofChain:
                     "prev_hash": prev_hash,
                 }
                 entry["hash"] = self._compute_hash(entry)
+
+                # Horodatage certifie RFC 3161 si TSA active
+                # Le jeton scelle le hash de l'entree, pas l'inverse
+                if self._tsa:
+                    try:
+                        token = self._tsa.timestamp_hash(entry["hash"])
+                        entry["tsa_token"] = token.to_dict()
+                    except Exception:
+                        pass  # Fallback: pas de jeton TSA
 
                 line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
                 with open(self.chain_path, "a", encoding="utf-8") as f:

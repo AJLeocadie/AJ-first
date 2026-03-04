@@ -1,6 +1,14 @@
-"""Moteur d'analyse coordonnant tous les analyseurs."""
+"""Moteur d'analyse coordonnant tous les analyseurs.
+
+Inclut la deduplication inter-analyzers (SPEC §3.3) :
+plusieurs analyseurs peuvent detecter le meme probleme sous des angles differents.
+La deduplication garantit qu'un meme constat n'est pas compte deux fois
+dans le scoring, evitant de penaliser injustement l'entite auditee.
+"""
 
 import logging
+import re
+import unicodedata
 from decimal import Decimal
 
 from urssaf_analyzer.analyzers.anomaly_detector import AnomalyDetector
@@ -12,6 +20,38 @@ from urssaf_analyzer.models.documents import Declaration, Finding, AnalysisResul
 logger = logging.getLogger("urssaf_analyzer.engine")
 
 
+def _normalize_titre(titre: str) -> str:
+    """Normalise un titre de finding pour la deduplication.
+
+    - Supprime accents et diacritiques
+    - Minuscules
+    - Supprime ponctuation et espaces multiples
+    - Supprime les suffixes numeriques variables (montants, pourcentages)
+    """
+    nfkd = unicodedata.normalize("NFKD", titre)
+    sans_accents = "".join(c for c in nfkd if not unicodedata.combining(c))
+    normalized = sans_accents.lower()
+    # Supprimer les montants et pourcentages (ex: "1234.56 EUR", "12.5%")
+    normalized = re.sub(r"\d+[.,]?\d*\s*(%|eur|euros?)\b", "", normalized)
+    # Supprimer les nombres isoles
+    normalized = re.sub(r"\b\d+[.,]?\d*\b", "", normalized)
+    # Supprimer la ponctuation
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    # Espaces multiples -> simple
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _dedup_key(finding: Finding) -> str:
+    """Genere une cle de deduplication pour un finding.
+
+    Deux findings sont consideres comme doublons s'ils partagent
+    le meme titre normalise et la meme categorie.
+    """
+    titre_norm = _normalize_titre(finding.titre)
+    return f"{titre_norm}|{finding.categorie.value}"
+
+
 class AnalyzerEngine:
     """Coordonne l'execution de tous les analyseurs et agregue les resultats."""
 
@@ -21,9 +61,11 @@ class AnalyzerEngine:
             ConsistencyChecker(),
             PatternAnalyzer(),
         ]
+        self._pre_dedup_count = 0
+        self._post_dedup_count = 0
 
     def analyser(self, declarations: list[Declaration]) -> list[Finding]:
-        """Execute tous les analyseurs et retourne les findings agrges."""
+        """Execute tous les analyseurs et retourne les findings dedupliques."""
         all_findings: list[Finding] = []
 
         for analyzer in self.analyzers:
@@ -49,6 +91,19 @@ class AnalyzerEngine:
         # Constats structurels : document unique, employeur manquant
         all_findings.extend(self._constats_structurels(declarations))
 
+        # Deduplication inter-analyzers (SPEC §3.3)
+        self._pre_dedup_count = len(all_findings)
+        all_findings = self._deduplicate(all_findings)
+        self._post_dedup_count = len(all_findings)
+
+        if self._pre_dedup_count != self._post_dedup_count:
+            logger.info(
+                "Deduplication : %d -> %d constats (%d doublons supprimes)",
+                self._pre_dedup_count,
+                self._post_dedup_count,
+                self._pre_dedup_count - self._post_dedup_count,
+            )
+
         # Trier par severite puis par score de risque
         poids_severite = {
             Severity.CRITIQUE: 0,
@@ -59,6 +114,54 @@ class AnalyzerEngine:
         all_findings.sort(key=lambda f: (poids_severite.get(f.severite, 9), -f.score_risque))
 
         return all_findings
+
+    @staticmethod
+    def _deduplicate(findings: list[Finding]) -> list[Finding]:
+        """Deduplique les findings en conservant le plus severe.
+
+        Algorithme :
+        1. Pour chaque finding, calculer une cle (titre_normalise, categorie)
+        2. Si deux findings partagent la meme cle, garder celui de severite
+           la plus haute (CRITIQUE > HAUTE > MOYENNE > FAIBLE)
+        3. A severite egale, garder celui avec le score_risque le plus eleve
+        4. Fusionner les detecte_par pour tracer tous les analyseurs source
+        """
+        severity_rank = {
+            Severity.CRITIQUE: 4,
+            Severity.HAUTE: 3,
+            Severity.MOYENNE: 2,
+            Severity.FAIBLE: 1,
+        }
+
+        best_by_key: dict[str, Finding] = {}
+        sources_by_key: dict[str, set[str]] = {}
+
+        for f in findings:
+            key = _dedup_key(f)
+            f_rank = severity_rank.get(f.severite, 0)
+
+            if key not in best_by_key:
+                best_by_key[key] = f
+                sources_by_key[key] = {f.detecte_par}
+            else:
+                existing = best_by_key[key]
+                existing_rank = severity_rank.get(existing.severite, 0)
+                sources_by_key[key].add(f.detecte_par)
+
+                if f_rank > existing_rank or (
+                    f_rank == existing_rank and f.score_risque > existing.score_risque
+                ):
+                    best_by_key[key] = f
+
+        # Annoter les findings retenus avec tous les analyseurs source
+        result = []
+        for key, f in best_by_key.items():
+            sources = sources_by_key[key]
+            if len(sources) > 1:
+                f.detecte_par = " + ".join(sorted(sources))
+            result.append(f)
+
+        return result
 
     def _constats_structurels(
         self, declarations: list[Declaration],

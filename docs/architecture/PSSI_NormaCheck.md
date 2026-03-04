@@ -206,14 +206,25 @@ Implementation : `audit_logger.py` (JSON Lines append-only)
 | Logs applicatifs | 1 an | ISO 27001 A.12.4 |
 | Logs d'acces | 1 an | LCEN art. 6-II |
 
-### 6.3 Alertes (a mettre en oeuvre)
+### 6.3 Alertes de securite
 
-| Alerte | Condition | Severite |
-|--------|----------|---------|
-| Rupture chaine de preuve | `verify()` retourne `valid: false` | CRITIQUE |
-| Tentatives d'acces echouees | > 5 en 15 minutes par IP | HAUTE |
-| Erreur de dechiffrement | Echec AES-GCM (tag invalide) | HAUTE |
-| Volume anormal | > 100 analyses / heure | MOYENNE |
+Implementation : `alert_manager.py` — module centralise de detection et notification.
+
+| Alerte | Condition | Severite | Implementation |
+|--------|----------|---------|----------------|
+| Rupture chaine de preuve | `verify()` retourne `valid: false` | CRITIQUE | `AlertManager.check_proof_chain()` |
+| Tentatives d'acces echouees | > 5 en 5 minutes par IP/email | HAUTE | `AlertManager.on_login_failure()` via `LoginTracker` |
+| Erreur de dechiffrement | > 3 echecs en 10 minutes par utilisateur | HAUTE | `AlertManager.on_decryption_error()` |
+| Volume anormal | > 100 uploads/h, > 200 downloads/h, > 50 analyses/h | MOYENNE | `AlertManager.on_operation()` via `VolumeTracker` |
+
+**Architecture du systeme d'alertes :**
+
+- **Persistance** : journal JSON Lines dedie (`alerts.jsonl`), distinct du journal d'audit
+- **Notification** : callback configurable (`on_alert`) pour integration webhook/email
+- **Detection** : sous-systemes specialises thread-safe (`LoginTracker`, `VolumeTracker`)
+- **Consultation** : `get_alerts()` avec filtrage par type et severite
+- **Comptage** : `count_alerts()` avec fenetre temporelle configurable
+- **Tests** : 21 tests unitaires couvrant les 4 types d'alertes (PSSI §6.3)
 
 ---
 
@@ -387,6 +398,7 @@ Une AIPD est recommandee si NormaCheck est utilise pour des decisions affectant 
 | Version | Date | Modification | Auteur |
 |---------|------|-------------|--------|
 | 1.0 | 2026-03-04 | Creation initiale | RSSI |
+| 1.1 | 2026-03-04 | Implementation alertes §6.3, horodatage RFC 3161, deduplication §3.3 | Dev |
 
 ### 12.2 Revisions planifiees
 
@@ -413,7 +425,7 @@ La PSSI est approuvee par :
 | A.8.2 | Classification des informations | CONFORME (section 2) |
 | A.9.1 | Controle d'acces | CONFORME (section 3) |
 | A.10.1 | Chiffrement | CONFORME (section 4) |
-| A.12.4 | Journalisation | PARTIEL (section 6, alertes a implementer) |
+| A.12.4 | Journalisation | CONFORME (section 6, alertes implementees dans alert_manager.py) |
 | A.14.2 | Developpement securise | CONFORME (section 7) |
 | A.16.1 | Gestion des incidents | CONFORME (section 9) |
 | A.17.1 | Continuite d'activite | PARTIEL (section 10, tests a documenter) |

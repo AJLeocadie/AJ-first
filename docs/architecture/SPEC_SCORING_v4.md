@@ -52,9 +52,23 @@ Chaque constat possede :
 
 ### 3.3 Deduplication des constats
 
-**Regle :** Si deux analyseurs detectent le meme probleme (meme titre, meme categorie, meme severite), le constat n'est compte qu'une seule fois dans le calcul du score. L'identifiant de deduplication est le triplet `(titre_normalise, categorie, severite)`.
+**Regle :** Si plusieurs analyseurs detectent le meme probleme, le constat n'est compte qu'une seule fois dans le calcul du score. L'identifiant de deduplication est le couple `(titre_normalise, categorie)`.
 
-**Justification :** Eviter le double comptage qui penaliserait artificiellement l'entite auditee. Un meme ecart ne peut etre sanctionne qu'une fois (principe non bis in idem).
+**Normalisation du titre :**
+- Suppression des accents et diacritiques (NFD → retrait combining marks)
+- Conversion en minuscules
+- Suppression des montants et pourcentages numeriques (ex: "1234.56 EUR", "12.5%")
+- Suppression des nombres isoles
+- Suppression de la ponctuation et reduction des espaces multiples
+
+**Resolution des doublons :**
+- Entre deux doublons, le constat le plus severe est conserve (CRITIQUE > HAUTE > MOYENNE > FAIBLE)
+- A severite egale, le score_risque le plus eleve est retenu
+- Le champ `detecte_par` fusionne les noms de tous les analyseurs source (ex: "AnomalyDetector + ConsistencyChecker")
+
+**Implementation :** `analyzer_engine.py` — methode `AnalyzerEngine._deduplicate()`, fonctions `_normalize_titre()` et `_dedup_key()`.
+
+**Justification :** Eviter le double comptage qui penaliserait artificiellement l'entite auditee. Un meme ecart ne peut etre sanctionne qu'une fois (principe non bis in idem). La conservation du constat le plus severe assure que le score n'est pas artificiellement optimiste non plus.
 
 ---
 
@@ -344,4 +358,4 @@ Toute modification des constantes produit un nouveau hash, permettant de retrouv
 
 3. **Scoring client-side :** Le calcul du score s'execute dans le navigateur client (JavaScript). Le proof record scelle cote serveur contient tous les parametres necessaires a la reconstitution independante du score. En cas de contestation, le score est recalculable a partir du proof record.
 
-4. **Deduplication :** Le systeme ne garantit pas actuellement la deduplication parfaite des constats identiques detectes par plusieurs analyseurs. Ce point est identifie comme amelioration a implémenter (cf. section 3.3).
+4. **Deduplication :** Le systeme implemente une deduplication inter-analyzers basee sur la normalisation des titres (suppression accents, montants, ponctuation) et la categorie du constat (cf. section 3.3). En cas de doublon, le constat le plus severe est conserve et les sources sont fusionnees. La couverture de deduplication est testee pour les scenarios a 2 et 3 analyseurs, incluant les variantes avec accents, montants et pourcentages variables.
