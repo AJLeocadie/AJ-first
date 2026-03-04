@@ -3221,51 +3221,240 @@ async def sim_temps_partiel(
     return res
 
 
-# --- Simulation : Convention collective ---
+# --- Simulation : Convention collective (legal vs conventionnel) ---
 @app.get("/api/simulation/ccn")
 async def sim_ccn(
-    ccn: str = Query("syntec"),
-    brut_mensuel: float = Query(3000),
-    est_cadre: bool = Query(False),
-    effectif: int = Query(10),
+    ccn: str = Query("", description="Code CCN (syntec, metallurgie...) ou numero IDCC (1486, 3248...)"),
+    brut_mensuel: float = Query(3000, description="Salaire brut mensuel du salarie (EUR)"),
+    est_cadre: bool = Query(False, description="Le salarie est-il cadre ?"),
+    effectif: int = Query(10, description="Effectif total de l entreprise"),
 ):
+    """Simulation des obligations conventionnelles vs legales.
+
+    Compare les minimums legaux (Code du travail, ANI) avec les obligations
+    specifiques de la convention collective applicable. Utilise la base IDCC
+    de 60+ conventions couvrant ~90% des salaries.
+    """
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    from urssaf_analyzer.config.idcc_database import (
+        IDCC_DATABASE, get_ccn_par_idcc, get_prevoyance_par_idcc, rechercher_idcc,
+    )
+
     calc = ContributionRules(effectif_entreprise=effectif)
-    prevoyance = calc.get_prevoyance_ccn(ccn, est_cadre=est_cadre)
     bulletin = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
 
-    # Ajouter le cout prevoyance CCN
-    taux_prev = Decimal(str(prevoyance["taux_prevoyance_patronal"]))
-    cout_prev = round(float(Decimal(str(brut_mensuel)) * taux_prev), 2)
+    # Chercher la CCN : par code interne, par IDCC, ou par recherche texte
+    ccn_data = None
+    idcc = ""
+    if ccn:
+        # 1. Par IDCC numerique
+        ccn_data = get_ccn_par_idcc(ccn)
+        if ccn_data:
+            idcc = ccn.zfill(4)
+        else:
+            # 2. Par code interne (syntec, metallurgie...)
+            prevoyance = calc.get_prevoyance_ccn(ccn, est_cadre=est_cadre)
+            if prevoyance.get("ccn_connue"):
+                idcc = prevoyance.get("idcc", "")
+                ccn_data = get_ccn_par_idcc(idcc) if idcc else None
+            else:
+                # 3. Par recherche textuelle
+                resultats = rechercher_idcc(ccn)
+                if resultats:
+                    idcc = resultats[0]["idcc"]
+                    ccn_data = get_ccn_par_idcc(idcc)
+
+    # Taux prevoyance
+    if ccn_data:
+        taux_prev = float(ccn_data["prevoyance_cadre"] if est_cadre else ccn_data["prevoyance_non_cadre"])
+        nom_ccn = ccn_data["nom"]
+        mut_min = ccn_data.get("mutuelle_employeur_min_pct", 50)
+    else:
+        taux_prev = 0.015 if est_cadre else 0
+        nom_ccn = "Convention non identifiee - minimums legaux appliques"
+        mut_min = 50
+
+    cout_prev = round(brut_mensuel * taux_prev, 2)
+
+    # Obligations conventionnelles specifiques
+    obligations_conv = []
+    if ccn_data:
+        if ccn_data.get("maintien_salaire_jours"):
+            obligations_conv.append({
+                "obligation": "Maintien de salaire maladie",
+                "conventionnel": f"{ccn_data['maintien_salaire_jours']} jours",
+                "legal": "30 jours apres 1 an anciennete (art. L.1226-1 CT)",
+                "plus_favorable": ccn_data["maintien_salaire_jours"] > 30,
+            })
+        if ccn_data.get("prime_anciennete"):
+            obligations_conv.append({
+                "obligation": "Prime d anciennete",
+                "conventionnel": "Oui (baremes conventionnels)",
+                "legal": "Pas d obligation legale",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("conges_anciennete"):
+            obligations_conv.append({
+                "obligation": "Conges supplementaires anciennete",
+                "conventionnel": "Oui (jours sup. selon anciennete)",
+                "legal": "2.5 jours/mois uniquement (art. L.3141-3 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("indemnite_depart_retraite_majoree"):
+            obligations_conv.append({
+                "obligation": "Indemnite de depart retraite",
+                "conventionnel": "Majoree par la CCN",
+                "legal": "1/4 mois par annee <= 10 ans, 1/3 au-dela (art. D.1237-1 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("indemnite_licenciement_majoree") or ccn_data.get("indemnite_licenciement_specifique"):
+            obligations_conv.append({
+                "obligation": "Indemnite de licenciement",
+                "conventionnel": "Majoree/specifique par la CCN",
+                "legal": "1/4 mois par annee <= 10 ans, 1/3 au-dela (art. R.1234-2 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("prime_vacances"):
+            obligations_conv.append({
+                "obligation": "Prime de vacances",
+                "conventionnel": "Oui (obligatoire)",
+                "legal": "Pas d obligation legale",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("avantage_nature_repas"):
+            obligations_conv.append({
+                "obligation": "Avantage en nature repas",
+                "conventionnel": "Repas fourni ou indemnite compensatrice",
+                "legal": "Evaluation forfaitaire (art. 3 arrete 10/12/2002)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("jours_feries_garantis"):
+            obligations_conv.append({
+                "obligation": "Jours feries garantis",
+                "conventionnel": f"{ccn_data['jours_feries_garantis']} jours feries payes garantis",
+                "legal": "Seul le 1er mai est obligatoirement chome et paye (art. L.3133-6 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("13eme_mois"):
+            obligations_conv.append({
+                "obligation": "13eme mois",
+                "conventionnel": "Obligatoire",
+                "legal": "Pas d obligation legale",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("transfert_personnel_article7"):
+            obligations_conv.append({
+                "obligation": "Transfert de personnel (art. 7)",
+                "conventionnel": "Reprise obligatoire du personnel lors de changement de prestataire",
+                "legal": "Pas d obligation legale generale (sauf art. L.1224-1 CT si transfert d entite)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("duree_travail_specifique"):
+            obligations_conv.append({
+                "obligation": "Duree du travail specifique",
+                "conventionnel": "Regles specifiques (temps de conduite, repos, amplitudes)",
+                "legal": "35h/sem. (art. L.3121-27 CT)",
+                "plus_favorable": None,
+            })
+        if ccn_data.get("regime_special"):
+            obligations_conv.append({
+                "obligation": "Regime special de retraite",
+                "conventionnel": f"Regime special: {ccn_data['regime_special'].upper()}",
+                "legal": "Regime general CNAV",
+                "plus_favorable": None,
+            })
+        if ccn_data.get("indemnite_fin_mission"):
+            obligations_conv.append({
+                "obligation": "Indemnite de fin de mission",
+                "conventionnel": f"{float(ccn_data['indemnite_fin_mission'])*100:.0f}% du brut",
+                "legal": "10% (art. L.1251-32 CT)",
+                "plus_favorable": float(ccn_data["indemnite_fin_mission"]) >= 0.10,
+            })
+
+    # Obligations legales communes (toujours presentes)
+    obligations_leg = [
+        {"obligation": "Prevoyance cadres", "legal": "1.50% TA patronal (ANI 2017 / art. 7 CCN 1947)", "conventionnel": f"{taux_prev*100:.2f}%"},
+        {"obligation": "Mutuelle obligatoire", "legal": "50% minimum part employeur (ANI 2013 / art. L.911-7 CSS)", "conventionnel": f"{mut_min}%"},
+        {"obligation": "Indemnite licenciement", "legal": "1/4 mois/an <= 10 ans, 1/3 au-dela (art. R.1234-2 CT)"},
+        {"obligation": "Preavis", "legal": "1 mois (1-2 ans anc.), 2 mois (>2 ans) - art. L.1234-1 CT"},
+        {"obligation": "Conges payes", "legal": "2.5 jours ouvrables/mois (art. L.3141-3 CT)"},
+    ]
 
     return {
-        "ccn": prevoyance,
+        "ccn_identifiee": ccn_data is not None,
+        "idcc": idcc,
+        "nom_ccn": nom_ccn,
+        "secteur": ccn_data.get("secteur", "") if ccn_data else "",
         "bulletin": {
-            "brut_mensuel": bulletin["brut_mensuel"],
-            "total_patronal": bulletin["total_patronal"],
-            "total_salarial": bulletin["total_salarial"],
-            "net_avant_impot": bulletin["net_avant_impot"],
-            "cout_total_employeur": bulletin["cout_total_employeur"],
+            "brut_mensuel": float(bulletin["brut_mensuel"]),
+            "total_patronal": float(bulletin["total_patronal"]),
+            "total_salarial": float(bulletin["total_salarial"]),
+            "net_avant_impot": float(bulletin["net_avant_impot"]),
+            "cout_total_employeur": float(bulletin["cout_total_employeur"]),
         },
         "prevoyance_ccn": {
-            "taux": float(taux_prev),
+            "taux": taux_prev,
             "montant_mensuel": cout_prev,
             "montant_annuel": round(cout_prev * 12, 2),
         },
-        "ccn_disponibles": list(ContributionRules.CCN_PREVOYANCE.keys()),
+        "obligations_conventionnelles": obligations_conv,
+        "obligations_legales": obligations_leg,
+        "nb_obligations_plus_favorables": sum(1 for o in obligations_conv if o.get("plus_favorable") is True),
+        "rappel": "Principe de faveur : la convention collective s applique si plus favorable que la loi (art. L.2251-1 CT). Verifiez toujours la CCN applicable.",
     }
+
+
+@app.get("/api/simulation/recherche-ccn")
+async def recherche_ccn(terme: str = Query("", description="Recherche par IDCC, nom ou secteur")):
+    """Recherche dans la base de 60+ conventions collectives nationales.
+
+    Accepte : numero IDCC (ex: 1486), nom (ex: syntec), secteur (ex: batiment).
+    """
+    from urssaf_analyzer.config.idcc_database import rechercher_idcc, IDCC_DATABASE
+    if not terme:
+        # Retourner toute la base
+        result = []
+        for idcc, data in sorted(IDCC_DATABASE.items()):
+            result.append({
+                "idcc": idcc,
+                "nom": data["nom"],
+                "secteur": data.get("secteur", ""),
+            })
+        return {"total": len(result), "resultats": result}
+    resultats = rechercher_idcc(terme)
+    # Serialiser les Decimal
+    for r in resultats:
+        for k, v in list(r.items()):
+            if isinstance(v, Decimal):
+                r[k] = float(v)
+    return {"total": len(resultats), "resultats": resultats}
 
 
 # --- Simulation : Identification CCN ---
 @app.get("/api/simulation/identifier-ccn")
 async def sim_identifier_ccn(texte: str = Query("")):
+    """Identifie une CCN a partir d un texte libre (intitule, IDCC, mots-cles, code NAF)."""
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    from urssaf_analyzer.config.idcc_database import rechercher_idcc, IDCC_DATABASE
+    # 1. Chercher dans la base IDCC complete
+    resultats = rechercher_idcc(texte)
+    if resultats:
+        top = resultats[0]
+        for k, v in list(top.items()):
+            if isinstance(v, Decimal):
+                top[k] = float(v)
+        return {"identifie": True, "idcc": top["idcc"], "detail": top, "autres_resultats": len(resultats) - 1}
+    # 2. Fallback sur le matching par mots-cles
     calc = ContributionRules()
     code = calc.identifier_ccn(texte)
     if code:
         prevoyance = calc.get_prevoyance_ccn(code)
         return {"identifie": True, "code": code, "detail": prevoyance}
-    return {"identifie": False, "code": None, "suggestion": "CCN non reconnue. CCN disponibles: " + ", ".join(ContributionRules.CCN_PREVOYANCE.keys())}
+    return {
+        "identifie": False,
+        "code": None,
+        "suggestion": f"CCN non reconnue. {len(IDCC_DATABASE)} conventions disponibles. Essayez un numero IDCC ou un mot-cle (batiment, metallurgie, commerce...)",
+    }
 
 
 # --- Simulation : Cout total employeur ---
@@ -11232,6 +11421,7 @@ APP_HTML += """
 <div class="tab" onclick="showSimTab('fincontrat',this)">Fins contrats</div>
 <div class="tab" onclick="showSimTab('optim',this)">Optimisation</div>
 <div class="tab" onclick="showSimTab('risques',this)">Risques sectoriels</div>
+<div class="tab" onclick="showSimTab('ccn',this)">Convention collective</div>
 <div class="tab" onclick="showSimTab('micro',this)">Micro</div>
 <div class="tab" onclick="showSimTab('tns',this)">TNS</div>
 <div class="tab" onclick="showSimTab('guso',this)">GUSO</div>
@@ -11241,18 +11431,22 @@ APP_HTML += """
 <div class="tc active" id="sim-bulletin">
 <h2>Simulation bulletin de paie</h2>
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong>. L effectif total de l entreprise determine les cotisations liees aux seuils (FNAL, versement mobilite, formation).</p>
-<div class="g3">
+<div class="g4">
 <div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="sim-brut" value="2500"></div>
 <div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="sim-eff" value="10"></div>
 <div><label>Statut du salarie</label><select id="sim-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div>
+<div><label>Convention collective (IDCC ou nom)</label><input id="sim-bull-ccn" placeholder="Ex: 1486, SYNTEC, HCR..."></div>
 </div>
+<div class="al info" style="margin:8px 0;font-size:.82em"><span class="ai">&#9878;</span><span>La convention collective peut imposer des taux de prevoyance et mutuelle superieurs aux minimums legaux. <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Voir l onglet Convention collective</a> pour le detail.</span></div>
 <div class="btn-group"><button class="btn btn-blue" onclick="simBulletin()">Simuler</button><button class="btn btn-s btn-sm" onclick="exportSection('sim')">&#128190; Export</button></div>
 <div id="sim-bull-res"></div>
 </div>
 
 <div class="tc" id="sim-cout"><h2>Cout total employeur detaille</h2>
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Cout mensuel complet pour <strong>un salarie</strong>. L effectif total sert a determiner les obligations annexes (formation 0.55% ou 1%, effort construction >= 50, participation >= 50).</p>
-<div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="ce-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ce-eff" value="10"></div><div><label>Statut du salarie</label><select id="ce-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Primes mensuelles (EUR)</label><input type="number" step="0.01" id="ce-primes" value="0"></div></div>
+<div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="ce-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ce-eff" value="10"></div><div><label>Statut du salarie</label><select id="ce-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective (IDCC ou nom)</label><input id="ce-ccn" placeholder="Ex: 1486, SYNTEC..."></div></div>
+<div class="al info" style="margin:8px 0;font-size:.82em"><span class="ai">&#9878;</span><span>Rappel : la CCN peut imposer des surcouts (prevoyance, primes, indemnites majorees). <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Onglet Convention collective</a>.</span></div>
+<div class="g3"><div><label>Primes mensuelles (EUR)</label><input type="number" step="0.01" id="ce-primes" value="0"></div><div></div><div></div></div>
 <div class="g4"><div><label>Avantages nature (EUR/mois)</label><input type="number" step="0.01" id="ce-avantages" value="0"></div><div><label>Frais km (EUR/mois)</label><input type="number" step="0.01" id="ce-km" value="0"></div><div><label>Tickets resto (EUR/mois)</label><input type="number" step="0.01" id="ce-tr" value="0"></div><div><label>Mutuelle part employeur (EUR/mois)</label><input type="number" step="0.01" id="ce-mut" value="40"></div></div>
 <button class="btn btn-blue" onclick="simCout()">Calculer</button><div id="sim-cout-res" style="margin-top:12px"></div></div>
 
@@ -11287,6 +11481,7 @@ APP_HTML += """
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Projection du budget salarial <strong>pour l ensemble de l entreprise</strong>. Le brut moyen est multiplie par l effectif total pour estimer la masse annuelle. Impact augmentations, inflation, primes, frais et turnover.</p>
 <div class="g4"><div><label>Salaire brut moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ms-eff" value="10"></div><div><label>Augmentation envisagee (%)</label><input type="number" step="0.1" id="ms-aug" value="3"></div><div><label>Inflation prevue (%)</label><input type="number" step="0.1" id="ms-infl" value="2"></div></div>
 <div class="g4"><div><label>Frais km moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-km" value="50"></div><div><label>Avantages nature moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-an" value="0"></div><div><label>Primes variables (% masse salariale)</label><input type="number" step="0.1" id="ms-primes" value="5"></div><div><label>Turnover annuel previsionnel (%)</label><input type="number" step="0.1" id="ms-turn" value="10"></div></div>
+<div class="g2"><div><label>Convention collective applicable (IDCC ou nom)</label><input id="ms-ccn" placeholder="Ex: 1486, SYNTEC, HCR..."></div><div style="display:flex;align-items:flex-end;font-size:.82em;color:var(--tx2)">La CCN peut impacter les primes obligatoires (13e mois, anciennete, vacances). <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Voir detail CCN</a></div></div>
 <button class="btn btn-blue" onclick="simMasse()">Projeter</button><div id="sim-masse-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-seuils"><h2>Impact des seuils d effectif sur les obligations de l entreprise</h2>
@@ -11311,6 +11506,20 @@ APP_HTML += """
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse <strong>pour l ensemble de l entreprise</strong> : risques sociaux, AT/MP, obligations et subventions par secteur d activite.</p>
 <div class="g3"><div><label>Code NAF/APE de l entreprise</label><input id="rs-naf" value="6201Z" placeholder="Ex: 6201Z, 4120A..."></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="rs-eff" value="10"></div><div><label>Masse salariale brute annuelle totale (EUR)</label><input type="number" step="0.01" id="rs-masse" value="400000"></div></div>
 <button class="btn btn-blue" onclick="simRisques()">Analyser</button><div id="sim-risques-res" style="margin-top:12px"></div></div>
+
+<div class="tc" id="sim-ccn">
+<h2>Convention collective : legal vs conventionnel</h2>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#9878;</span><span><strong>Principe de faveur</strong> (art. L.2251-1 CT) : la convention collective s applique lorsqu elle est <strong>plus favorable</strong> que la loi. Cette simulation compare les obligations legales (Code du travail, ANI) avec les dispositions conventionnelles specifiques a votre CCN. <strong>60+ conventions nationales</strong> sont referencees.</span></div>
+<div class="g4">
+<div><label>Convention collective (IDCC ou intitule)</label><input id="ccn-search" placeholder="Ex: 1486, SYNTEC, metallurgie, HCR..." oninput="ccnAutoSearch()"></div>
+<div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="ccn-brut" value="2500"></div>
+<div><label>Statut du salarie</label><select id="ccn-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div>
+<div><label>Effectif total de l entreprise</label><input type="number" id="ccn-eff" value="10"></div>
+</div>
+<div id="ccn-search-results" style="margin:8px 0;max-height:150px;overflow-y:auto"></div>
+<button class="btn btn-blue btn-f" onclick="simCCN()">&#9878; Comparer legal vs conventionnel</button>
+<div id="sim-ccn-res" style="margin-top:12px"></div>
+</div>
 
 <div class="tc" id="sim-micro"><h2>Micro-entrepreneur</h2>
 <div class="g3"><div><label>CA</label><input type="number" step="0.01" id="sim-ca" value="50000"></div><div><label>Activite</label><select id="sim-act"><option value="prestations_bnc">BNC</option><option value="prestations_bic">BIC</option><option value="vente_marchandises">Vente</option><option value="location_meublee">Location</option></select></div><div><label>ACRE</label><select id="sim-acre"><option value="false">Non</option><option value="true">Oui</option></select></div></div>
@@ -12478,6 +12687,8 @@ document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class
 /* === SIMULATION === */
 function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
 function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function ccnAutoSearch(){var t=document.getElementById("ccn-search").value;if(t.length<2){document.getElementById("ccn-search-results").innerHTML="";return;}fetch("/api/simulation/recherche-ccn?terme="+encodeURIComponent(t)).then(safeJson).then(function(r){var h="";if(r.resultats&&r.resultats.length>0){h="<div style='background:var(--bg2);border-radius:6px;padding:6px'>";for(var i=0;i<Math.min(r.resultats.length,8);i++){var c=r.resultats[i];h+="<div style='padding:4px 8px;cursor:pointer;border-radius:4px;font-size:.85em' onmouseover='this.style.background=\"var(--bg3)\"' onmouseout='this.style.background=\"\"' onclick='document.getElementById(\"ccn-search\").value=\""+c.idcc+"\";document.getElementById(\"ccn-search-results\").innerHTML=\"\"'><strong>IDCC "+c.idcc+"</strong> - "+c.nom+"</div>";}h+="</div>";}document.getElementById("ccn-search-results").innerHTML=h;}).catch(function(){});}
+function simCCN(){var ccn=document.getElementById("ccn-search").value;if(!ccn){toast("Saisissez un IDCC ou un nom de convention collective");return;}var p="ccn="+encodeURIComponent(ccn)+"&brut_mensuel="+gv("ccn-brut")+"&est_cadre="+gv("ccn-cadre")+"&effectif="+gv("ccn-eff");fetch("/api/simulation/ccn?"+p).then(safeJson).then(function(r){var h="";if(r.ccn_identifiee){h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>IDCC "+r.idcc+" - "+r.nom_ccn+"</strong>"+(r.secteur?" ("+r.secteur+")":"")+"</span></div>";}else{h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>Convention non identifiee</strong> — les minimums legaux sont appliques. Essayez un numero IDCC (ex: 1486).</span></div>";}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.bulletin.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut mensuel</div></div><div class='sc green'><div class='val'>"+r.bulletin.net_avant_impot.toFixed(2)+"</div><div class='lab'>Net avant impot</div></div><div class='sc amber'><div class='val'>"+r.bulletin.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+r.prevoyance_ccn.montant_mensuel.toFixed(2)+"</div><div class='lab'>Prevoyance CCN/mois</div></div></div>";h+="<h3 style='margin-top:16px'>&#9878; Obligations conventionnelles vs legales</h3>";if(r.obligations_conventionnelles&&r.obligations_conventionnelles.length>0){h+="<table><thead><tr><th>Obligation</th><th>Disposition conventionnelle</th><th>Minimum legal</th><th>+Favorable?</th></tr></thead><tbody>";for(var i=0;i<r.obligations_conventionnelles.length;i++){var o=r.obligations_conventionnelles[i];var badge=o.plus_favorable===true?"<span style='color:#16a34a'>&#10004; Oui</span>":o.plus_favorable===false?"<span style='color:#dc2626'>&#10008; Non</span>":"<span style='color:#d97706'>&#8212;</span>";h+="<tr><td><strong>"+o.obligation+"</strong></td><td>"+o.conventionnel+"</td><td>"+(o.legal||"-")+"</td><td>"+badge+"</td></tr>";}h+="</tbody></table>";h+="<p style='margin-top:8px;font-size:.85em;color:var(--tx2)'><strong>"+r.nb_obligations_plus_favorables+"</strong> disposition(s) conventionnelle(s) plus favorable(s) que la loi.</p>";}else{h+="<p style='color:var(--tx2);font-style:italic'>Aucune specificite conventionnelle identifiee au-dela du minimum legal.</p>";}h+="<h3 style='margin-top:16px'>&#128214; Rappel obligations legales (Code du travail / ANI)</h3>";if(r.obligations_legales){h+="<table><thead><tr><th>Obligation</th><th>Minimum legal</th></tr></thead><tbody>";for(var j=0;j<r.obligations_legales.length;j++){var ol=r.obligations_legales[j];h+="<tr><td>"+ol.obligation+"</td><td>"+ol.legal+"</td></tr>";}h+="</tbody></table>";}h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";document.getElementById("sim-ccn-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}

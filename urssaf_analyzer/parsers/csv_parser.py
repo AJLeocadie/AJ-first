@@ -69,6 +69,11 @@ COLONNES_MAPPING = {
     "periode_debut": "periode_debut", "date_debut": "periode_debut",
     "periode_fin": "periode_fin", "date_fin": "periode_fin",
     "mois": "mois", "periode": "mois",
+    # Convention collective / NAF
+    "convention_collective": "convention_collective", "ccn": "convention_collective",
+    "idcc": "idcc", "code_idcc": "idcc", "numero_idcc": "idcc",
+    "code_naf": "code_naf", "naf": "code_naf", "ape": "code_naf",
+    "code_ape": "code_naf",
 }
 
 # Mots-cles pour detection du type de document CSV
@@ -203,6 +208,24 @@ class CSVParser(BaseParser):
             source_document_id=document.id,
         )
 
+        # Extraire CCN/IDCC/NAF si present dans les colonnes
+        ccn_detectee = ""
+        idcc_detecte = ""
+        naf_detecte = ""
+        for row_data in csv.DictReader(io.StringIO(contenu), dialect=dialect):
+            for col_csv, champ in col_map.items():
+                val = row_data.get(col_csv, "").strip()
+                if not val:
+                    continue
+                if champ == "convention_collective" and not ccn_detectee:
+                    ccn_detectee = val
+                elif champ == "idcc" and not idcc_detecte:
+                    idcc_detecte = val
+                elif champ == "code_naf" and not naf_detecte:
+                    naf_detecte = val
+            if ccn_detectee or idcc_detecte or naf_detecte:
+                break  # Found at least one, no need to scan all rows
+
         # Ajouter metadata avec type_document
         declaration.metadata = declaration.metadata or {}
         declaration.metadata["type_document"] = type_document
@@ -210,6 +233,12 @@ class CSVParser(BaseParser):
         declaration.metadata["nb_lignes_parsees"] = len(cotisations)
         if est_recapitulatif:
             declaration.metadata["format_recapitulatif"] = True
+        if ccn_detectee:
+            declaration.metadata["convention_collective"] = ccn_detectee
+        if idcc_detecte:
+            declaration.metadata["idcc"] = idcc_detecte
+        if naf_detecte:
+            declaration.metadata["code_naf"] = naf_detecte
 
         if cotisations:
             declaration.masse_salariale_brute = sum(

@@ -148,9 +148,26 @@ class DSNParser(BaseParser):
                     total += c.base_brute
             declaration.masse_salariale_brute = total
 
+        # Extraire CCN/IDCC et code NAF depuis les blocs DSN
+        # S21.G00.40.017 = IDCC du contrat
+        idcc_vals = donnees.get("S21.G00.40.017", [])
+        idcc_detecte = idcc_vals[0] if idcc_vals else ""
+        # S21.G00.06.005 = Code APE/NAF de l'etablissement
+        naf_val = self._get_val(donnees, "S21.G00.06.005")
+        if not naf_val:
+            # Fallback: S20.G00.05.003 = Code APE entreprise
+            naf_val = self._get_val(donnees, "S20.G00.05.003")
+
+        if employeur and naf_val:
+            employeur.code_naf = naf_val
+
         # Ajouter type_document pour reconnaissance
         declaration.metadata = getattr(declaration, "metadata", {}) or {}
         declaration.metadata["type_document"] = "declaration_dsn"
+        if idcc_detecte:
+            declaration.metadata["idcc"] = idcc_detecte
+        if naf_val:
+            declaration.metadata["code_naf"] = naf_val
 
         # S89 - Total versement OPS (totaux declares)
         s89_totaux = self._extraire_totaux_s89(donnees)
