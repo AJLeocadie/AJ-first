@@ -7064,6 +7064,121 @@ async def liste_config_alertes():
 
 
 # ======================================================================
+# RH - ALERTES LIBRES (PERSONNALISEES PAR L'UTILISATEUR)
+# ======================================================================
+
+_alertes_libres: list[dict] = []
+
+
+@app.post("/api/rh/alertes/libres")
+async def creer_alerte_libre(
+    titre: str = Form(...),
+    description: str = Form(""),
+    type_alerte: str = Form("personnalise"),
+    urgence: str = Form("moyenne"),
+    date_echeance: str = Form(""),
+    recurrence: str = Form(""),
+    destinataire: str = Form(""),
+    action_requise: str = Form(""),
+    reference_legale: str = Form(""),
+    categorie: str = Form("autre"),
+    actif: str = Form("true"),
+    delai_rappel_jours: str = Form("7"),
+    notes: str = Form(""),
+):
+    """Cree une alerte libre/personnalisee par l'utilisateur.
+
+    Permet de configurer des rappels sur des echeances specifiques, des obligations
+    ponctuelles ou recurrentes, avec notification avant echeance.
+    """
+    alerte = {
+        "id": str(uuid.uuid4())[:8],
+        "titre": titre,
+        "description": description,
+        "type_alerte": type_alerte,
+        "urgence": urgence if urgence in ("haute", "moyenne", "info") else "moyenne",
+        "date_echeance": date_echeance,
+        "recurrence": recurrence if recurrence in ("", "quotidien", "hebdomadaire", "mensuel", "trimestriel", "semestriel", "annuel") else "",
+        "destinataire": destinataire,
+        "action_requise": action_requise,
+        "reference_legale": reference_legale,
+        "categorie": categorie,
+        "actif": actif.lower() == "true",
+        "delai_rappel_jours": int(delai_rappel_jours or "7"),
+        "notes": notes,
+        "date_creation": datetime.now().isoformat(),
+        "date_modification": datetime.now().isoformat(),
+        "statut": "active",
+    }
+    _alertes_libres.append(alerte)
+    log_action("utilisateur", "creation_alerte_libre", f"{titre}")
+    return alerte
+
+
+@app.get("/api/rh/alertes/libres")
+async def liste_alertes_libres():
+    """Liste toutes les alertes libres configurees."""
+    return _alertes_libres
+
+
+@app.put("/api/rh/alertes/libres/{alerte_id}")
+async def modifier_alerte_libre(
+    alerte_id: str,
+    titre: str = Form(""),
+    description: str = Form(""),
+    urgence: str = Form(""),
+    date_echeance: str = Form(""),
+    recurrence: str = Form(""),
+    action_requise: str = Form(""),
+    actif: str = Form(""),
+    delai_rappel_jours: str = Form(""),
+    statut: str = Form(""),
+    notes: str = Form(""),
+):
+    """Modifie une alerte libre existante."""
+    alerte = None
+    for a in _alertes_libres:
+        if a["id"] == alerte_id:
+            alerte = a
+            break
+    if not alerte:
+        raise HTTPException(404, "Alerte non trouvee")
+
+    if titre:
+        alerte["titre"] = titre
+    if description:
+        alerte["description"] = description
+    if urgence and urgence in ("haute", "moyenne", "info"):
+        alerte["urgence"] = urgence
+    if date_echeance:
+        alerte["date_echeance"] = date_echeance
+    if recurrence is not None:
+        alerte["recurrence"] = recurrence
+    if action_requise:
+        alerte["action_requise"] = action_requise
+    if actif:
+        alerte["actif"] = actif.lower() == "true"
+    if delai_rappel_jours:
+        alerte["delai_rappel_jours"] = int(delai_rappel_jours)
+    if statut and statut in ("active", "traitee", "reportee", "archivee"):
+        alerte["statut"] = statut
+    if notes:
+        alerte["notes"] = notes
+    alerte["date_modification"] = datetime.now().isoformat()
+    return alerte
+
+
+@app.delete("/api/rh/alertes/libres/{alerte_id}")
+async def supprimer_alerte_libre(alerte_id: str):
+    """Supprime une alerte libre."""
+    before = len(_alertes_libres)
+    _alertes_libres[:] = [a for a in _alertes_libres if a["id"] != alerte_id]
+    if len(_alertes_libres) == before:
+        raise HTTPException(404, "Alerte non trouvee")
+    return {"status": "ok", "message": "Alerte supprimee"}
+
+
+# ======================================================================
 # RH - AVENANTS
 # ======================================================================
 
@@ -8077,6 +8192,505 @@ async def get_rh_alertes():
             "reference": "Art. L.6315-1 CT",
             "action_requise": "Verifier la planification des entretiens professionnels pour chaque salarie",
             "incidence_legale": "Abondement correctif CPF de 3000 EUR par salarie si non-realise dans les 6 ans (entreprises >= 50 sal.).",
+        })
+
+    # --- 5. ECHEANCES LEGALES CALENDAIRES ---
+    mois = aujourdhui.month
+    annee = aujourdhui.year
+
+    # 5a. Taxe sur les salaires (entreprises non assujetties TVA)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "taxe_salaires",
+            "urgence": "info",
+            "titre": "Taxe sur les salaires (si non assujetti TVA)",
+            "description": (
+                "Les employeurs non soumis a la TVA ou partiellement doivent declarer et payer "
+                "la taxe sur les salaires. Baremes progressifs : 4.25%, 8.50%, 13.60%. "
+                "Paiement mensuel (>10 000 EUR/an), trimestriel (4 000-10 000 EUR) ou annuel."
+            ),
+            "reference": "CGI art. 231 a 231 bis V",
+            "action_requise": "Verifier l'assujettissement TVA et le cas echeant declarer la taxe sur les salaires",
+            "echeance": f"15 janvier {annee + 1}",
+            "incidence_legale": "Majoration de 10% pour defaut de declaration, 5% pour retard de paiement.",
+        })
+
+    # 5b. Contribution formation professionnelle et taxe apprentissage (via DSN depuis 2022)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "contribution_formation",
+            "urgence": "moyenne",
+            "titre": "Contribution formation professionnelle et taxe d'apprentissage",
+            "description": (
+                f"Depuis 2022, la contribution a la formation professionnelle (0.55% si <11 sal., 1% au-dela) "
+                f"et la taxe d'apprentissage (0.68%) sont collectees mensuellement via la DSN par l'URSSAF. "
+                f"Le solde de la taxe d'apprentissage (0.09%) est verse directement aux etablissements eligibles."
+            ),
+            "reference": "Art. L.6131-1 et L.6241-1 CT - Loi Avenir professionnel du 05/09/2018",
+            "action_requise": "Verifier le paiement via DSN et le versement du solde de la TA aux organismes eligibles",
+            "echeance": "Mensuel (DSN) + solde TA avant le 31 mai",
+            "incidence_legale": "Majoration de 100% de l'insuffisance constatee (art. L.6252-4 CT).",
+        })
+
+    # 5c. Participation construction (effort construction) >= 50 salaries
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "participation_construction",
+            "urgence": "moyenne",
+            "titre": "Participation a l'effort de construction (PEEC)",
+            "description": (
+                f"Les entreprises >= 50 salaries doivent investir 0.45% de la masse salariale N-1 dans "
+                f"le logement des salaries via un organisme collecteur (Action Logement). Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.313-1 CCH",
+            "action_requise": "Verifier le versement a Action Logement avant le 31 decembre",
+            "echeance": f"{annee}-12-31",
+            "incidence_legale": "Cotisation de 2% de la masse salariale en cas de non-versement (art. L.313-4 CCH).",
+        })
+
+    # 5d. AGEFIPH - Obligation emploi travailleurs handicapes >= 20 salaries
+    if nb_actifs >= 20:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "oeth_handicap",
+            "urgence": "moyenne",
+            "titre": "Obligation d'emploi de travailleurs handicapes (OETH)",
+            "description": (
+                f"Les entreprises >= 20 salaries doivent employer au moins 6% de travailleurs handicapes. "
+                f"Effectif actif: {nb_actifs}, objectif: {max(1, round(nb_actifs * 0.06))} TH. "
+                f"Declaration annuelle via la DSN."
+            ),
+            "reference": "Art. L.5212-1 et suivants CT",
+            "action_requise": "Verifier le taux d'emploi de TH et la declaration OETH via DSN",
+            "echeance": "Declaration annuelle via DSN de mars",
+            "incidence_legale": f"Contribution AGEFIPH : environ {max(1, round(nb_actifs * 0.06))} x 400 a 600 SMIC horaire/an selon effort.",
+        })
+
+    # 5e. Versement mobilite (transport) >= 11 salaries
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "versement_mobilite",
+            "urgence": "info",
+            "titre": "Versement mobilite (ex-versement transport)",
+            "description": (
+                f"Le versement mobilite est du par les entreprises >= 11 salaries. "
+                f"Taux variable selon la zone (0.55% a 2.95% en IDF). Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.2333-64 CGCT",
+            "action_requise": "Verifier le taux applicable selon la zone et le paiement via DSN",
+        })
+
+    # 5f. Forfait social sur epargne salariale
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "forfait_social",
+            "urgence": "info",
+            "titre": "Forfait social sur epargne salariale",
+            "description": (
+                "Le forfait social de 20% s'applique sur l'interessement, la participation, "
+                "l'abondement PEE pour les entreprises >= 50 salaries. "
+                "Exoneration pour les entreprises < 50 salaries."
+            ),
+            "reference": "Art. L.137-15 et L.137-16 CSS",
+            "action_requise": "Verifier le calcul et le paiement du forfait social sur les sommes versees",
+        })
+
+    # 5g. Contribution patronale prevoyance - Declaration DAS2
+    # deja gere en 4k
+
+    # 5h. Declaration des effectifs (DADS/DSN annuelle)
+    if nb_actifs >= 1 and mois in (1, 2):
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "dsn_annuelle",
+            "urgence": "haute",
+            "titre": "DSN evenementielle annuelle (bilan)",
+            "description": (
+                "La DSN de janvier doit inclure les donnees de bilan annuel : effectifs, "
+                "masse salariale annuelle, base OETH, base formation. A transmettre avant le 31 janvier."
+            ),
+            "reference": "Art. R.133-14 CSS",
+            "action_requise": "Verifier et transmettre la DSN annuelle (bilan) avant le 31 janvier",
+            "echeance": f"{annee}-01-31",
+        })
+
+    # 5i. Cotisations retraite complementaire AGIRC-ARRCO
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "agirc_arrco",
+            "urgence": "info",
+            "titre": "Cotisations retraite complementaire AGIRC-ARRCO",
+            "description": (
+                "Cotisations obligatoires : Tranche 1 (jusqu'a 1 PASS) 7.87% dont 3.15% salarial. "
+                "Tranche 2 (1 a 8 PASS) 21.59% dont 8.64% salarial. "
+                "Paiement mensuel ou trimestriel (< 10 salaries)."
+            ),
+            "reference": "ANI du 17/11/2017 - Accord AGIRC-ARRCO",
+            "action_requise": "Verifier les declarations et paiements AGIRC-ARRCO",
+        })
+
+    # 5j. Remboursement des frais de transport (50% abonnement)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "remboursement_transport",
+            "urgence": "info",
+            "titre": "Prise en charge obligatoire des frais de transport",
+            "description": (
+                "L'employeur doit prendre en charge 50% du prix des abonnements de transports "
+                "publics (metro, bus, train, velo). Egalement le forfait mobilites durables "
+                "(velo, covoiturage) jusqu'a 800 EUR/an net d'impot."
+            ),
+            "reference": "Art. L.3261-2 CT et Art. L.3261-3-1 CT",
+            "action_requise": "Verifier la prise en charge des abonnements transport et le forfait mobilites durables",
+            "incidence_legale": "Amende de 3750 EUR par salarie concerne (art. R.3261-1 CT).",
+        })
+
+    # 5k. NAO (Negociation Annuelle Obligatoire) >= 50 salaries
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "nao",
+            "urgence": "moyenne",
+            "titre": "Negociation Annuelle Obligatoire (NAO)",
+            "description": (
+                f"L'employeur doit engager chaque annee une negociation sur la remuneration, "
+                f"le temps de travail, le partage de la valeur ajoutee et l'egalite professionnelle. "
+                f"Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.2242-1 et suivants CT",
+            "action_requise": "Convoquer les delegues syndicaux pour l'ouverture de la NAO",
+            "echeance": "Annuelle",
+            "incidence_legale": "Delit d'entrave : 1 an d'emprisonnement et 3750 EUR d'amende (art. L.2243-1 CT).",
+        })
+
+    # 5l. BDESE (Base de Donnees Economiques, Sociales et Environnementales) >= 50 sal
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "bdese",
+            "urgence": "moyenne",
+            "titre": "BDESE (Base de Donnees Economiques, Sociales et Environnementales)",
+            "description": (
+                f"La BDESE doit etre mise a disposition du CSE et mise a jour annuellement. "
+                f"Contient les informations sur 6 ans (investissements, egalite, flux financiers, "
+                f"remuneration, fonds propres, consequences environnementales). Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.2312-18 et R.2312-7 CT - Loi Climat et Resilience 2021",
+            "action_requise": "Verifier la mise a jour annuelle de la BDESE",
+            "incidence_legale": "Delit d'entrave (7500 EUR d'amende).",
+        })
+
+    # 5m. Plan de mobilite >= 50 salaries sur un meme site
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "plan_mobilite",
+            "urgence": "info",
+            "titre": "Plan de mobilite employeur",
+            "description": (
+                f"Les entreprises regroupant >= 50 salaries sur un meme site doivent elaborer "
+                f"un plan de mobilite employeur. Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.1214-8-2 Code des transports - Loi LOM du 24/12/2019",
+            "action_requise": "Elaborer ou mettre a jour le plan de mobilite",
+        })
+
+    # 5n. Referent harcelement CSE + employeur
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "referent_harcelement",
+            "urgence": "info",
+            "titre": "Designation d'un referent harcelement sexuel",
+            "description": (
+                "Le CSE doit designer un referent harcelement sexuel parmi ses membres. "
+                "Dans les entreprises >= 250 salaries, l'employeur doit aussi designer un referent charge "
+                "d'orienter, informer et accompagner les salaries."
+            ),
+            "reference": "Art. L.1153-5-1 CT et Art. L.2314-1 CT",
+            "action_requise": "Verifier la designation du/des referent(s) harcelement",
+        })
+
+    # 5o. Referent securite (personne competente prevention risques)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "referent_securite",
+            "urgence": "info",
+            "titre": "Designation d'un referent securite / prevention",
+            "description": (
+                "L'employeur doit designer un ou plusieurs salaries competents pour s'occuper "
+                "des activites de protection et de prevention des risques professionnels. "
+                "A defaut, il peut faire appel a des intervenants exterieurs (IPRP)."
+            ),
+            "reference": "Art. L.4644-1 CT",
+            "action_requise": "Verifier la designation du salarie competent en prevention",
+        })
+
+    # 5p. Entretien de retour (apres absence longue)
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif":
+            continue
+        # Verifier arrets > 30 jours
+        for arret in _rh_arrets:
+            if arret.get("salarie_id") == contrat.get("salarie_id") and arret.get("date_fin"):
+                try:
+                    fin_arret = date.fromisoformat(arret["date_fin"])
+                    debut_arret = date.fromisoformat(arret.get("date_debut", arret["date_fin"]))
+                    duree = (fin_arret - debut_arret).days
+                    retour_recent = 0 <= (aujourdhui - fin_arret).days <= 14
+                    if duree >= 30 and retour_recent:
+                        alertes.append({
+                            "id": str(uuid.uuid4())[:8],
+                            "type": "entretien_retour_absence",
+                            "urgence": "haute",
+                            "titre": f"Entretien de retour : {contrat['prenom_salarie']} {contrat['nom_salarie']}",
+                            "description": (
+                                f"Entretien de reprise obligatoire apres une absence de {duree} jours "
+                                f"(retour le {arret['date_fin']}). Un entretien professionnel doit etre propose "
+                                f"au salarie de retour d'un arret de travail d'au moins 30 jours."
+                            ),
+                            "reference": "Art. L.6315-1 CT - Art. R.4624-31 CT",
+                            "action_requise": "Organiser l'entretien professionnel de reprise et la visite medicale de reprise",
+                            "salarie_id": contrat.get("salarie_id"),
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+    # 5q. Visite d'information et de prevention (VIP) embauche
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif":
+            continue
+        try:
+            dd = date.fromisoformat(contrat["date_debut"])
+            anciennete = (aujourdhui - dd).days
+            if anciennete <= 90:  # < 3 mois
+                sid = contrat.get("salarie_id", "")
+                # Verifier si visite deja planifiee
+                a_visite = any(v.get("salarie_id") == sid for v in _rh_visites_med)
+                if not a_visite:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "vip_embauche",
+                        "urgence": "haute" if anciennete > 60 else "moyenne",
+                        "titre": f"VIP embauche : {contrat['prenom_salarie']} {contrat['nom_salarie']}",
+                        "description": (
+                            f"La visite d'information et de prevention (VIP) doit avoir lieu dans les 3 mois "
+                            f"suivant la prise de poste. Embauche le {contrat['date_debut']} ({anciennete} jours). "
+                            f"Suivi renforce si poste a risque."
+                        ),
+                        "reference": "Art. R.4624-10 CT",
+                        "action_requise": "Prendre rendez-vous avec le service de prevention et sante au travail",
+                        "salarie_id": sid,
+                        "contrat_id": contrat["id"],
+                    })
+        except (ValueError, TypeError):
+            pass
+
+    # 5r. Arrets de travail en cours - suivi
+    for arret in _rh_arrets:
+        if arret.get("date_fin") and arret.get("date_debut"):
+            try:
+                debut = date.fromisoformat(arret["date_debut"])
+                fin = date.fromisoformat(arret["date_fin"])
+                if debut <= aujourdhui <= fin:
+                    duree = (fin - debut).days
+                    jours_restants = (fin - aujourdhui).days
+                    nom_complet = arret.get("salarie_id", "")
+                    for c in _rh_contrats:
+                        if c.get("salarie_id") == arret.get("salarie_id"):
+                            nom_complet = f"{c['prenom_salarie']} {c['nom_salarie']}"
+                            break
+                    if jours_restants <= 7:
+                        alertes.append({
+                            "id": str(uuid.uuid4())[:8],
+                            "type": "retour_arret_imminent",
+                            "urgence": "moyenne",
+                            "titre": f"Retour d'arret imminent : {nom_complet}",
+                            "description": (
+                                f"Fin de l'arret prevue le {arret['date_fin']} (dans {jours_restants} jour(s)). "
+                                f"Duree totale: {duree} jours. "
+                                + ("Visite de reprise obligatoire (arret > 30 jours)." if duree >= 30 else "")
+                            ),
+                            "reference": "Art. R.4624-31 CT" if duree >= 30 else "",
+                            "action_requise": "Preparer la reprise" + (" et planifier la visite medicale de reprise" if duree >= 30 else ""),
+                            "salarie_id": arret.get("salarie_id"),
+                        })
+            except (ValueError, TypeError):
+                pass
+
+    # 5s. Conges payes en cours - solde et planification
+    for conge in _rh_conges:
+        if conge.get("date_fin") and conge.get("statut") in ("valide", "accepte", "en_cours"):
+            try:
+                fin_conge = date.fromisoformat(conge["date_fin"])
+                jours_avant_retour = (fin_conge - aujourdhui).days
+                if 0 <= jours_avant_retour <= 3:
+                    sid = conge.get("salarie_id", "")
+                    nom_complet = sid
+                    for c in _rh_contrats:
+                        if c.get("salarie_id") == sid:
+                            nom_complet = f"{c['prenom_salarie']} {c['nom_salarie']}"
+                            break
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "retour_conge",
+                        "urgence": "info",
+                        "titre": f"Retour de conge : {nom_complet}",
+                        "description": f"Retour prevu le {conge['date_fin']} (dans {jours_avant_retour} jour(s)).",
+                        "salarie_id": sid,
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # 5t. Sanctions disciplinaires - purge du dossier
+    for sanction in _rh_sanctions:
+        if sanction.get("date_notification"):
+            try:
+                date_sanction = date.fromisoformat(sanction["date_notification"])
+                anciennete_sanction = (aujourdhui - date_sanction).days
+                if 1060 <= anciennete_sanction <= 1100:  # Proche des 3 ans
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "purge_sanction",
+                        "urgence": "info",
+                        "titre": f"Sanction a purger : {sanction.get('nom_salarie', '')}",
+                        "description": (
+                            f"La sanction du {sanction['date_notification']} ne peut plus etre invoquee "
+                            f"(prescription de 3 ans - art. L.1332-5 CT). Elle doit etre retiree du dossier."
+                        ),
+                        "reference": "Art. L.1332-5 CT",
+                        "action_requise": "Retirer la sanction du dossier disciplinaire du salarie",
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # 5u. Echeances fiscales calendaires
+    echeances_fiscales = [
+        (1, 15, "TVA mensuelle", "Declarer et payer la TVA du mois precedent (regime mensuel)", "CGI art. 287"),
+        (1, 15, "Acompte IS 1er trimestre", "Verser le 1er acompte d'IS (15% ou 25% de l'IS N-1)", "CGI art. 1668"),
+        (2, 28, "DAS-2 Honoraires", "Declarer les honoraires verses > 2400 EUR/beneficiaire/an", "CGI art. 240"),
+        (3, 1, "Index egalite pro", "Publier l'index d'egalite professionnelle F/H", "Art. L.1142-8 CT"),
+        (3, 31, "Contribution AGEFIPH", "Declaration OETH via DSN de mars", "Art. L.5212-5 CT"),
+        (4, 15, "Acompte IS 2eme trimestre", "Verser le 2e acompte d'IS", "CGI art. 1668"),
+        (5, 31, "Solde taxe apprentissage", "Verser le solde de la taxe d'apprentissage (0.09%)", "Art. L.6241-2 CT"),
+        (5, 15, "Liasse fiscale / IS", "Deposer la liasse fiscale et payer le solde d'IS", "CGI art. 223"),
+        (6, 15, "Acompte IS 3eme trimestre", "Verser le 3e acompte d'IS", "CGI art. 1668"),
+        (12, 15, "Acompte IS 4eme trimestre", "Verser le 4e acompte d'IS", "CGI art. 1668"),
+        (12, 31, "PEEC (Action Logement)", "Verser la participation construction 0.45%", "Art. L.313-1 CCH"),
+    ]
+
+    for m_ech, j_ech, titre_ech, desc_ech, ref_ech in echeances_fiscales:
+        try:
+            date_ech = date(annee, m_ech, j_ech)
+            jours_avant = (date_ech - aujourdhui).days
+            if -7 <= jours_avant <= 30:
+                urg = "haute" if jours_avant <= 3 else ("moyenne" if jours_avant <= 14 else "info")
+                alertes.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "type": "echeance_fiscale",
+                    "urgence": urg,
+                    "titre": titre_ech,
+                    "description": f"{desc_ech}. Echeance: {date_ech.isoformat()} ({jours_avant} jour(s)).",
+                    "reference": ref_ech,
+                    "action_requise": desc_ech,
+                    "echeance": date_ech.isoformat(),
+                })
+        except (ValueError, TypeError):
+            pass
+
+    # 5v. Elections CSE - renouvellement tous les 4 ans
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "elections_cse_renouvellement",
+            "urgence": "info",
+            "titre": "Renouvellement du CSE (tous les 4 ans)",
+            "description": (
+                "Le mandat des elus du CSE est de 4 ans. L'employeur doit organiser les elections "
+                "de renouvellement et informer les organisations syndicales au moins 2 mois avant l'expiration."
+            ),
+            "reference": "Art. L.2314-33 et L.2314-4 CT",
+            "action_requise": "Verifier la date de fin des mandats CSE et anticiper l'organisation des elections",
+        })
+
+    # 5w. Protection des donnees (RGPD / DPO)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "rgpd_conformite",
+            "urgence": "info",
+            "titre": "Conformite RGPD - Protection des donnees personnelles",
+            "description": (
+                "L'employeur traite des donnees personnelles de ses salaries (paie, sante, evaluations). "
+                "Registre des traitements obligatoire. DPO obligatoire si plus de 250 salaries ou "
+                "traitement de donnees sensibles a grande echelle."
+            ),
+            "reference": "RGPD art. 30, 37 - Loi Informatique et Libertes (CNIL)",
+            "action_requise": "Verifier le registre des traitements, les clauses contractuelles et la designation DPO si necessaire",
+        })
+
+    # 5x. Medaille du travail (20, 30, 35, 40 ans)
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif" or not contrat.get("date_debut"):
+            continue
+        try:
+            dd = date.fromisoformat(contrat["date_debut"])
+            anciennete_ans = (aujourdhui - dd).days / 365.25
+            for seuil in (20, 30, 35, 40):
+                if seuil - 0.5 <= anciennete_ans <= seuil + 0.5:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "medaille_travail",
+                        "urgence": "info",
+                        "titre": f"Medaille du travail : {contrat['prenom_salarie']} {contrat['nom_salarie']} ({seuil} ans)",
+                        "description": (
+                            f"Eligible a la medaille du travail ({seuil} ans de service). "
+                            f"Gratification facultative exoneree dans la limite d'un mois de salaire."
+                        ),
+                        "reference": "Decret n2000-1015 du 17/10/2000",
+                        "salarie_id": contrat.get("salarie_id"),
+                    })
+                    break
+        except (ValueError, TypeError):
+            pass
+
+    # --- 5bis. Alertes libres de l'utilisateur ---
+    for al in _alertes_libres:
+        if not al.get("actif", True) or al.get("statut") == "archivee":
+            continue
+        urgence_libre = al.get("urgence", "moyenne")
+        # Ajuster urgence si echeance proche
+        if al.get("date_echeance"):
+            try:
+                ech = date.fromisoformat(al["date_echeance"])
+                jours_avant = (ech - aujourdhui).days
+                if jours_avant < 0:
+                    urgence_libre = "haute"
+                elif jours_avant <= al.get("delai_rappel_jours", 7):
+                    urgence_libre = "haute" if jours_avant <= 3 else "moyenne"
+            except (ValueError, TypeError):
+                pass
+        alertes.append({
+            "id": al["id"],
+            "type": al.get("type_alerte", "personnalise"),
+            "urgence": urgence_libre,
+            "titre": al.get("titre", "Alerte personnalisee"),
+            "description": al.get("description", ""),
+            "reference": al.get("reference_legale", ""),
+            "action_requise": al.get("action_requise", ""),
+            "echeance": al.get("date_echeance", ""),
+            "recurrence": al.get("recurrence", ""),
+            "categorie": al.get("categorie", "autre"),
+            "notes": al.get("notes", ""),
+            "est_libre": True,
         })
 
     # --- 6. Rappels declarations ---
@@ -9938,8 +10552,56 @@ APP_HTML += """
 </div>
 <div class="tc" id="rh-alertes">
 <h2>Alertes et echeances RH</h2>
-<div class="al info"><span class="ai">&#128161;</span><span>Les alertes sont calculees automatiquement selon les donnees RH et les obligations legales.</span></div>
-<div id="rh-alertes-list" style="margin-top:12px"></div>
+<div class="al info"><span class="ai">&#128161;</span><span>Les alertes sont calculees automatiquement selon les donnees RH, les obligations legales et vos alertes personnalisees. Cliquez sur une alerte pour voir les details.</span></div>
+
+<div class="tabs" style="margin:14px 0 8px">
+<div class="tab active" onclick="showAlTab('auto',this)">Alertes automatiques</div>
+<div class="tab" onclick="showAlTab('libres',this)">Mes alertes personnalisees</div>
+<div class="tab" onclick="showAlTab('creer',this)">+ Creer une alerte</div>
+</div>
+
+<div class="al-panel active" id="al-auto">
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+<button class="btn btn-s btn-sm" onclick="filtrerAlertesUrgence('')">Toutes</button>
+<button class="btn btn-sm" style="background:var(--rl);color:var(--r)" onclick="filtrerAlertesUrgence('haute')">Haute</button>
+<button class="btn btn-sm" style="background:var(--ol);color:#92400e" onclick="filtrerAlertesUrgence('moyenne')">Moyenne</button>
+<button class="btn btn-sm" style="background:var(--pl);color:var(--p2)" onclick="filtrerAlertesUrgence('info')">Info</button>
+<span style="flex:1"></span>
+<button class="btn btn-s btn-sm" onclick="exportAlertes()">&#128190; Export CSV</button>
+</div>
+<div id="rh-alertes-list"></div>
+</div>
+
+<div class="al-panel" id="al-libres" style="display:none">
+<div id="rh-alertes-libres-list"><p style="color:var(--tx2)">Aucune alerte personnalisee configuree.</p></div>
+</div>
+
+<div class="al-panel" id="al-creer" style="display:none">
+<h2 style="margin-bottom:14px">Creer une alerte personnalisee</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Configurez une alerte libre avec vos propres criteres : echeance, recurrence, niveau d urgence, etc.</p>
+<div class="g2">
+<div><label>Titre de l alerte *</label><input id="al-titre" placeholder="Ex: Renouvellement bail commercial"></div>
+<div><label>Categorie</label><select id="al-categorie"><option value="rh">Ressources humaines</option><option value="fiscal">Fiscal / Comptable</option><option value="social">Social / URSSAF</option><option value="juridique">Juridique / Contrats</option><option value="securite">Securite / Prevention</option><option value="commercial">Commercial / Clients</option><option value="administratif">Administratif</option><option value="autre">Autre</option></select></div>
+</div>
+<div><label>Description detaillee</label><textarea id="al-desc" rows="3" placeholder="Decrivez le contexte et l'objet de cette alerte..."></textarea></div>
+<div class="g3">
+<div><label>Urgence</label><select id="al-urgence"><option value="info">Information</option><option value="moyenne" selected>Moyenne</option><option value="haute">Haute (critique)</option></select></div>
+<div><label>Date d echeance</label><input type="date" id="al-echeance"></div>
+<div><label>Recurrence</label><select id="al-recurrence"><option value="">Aucune (ponctuelle)</option><option value="quotidien">Quotidienne</option><option value="hebdomadaire">Hebdomadaire</option><option value="mensuel">Mensuelle</option><option value="trimestriel">Trimestrielle</option><option value="semestriel">Semestrielle</option><option value="annuel">Annuelle</option></select></div>
+</div>
+<div class="g2">
+<div><label>Action requise</label><input id="al-action" placeholder="Ex: Envoyer le courrier recommande avant la date limite"></div>
+<div><label>Destinataire / Responsable</label><input id="al-destinataire" placeholder="Ex: Responsable RH, DAF, Gerant..."></div>
+</div>
+<div class="g2">
+<div><label>Reference legale (optionnel)</label><input id="al-ref" placeholder="Ex: Art. L.1234-5 CT"></div>
+<div><label>Delai de rappel (jours avant echeance)</label><input type="number" id="al-delai" value="7" min="1" max="365"></div>
+</div>
+<div><label>Notes complementaires</label><textarea id="al-notes" rows="2" placeholder="Notes internes..."></textarea></div>
+<div class="btn-group" style="margin-top:14px"><button class="btn btn-blue btn-f" onclick="creerAlerteLibre()">Creer l alerte</button></div>
+<div id="al-creer-res" style="margin-top:10px"></div>
+</div>
+
 </div>
 <div class="tc" id="rh-bulletins">
 <h2>Generation de bulletins de paie</h2>
@@ -9999,10 +10661,67 @@ APP_HTML += """
 <div id="urssaf-list" style="margin-top:12px"></div>
 </div>
 <div class="card">
-<h2>Personnalisation des alertes</h2>
-<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Activez/desactivez les types d alertes et personnalisez les delais de notification.</p>
+<h2>Personnalisation des alertes automatiques</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Activez/desactivez les types d alertes automatiques, personnalisez les delais de notification et ajoutez des messages. Pour creer des alertes libres, utilisez l onglet <strong>Alertes</strong> dans <strong>Ressources humaines</strong>.</p>
 <div id="cfg-alertes-list" style="margin-top:8px"></div>
-<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type"><option value="dpae_a_effectuer">DPAE embauche</option><option value="visite_medicale_expiration">Visite medicale</option><option value="fin_contrat_cdd">Fin de contrat CDD</option><option value="fin_periode_essai">Fin periode essai</option><option value="entretien_professionnel_retard">Entretien professionnel</option><option value="prevoyance_cadres">Prevoyance cadres</option><option value="mutuelle_obligatoire">Mutuelle obligatoire</option><option value="duerp_obligatoire">DUERP</option><option value="cse_obligatoire">Elections CSE</option><option value="formation_professionnelle">Formation professionnelle</option><option value="registre_personnel">Registre du personnel</option><option value="declaration_dsn_mensuelle">DSN mensuelle</option><option value="participation_obligatoire">Participation (>=50)</option><option value="reglement_interieur">Reglement interieur (>=50)</option><option value="index_egalite">Index egalite pro (>=50)</option><option value="bilan_social">Bilan social (>=300)</option></select></div>
+<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type">
+<optgroup label="Echeances salaries">
+<option value="dpae_a_effectuer">DPAE embauche</option>
+<option value="fin_cdd">Fin de contrat CDD</option>
+<option value="fin_periode_essai">Fin periode essai</option>
+<option value="vip_embauche">Visite embauche (VIP)</option>
+<option value="visite_medicale_retard">Visite medicale retard</option>
+<option value="visite_medicale_a_planifier">Visite medicale a planifier</option>
+<option value="entretien_professionnel_retard">Entretien professionnel retard</option>
+<option value="entretien_professionnel_manquant">Entretien professionnel manquant</option>
+<option value="entretien_retour_absence">Entretien retour absence</option>
+<option value="retour_arret_imminent">Retour arret imminent</option>
+<option value="retour_conge">Retour conge</option>
+<option value="medaille_travail">Medaille du travail</option>
+<option value="purge_sanction">Purge sanction disciplinaire</option>
+</optgroup>
+<optgroup label="Obligations employeur">
+<option value="prevoyance_obligatoire">Prevoyance cadres</option>
+<option value="mutuelle_obligatoire">Mutuelle obligatoire</option>
+<option value="duerp_obligatoire">DUERP</option>
+<option value="registre_personnel">Registre du personnel</option>
+<option value="affichages_obligatoires">Affichages obligatoires</option>
+<option value="referent_securite">Referent securite</option>
+<option value="referent_harcelement">Referent harcelement</option>
+<option value="remboursement_transport">Frais transport 50%</option>
+<option value="rgpd_conformite">Conformite RGPD</option>
+</optgroup>
+<optgroup label="Seuils effectif">
+<option value="cse_obligatoire">CSE (>=11 sal.)</option>
+<option value="oeth_handicap">OETH handicap (>=20 sal.)</option>
+<option value="participation_obligatoire">Participation (>=50 sal.)</option>
+<option value="reglement_interieur">Reglement interieur (>=50 sal.)</option>
+<option value="index_egalite_pro">Index egalite pro (>=50 sal.)</option>
+<option value="nao">NAO (>=50 sal.)</option>
+<option value="bdese">BDESE (>=50 sal.)</option>
+<option value="plan_mobilite">Plan mobilite (>=50 sal.)</option>
+<option value="forfait_social">Forfait social (>=50 sal.)</option>
+<option value="participation_construction">Participation construction (>=50 sal.)</option>
+<option value="bilan_social">Bilan social (>=300 sal.)</option>
+</optgroup>
+<optgroup label="Declarations et echeances fiscales">
+<option value="declaration_dsn_mensuelle">DSN mensuelle</option>
+<option value="dsn_annuelle">DSN annuelle (bilan)</option>
+<option value="das2_honoraires">DAS-2 Honoraires</option>
+<option value="contribution_formation">Contribution formation / TA</option>
+<option value="taxe_salaires">Taxe sur les salaires</option>
+<option value="echeance_fiscale">Echeances fiscales calendaires</option>
+<option value="versement_mobilite">Versement mobilite</option>
+<option value="agirc_arrco">Cotisations AGIRC-ARRCO</option>
+<option value="elections_cse_renouvellement">Renouvellement CSE</option>
+</optgroup>
+<optgroup label="Gestion courante">
+<option value="formation_professionnelle">Formation professionnelle</option>
+<option value="heures_supplementaires">Heures supplementaires</option>
+<option value="conges_payes">Conges payes</option>
+<option value="entretien_professionnel">Entretien professionnel bisannuel</option>
+</optgroup>
+</select></div>
 <div><label>Delai notification (jours)</label><input type="number" id="cfg-al-delai" value="30"></div>
 <div><label>Actif</label><select id="cfg-al-actif"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
 <label>Message personnalise (optionnel)</label><input id="cfg-al-msg" placeholder="Message personnalise pour cette alerte">
@@ -11513,25 +12232,72 @@ function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.ge
 rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
 function loadRHEchanges(){rhGet("/api/rh/echanges",function(list){var el=document.getElementById("rh-ec-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun echange.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Objet</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_echange+"</span></td><td>"+e.date_echange+"</td><td>"+e.objet+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function loadRHAlertes(){rhGet("/api/rh/alertes",function(resp){var el=document.getElementById("rh-alertes-list");
+function loadRHAlertes(){rhGet("/api/rh/alertes",function(resp){
 var list=(resp&&resp.alertes)?resp.alertes:(Array.isArray(resp)?resp:[]);
-if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
-var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s) - Cliquez pour voir les details</p>";
+_rhAlertesData=list;renderAlertesList(list);});}
+var _rhAlertesData=null;
+function filtrerAlertesUrgence(urg){if(!_rhAlertesData)return;var list=_rhAlertesData;if(urg)list=list.filter(function(a){return a.urgence===urg;});renderAlertesList(list);}
+function renderAlertesList(list){var el=document.getElementById("rh-alertes-list");
+if(!list||!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
+var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s)</p>";
 for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
-h+="<div class='al "+cls+"' style='cursor:pointer' data-toggle-detail='1'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+(a.titre||a.type||"Alerte")+"</strong> - "+(a.description||"");
-if(a.echeance)h+=" <em>(echeance: "+a.echeance+")</em>";
-if(a.message_personnalise)h+=" <em style='color:var(--p2)'>["+a.message_personnalise+"]</em>";
-h+="</span>";
-h+="<div class='al-detail' style='display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,.03);border-radius:6px;font-size:.86em'>";
-if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600'>&#9888; Consequence legale : "+a.incidence_legale+"</p>";
-if(a.reference)h+="<p style='margin-top:4px;color:var(--tx2)'>Reference : "+a.reference+"</p>";
-if(a.action_requise)h+="<p style='margin-top:4px'><strong>Action requise :</strong> "+a.action_requise+"</p>";
-if(a.documents_requis){h+="<p style='margin-top:4px'><strong>Documents requis :</strong></p><ul style='margin:2px 0 0 16px'>";
-var docs=a.documents_requis;if(typeof docs==="string")docs=docs.split(",");for(var j=0;j<docs.length;j++){h+="<li>"+docs[j]+"</li>";}h+="</ul>";}
-if(a.delai_personnalise)h+="<p style='margin-top:4px;color:var(--p2)'>Delai de notification personnalise : "+a.delai_personnalise+" jours</p>";
+var icon=a.urgence==="haute"?"&#9888;":(a.urgence==="moyenne"?"&#128161;":"&#8505;");
+h+="<div class='anomalie sev-"+(a.urgence==="haute"?"high":(a.urgence==="moyenne"?"med":"low"))+"' onclick='this.classList.toggle(\"open\")' style='margin:6px 0'>";
+h+="<div class='head'><div class='title'>"+(a.titre||a.type||"Alerte");
+if(a.est_libre)h+=" <span class='badge badge-purple' style='font-size:.68em;vertical-align:middle'>Personnalisee</span>";
+if(a.recurrence)h+=" <span class='badge badge-teal' style='font-size:.68em;vertical-align:middle'>"+a.recurrence+"</span>";
+h+="</div><div style='display:flex;gap:4px;align-items:center'>";
+if(a.echeance)h+="<span class='badge badge-amber'>"+a.echeance+"</span>";
+h+="<span class='badge badge-"+cls+"'>"+a.urgence+"</span>";
+h+="</div></div>";
+h+="<div style='font-size:.84em;color:var(--tx2);margin-top:4px'>"+(a.description||"")+"</div>";
+h+="<div class='detail'>";
+if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600;margin:4px 0'>&#9888; Consequence legale : "+a.incidence_legale+"</p>";
+if(a.reference)h+="<p style='margin:4px 0;color:var(--tx2)'>Reference : "+a.reference+"</p>";
+if(a.action_requise)h+="<p style='margin:4px 0'><strong>Action requise :</strong> "+a.action_requise+"</p>";
+if(a.notes)h+="<p style='margin:4px 0;font-style:italic;color:var(--tx2)'>Notes : "+a.notes+"</p>";
+if(a.message_personnalise)h+="<p style='margin:4px 0;color:var(--p2)'>["+a.message_personnalise+"]</p>";
+if(a.est_libre)h+="<div style='margin-top:8px'><button class='btn btn-sm' style='background:var(--ol);color:#92400e' onclick='event.stopPropagation();marquerAlerteTraitee(\""+a.id+"\")'>Marquer traitee</button> <button class='btn btn-sm btn-red' onclick='event.stopPropagation();supprimerAlerteLibre(\""+a.id+"\")'>Supprimer</button></div>";
 h+="</div></div>";}
-h+="<style>.al-detail.show{display:block!important}</style>";
+el.innerHTML=h;}
+function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#rh-alertes .al-panel").forEach(function(t){t.style.display="none";t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("al-"+n);if(tc){tc.style.display="block";tc.classList.add("active");}if(n==="libres")loadAlertesLibres();if(n==="auto")loadRHAlertes();}
+function creerAlerteLibre(){var titre=document.getElementById("al-titre").value;if(!titre){toast("Le titre est obligatoire.");return;}
+var fd=new FormData();fd.append("titre",titre);fd.append("description",document.getElementById("al-desc").value);fd.append("categorie",document.getElementById("al-categorie").value);fd.append("urgence",document.getElementById("al-urgence").value);fd.append("date_echeance",document.getElementById("al-echeance").value);fd.append("recurrence",document.getElementById("al-recurrence").value);fd.append("action_requise",document.getElementById("al-action").value);fd.append("destinataire",document.getElementById("al-destinataire").value);fd.append("reference_legale",document.getElementById("al-ref").value);fd.append("delai_rappel_jours",document.getElementById("al-delai").value);fd.append("notes",document.getElementById("al-notes").value);
+rhPost("/api/rh/alertes/libres",fd,function(d){document.getElementById("al-creer-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Alerte <strong>"+d.titre+"</strong> creee avec succes.</span></div>";document.getElementById("al-titre").value="";document.getElementById("al-desc").value="";document.getElementById("al-action").value="";document.getElementById("al-destinataire").value="";document.getElementById("al-ref").value="";document.getElementById("al-notes").value="";document.getElementById("al-echeance").value="";toast("Alerte personnalisee creee.","ok");});}
+function loadAlertesLibres(){rhGet("/api/rh/alertes/libres",function(list){var el=document.getElementById("rh-alertes-libres-list");
+if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune alerte personnalisee configuree. Utilisez l onglet <strong>Creer une alerte</strong> pour ajouter vos propres rappels.</p>";return;}
+var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s) personnalisee(s)</p>";
+var urgColors={"haute":"err","moyenne":"warn","info":"info"};
+var statutLabels={"active":"badge-green","traitee":"badge-blue","reportee":"badge-amber","archivee":"badge-red"};
+for(var i=0;i<list.length;i++){var a=list[i];
+h+="<div class='card' style='margin:8px 0;padding:16px;border-left:4px solid var(--"+(a.urgence==="haute"?"r":(a.urgence==="moyenne"?"o":"p3"))+")'>";
+h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px'>";
+h+="<div><strong>"+a.titre+"</strong>";
+if(a.categorie&&a.categorie!=="autre")h+=" <span class='badge badge-blue'>"+a.categorie+"</span>";
+h+="</div><div style='display:flex;gap:4px'>";
+h+="<span class='badge badge-"+(urgColors[a.urgence]||"info")+"'>"+a.urgence+"</span>";
+h+="<span class='badge "+(statutLabels[a.statut]||"badge-green")+"'>"+(a.statut||"active")+"</span>";
+if(a.recurrence)h+="<span class='badge badge-teal'>"+a.recurrence+"</span>";
+h+="</div></div>";
+if(a.description)h+="<div style='font-size:.86em;color:var(--tx);margin-top:6px'>"+a.description+"</div>";
+var details=[];
+if(a.date_echeance)details.push("<strong>Echeance :</strong> "+a.date_echeance);
+if(a.action_requise)details.push("<strong>Action :</strong> "+a.action_requise);
+if(a.destinataire)details.push("<strong>Responsable :</strong> "+a.destinataire);
+if(a.reference_legale)details.push("<strong>Ref. legale :</strong> "+a.reference_legale);
+if(a.delai_rappel_jours)details.push("<strong>Rappel :</strong> "+a.delai_rappel_jours+" jours avant");
+if(details.length)h+="<div style='margin-top:8px;font-size:.82em;color:var(--tx2)'>"+details.join(" &bull; ")+"</div>";
+if(a.notes)h+="<div style='margin-top:4px;font-size:.82em;font-style:italic;color:var(--tx2)'>"+a.notes+"</div>";
+h+="<div style='margin-top:10px;display:flex;gap:6px'>";
+if(a.statut!=="traitee")h+="<button class='btn btn-sm btn-green' onclick='marquerAlerteTraitee(\""+a.id+"\")'>Traitee</button>";
+if(a.statut!=="archivee")h+="<button class='btn btn-sm btn-s' onclick='archiverAlerteLibre(\""+a.id+"\")'>Archiver</button>";
+h+="<button class='btn btn-sm btn-red' onclick='supprimerAlerteLibre(\""+a.id+"\")'>Supprimer</button>";
+h+="</div></div>";}
 el.innerHTML=h;});}
+function marquerAlerteTraitee(id){var fd=new FormData();fd.append("statut","traitee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte marquee comme traitee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function archiverAlerteLibre(id){var fd=new FormData();fd.append("statut","archivee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte archivee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function supprimerAlerteLibre(id){if(!confirm("Supprimer cette alerte ?"))return;fetch("/api/rh/alertes/libres/"+id,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte supprimee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function exportAlertes(){if(!_rhAlertesData||!_rhAlertesData.length)return;var csv="Urgence;Titre;Description;Reference;Action requise;Echeance\n";for(var i=0;i<_rhAlertesData.length;i++){var a=_rhAlertesData[i];csv+='"'+(a.urgence||"")+'";"'+(a.titre||"")+'";"'+((a.description||"").replace(/"/g,"'"))+'";"'+(a.reference||"")+'";"'+(a.action_requise||"")+'";"'+(a.echeance||"")+'"'+"\n";}var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="alertes_rh.csv";l.click();URL.revokeObjectURL(u);}
 function prefillBulletin(cid){if(!cid)return;rhGet("/api/rh/contrats",function(list){for(var i=0;i<list.length;i++){var c=list[i];if(c.id===cid){document.getElementById("rh-bp-nom").value=c.nom_salarie||c.nom||"";document.getElementById("rh-bp-prenom").value=c.prenom_salarie||c.prenom||"";document.getElementById("rh-bp-brut").value=c.salaire_brut||"";if(c.duree_hebdo)document.getElementById("rh-bp-heures").value=(parseFloat(c.duree_hebdo)/35*151.67).toFixed(2);break;}}});}
 function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
 rhPost("/api/rh/bulletins/generer",fd,function(d){
