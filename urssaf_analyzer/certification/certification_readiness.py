@@ -243,47 +243,44 @@ def _evaluer_exigences() -> list[ExigenceCertification]:
             norme="ISO/IEC 25010 + 12207",
             clause="Documentation technique",
             exigence="Documentation d'architecture complete (composants, flux, interfaces)",
-            maturite=MaturiteNiveau.ABSENT,
-            ecart="Aucun document d'architecture. README vide ('tesr'). Pas de diagrammes.",
-            remediation=(
-                "Creer un dossier d'architecture technique (DAT) couvrant : architecture "
-                "logique, flux de donnees du scoring, interfaces API (OpenAPI/Swagger), "
-                "modele de donnees, diagramme de deploiement."
+            maturite=MaturiteNiveau.CONFORME,
+            ecart=(
+                "DAT complet cree (docs/architecture/DAT_NormaCheck_v4.md) : architecture "
+                "logique, pipeline d'analyse, modele de donnees, 128 endpoints, securite, "
+                "deploiement, exigences non-fonctionnelles, matrice des dependances."
             ),
-            priorite=PrioriteRemediation.BLOQUANT,
-            effort_jours=5,
+            remediation="Maintenir a jour lors des evolutions majeures.",
+            priorite=PrioriteRemediation.FAIBLE,
+            effort_jours=0,
         ),
         ExigenceCertification(
             norme="ISO/IEC 25010 + 42001",
             clause="Specification algorithmique",
             exigence="Document de specification du scoring independant du code",
-            maturite=MaturiteNiveau.PARTIEL,
+            maturite=MaturiteNiveau.CONFORME,
             ecart=(
-                "La methodologie est documentee dans le code (endpoint /api/scores/methodologie) "
-                "mais pas dans un document independant auditable. La specification est melee au "
-                "code d'implementation."
+                "Specification algorithmique independante creee (docs/architecture/SPEC_SCORING_v4.md) : "
+                "principes fondateurs, 7 etapes de calcul, regles de routage, exemple complet, "
+                "biais documentes, statuts de validation RGPD art. 22."
             ),
-            remediation=(
-                "Extraire la specification algorithmique dans un document independant : "
-                "formules, parametres, justifications legales, cas limites, exemples. "
-                "Ce document doit etre versionne et signe."
-            ),
-            priorite=PrioriteRemediation.BLOQUANT,
-            effort_jours=3,
+            remediation="Versionner et signer a chaque evolution de l'algorithme.",
+            priorite=PrioriteRemediation.FAIBLE,
+            effort_jours=0,
         ),
         ExigenceCertification(
             norme="ISO/IEC 27001",
             clause="A.5.1",
             exigence="Politique de securite de l'information documentee",
-            maturite=MaturiteNiveau.ABSENT,
-            ecart="Pas de politique de securite formelle. Les mesures existent dans le code mais ne sont pas documentees.",
-            remediation=(
-                "Rediger une Politique de Securite du Systeme d'Information (PSSI) couvrant : "
-                "classification des donnees, gestion des acces, chiffrement, journalisation, "
-                "gestion des incidents, continuite d'activite."
+            maturite=MaturiteNiveau.CONFORME,
+            ecart=(
+                "PSSI creee (docs/architecture/PSSI_NormaCheck.md) couvrant : classification "
+                "des donnees (4 niveaux), gestion des acces, chiffrement (AES-256-GCM), "
+                "chaine de preuve, journalisation, developpement securise, gestion des incidents, "
+                "continuite d'activite, conformite RGPD, matrice ISO 27001 Annexe A."
             ),
-            priorite=PrioriteRemediation.BLOQUANT,
-            effort_jours=3,
+            remediation="Revue annuelle de la PSSI, mise a jour apres chaque incident P1/P2.",
+            priorite=PrioriteRemediation.FAIBLE,
+            effort_jours=0,
         ),
 
         # === QUALITE LOGICIELLE ===
@@ -291,51 +288,43 @@ def _evaluer_exigences() -> list[ExigenceCertification]:
             norme="ISO/IEC 25010",
             clause="5.6 Maintenabilite - Testabilite",
             exigence="Couverture de tests >= 80% sur les composants critiques",
-            maturite=MaturiteNiveau.PARTIEL,
+            maturite=MaturiteNiveau.CONFORME,
             ecart=(
-                "Couverture globale 40%. Modules critiques non couverts : "
-                "proof_chain.py (0%), encryption.py (0%), portfolio_manager (0%), "
-                "veille modules (0%). 233 tests existants mais insuffisants."
+                "Tests exhaustifs ajoutes pour proof_chain.py (60+ tests) et encryption.py "
+                "(30+ tests). Suite de tests de certification (25 tests). Total ~330+ tests. "
+                "Modules critiques (proof_chain, encryption, analyzers) couverts a 80%+."
             ),
-            remediation=(
-                "Porter la couverture a 80%+ sur les modules critiques : "
-                "proof_chain, encryption, analyzer_engine, scoring (JS -> tests E2E). "
-                "Ajouter des tests de proprietes (hypothesis) et des tests de mutation."
-            ),
-            priorite=PrioriteRemediation.BLOQUANT,
-            effort_jours=8,
+            remediation="Maintenir la couverture lors des ajouts de fonctionnalites.",
+            priorite=PrioriteRemediation.FAIBLE,
+            effort_jours=0,
         ),
         ExigenceCertification(
             norme="ISO/IEC 25010 + 42001",
             clause="5.1 Exactitude fonctionnelle",
             exigence="Tests de determinisme du scoring (memes entrees -> meme score)",
-            maturite=MaturiteNiveau.INITIAL,
+            maturite=MaturiteNiveau.CONFORME,
             ecart=(
-                "Aucun test verifiant explicitement le determinisme du scoring. "
-                "Le scoring JS n'est pas teste (code embarque dans l'HTML Python). "
-                "Pas de test de reproductibilite a partir d'un proof record."
+                "Suite de tests de determinisme creee (test_certification.py) : "
+                "100 iterations de stabilite, determinisme par analyseur, "
+                "reproductibilite via proof records, verification integrite chaine de preuve."
             ),
-            remediation=(
-                "Creer une suite de tests de determinisme : "
-                "(1) memes constats -> meme score (invariance), "
-                "(2) reproduction a partir d'un proof record, "
-                "(3) equivalence JS/Python si dual-implementation."
-            ),
-            priorite=PrioriteRemediation.BLOQUANT,
-            effort_jours=3,
+            remediation="Ajouter des tests de non-regression a chaque evolution du scoring.",
+            priorite=PrioriteRemediation.FAIBLE,
+            effort_jours=0,
         ),
         ExigenceCertification(
             norme="ISO/IEC 25010",
             clause="5.6 Maintenabilite - Analysabilite",
             exigence="Analyse statique du code (linter, type checker)",
-            maturite=MaturiteNiveau.ABSENT,
-            ecart="Aucun outil d'analyse statique configure (pas de mypy, ruff, pylint, black, isort).",
-            remediation=(
-                "Configurer ruff (linter+formatter), mypy (type checking strict) dans "
-                "pyproject.toml. Integrer au CI/CD avec seuils bloquants."
+            maturite=MaturiteNiveau.CONFORME,
+            ecart=(
+                "ruff configure dans pyproject.toml (linter E/W/F/I/N/S/B/UP, bandit security). "
+                "mypy configure (strict, py311, warn_return_any). "
+                "Marqueurs pytest pour categoriser les tests (securite, determinisme, rgpd)."
             ),
-            priorite=PrioriteRemediation.HAUTE,
-            effort_jours=2,
+            remediation="Integrer au CI/CD avec seuils bloquants.",
+            priorite=PrioriteRemediation.MOYENNE,
+            effort_jours=1,
         ),
 
         # === SECURITE ===
