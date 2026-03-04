@@ -7330,6 +7330,197 @@ async def creer_sous_compte(
 
 
 # ======================================================================
+# FEC - IMPORT / EXPORT / VALIDATION
+# ======================================================================
+
+@app.post("/api/fec/importer")
+async def importer_fec(file: UploadFile = File(...)):
+    """Importe et analyse un fichier FEC (Art. L.47 A-I LPF).
+
+    Accepte les formats : .fec, .txt, .csv avec separateur tabulation ou pipe.
+    Retourne l'analyse complete : conformite, equilibre, ecritures.
+    """
+    from urssaf_analyzer.parsers.fec_parser import FECParser, detecter_fec
+    from urssaf_analyzer.models.documents import Document
+
+    contenu = await file.read()
+    ext = Path(file.filename).suffix.lower() if file.filename else ".fec"
+
+    # Sauvegarder temporairement
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="wb") as tmp:
+        tmp.write(contenu)
+        tmp_path = Path(tmp.name)
+
+    try:
+        parser = FECParser()
+        if not parser.peut_traiter(tmp_path):
+            raise HTTPException(
+                400,
+                "Le fichier ne semble pas etre un FEC valide. "
+                "Verifiez que les 18 colonnes obligatoires sont presentes."
+            )
+
+        doc = Document(
+            nom_fichier=file.filename or "fec_import.fec",
+            chemin=str(tmp_path),
+            taille=len(contenu),
+        )
+
+        declarations = parser.parser(tmp_path, doc)
+        metadata = parser.extraire_metadata(tmp_path)
+
+        # Importer les ecritures FEC dans le moteur comptable
+        moteur = get_moteur()
+        ecritures_importees = 0
+        if declarations and declarations[0].metadata.get("ecritures_fec"):
+            from urssaf_analyzer.comptabilite.ecritures import Ecriture, LigneEcriture
+            ecritures_fec = declarations[0].metadata["ecritures_fec"]
+
+            # Regrouper par ecriture_num
+            par_num = {}
+            for ec in ecritures_fec:
+                num = ec.get("ecriture_num", "")
+                if num not in par_num:
+                    par_num[num] = []
+                par_num[num].append(ec)
+
+            for num, lignes_ec in par_num.items():
+                if not lignes_ec:
+                    continue
+                premiere = lignes_ec[0]
+                journal_code = premiere.get("journal_code", "OD")
+
+                # Mapper vers TypeJournal
+                tj = TypeJournal.OPERATIONS_DIVERSES
+                for t in TypeJournal:
+                    if t.value == journal_code:
+                        tj = t
+                        break
+
+                ecriture_date = None
+                if premiere.get("ecriture_date"):
+                    try:
+                        ecriture_date = date.fromisoformat(premiere["ecriture_date"])
+                    except (ValueError, TypeError):
+                        ecriture_date = date.today()
+
+                piece_date = None
+                if premiere.get("piece_date"):
+                    try:
+                        piece_date = date.fromisoformat(premiere["piece_date"])
+                    except (ValueError, TypeError):
+                        pass
+
+                ecriture = Ecriture(
+                    journal=tj,
+                    date_ecriture=ecriture_date or date.today(),
+                    date_piece=piece_date or ecriture_date or date.today(),
+                    numero_piece=premiere.get("piece_ref", num),
+                    libelle=premiere.get("ecriture_lib", ""),
+                )
+
+                for l in lignes_ec:
+                    ecriture.lignes.append(LigneEcriture(
+                        compte=l.get("compte_num", ""),
+                        libelle=l.get("ecriture_lib", ""),
+                        debit=Decimal(str(l.get("debit", 0))),
+                        credit=Decimal(str(l.get("credit", 0))),
+                        lettrage=l.get("ecrture_let", ""),
+                        piece_ref=l.get("piece_ref", ""),
+                    ))
+
+                moteur.ecritures.append(ecriture)
+                ecritures_importees += 1
+
+        # Retirer les ecritures brutes de la reponse (trop volumineux)
+        result_meta = {k: v for k, v in (declarations[0].metadata or {}).items()
+                       if k != "ecritures_fec"}
+
+        log_action("utilisateur", "import_fec", f"{file.filename}: {ecritures_importees} ecritures importees")
+        return {
+            "ok": True,
+            "fichier": file.filename,
+            "ecritures_importees": ecritures_importees,
+            "metadata": metadata,
+            "analyse": result_meta,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.get("/api/fec/exporter")
+async def exporter_fec_endpoint(
+    siren: str = Query("", description="SIREN de l'entreprise (9 chiffres)"),
+    date_cloture: Optional[str] = Query(None, description="Date de cloture (YYYY-MM-DD)"),
+    validees_seulement: bool = Query(True, description="N'exporter que les ecritures validees"),
+):
+    """Exporte les ecritures comptables au format FEC reglementaire.
+
+    Genere un fichier conforme a l'art. L.47 A-I LPF, telechargeable directement.
+    Nom de fichier : {SIREN}FEC{YYYYMMDD}.txt
+    """
+    from urssaf_analyzer.comptabilite.fec_export import exporter_fec, nom_fichier_fec
+    from fastapi.responses import Response
+
+    moteur = get_moteur()
+    if not moteur.ecritures:
+        raise HTTPException(404, "Aucune ecriture comptable a exporter")
+
+    dt_cloture = None
+    if date_cloture:
+        try:
+            dt_cloture = date.fromisoformat(date_cloture)
+        except ValueError:
+            raise HTTPException(400, "Format de date invalide (attendu: YYYY-MM-DD)")
+
+    contenu = exporter_fec(moteur, siren=siren, date_cloture=dt_cloture,
+                            validees_seulement=validees_seulement)
+    filename = nom_fichier_fec(siren, dt_cloture)
+
+    log_action("utilisateur", "export_fec", f"Export FEC: {filename}")
+    return Response(
+        content=contenu.encode("utf-8-sig"),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-FEC-Siren": siren or "000000000",
+        },
+    )
+
+
+@app.post("/api/fec/valider")
+async def valider_fec_endpoint(file: UploadFile = File(...)):
+    """Valide la conformite d'un fichier FEC (controles DGFIP).
+
+    Controles effectues :
+    - Presence des 18 colonnes obligatoires (art. A.47 A-1 LPF)
+    - Format des dates (YYYYMMDD)
+    - Equilibre debit/credit par ecriture
+    - Equilibre general du fichier
+    """
+    from urssaf_analyzer.comptabilite.fec_export import valider_fec as _valider_fec
+
+    contenu_bytes = await file.read()
+    try:
+        contenu = contenu_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        contenu = contenu_bytes.decode("latin-1")
+
+    # Detecter le separateur
+    premiere_ligne = contenu.split("\n", 1)[0]
+    sep = "\t"
+    for s in ("\t", "|", ";"):
+        if s in premiere_ligne:
+            sep = s
+            break
+
+    rapport = _valider_fec(contenu, separateur=sep)
+    rapport["fichier"] = file.filename
+    log_action("utilisateur", "validation_fec", f"{file.filename}: {'conforme' if rapport['valide'] else 'non conforme'}")
+    return rapport
+
+
+# ======================================================================
 # RH - ALERTES PERSONNALISABLES
 # ======================================================================
 

@@ -480,4 +480,5 @@ SUPPORTED_EXTENSIONS = {
     ".txt": "texte",
     ".docx": "word",
     ".doc": "word",
+    ".fec": "fec",
 }
