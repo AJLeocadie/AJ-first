@@ -267,6 +267,8 @@ class ScoreProofRecord:
             "version_moteur": version_moteur,
             "version_constantes": version_constantes,
             "formule": "S = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+            "echelle_wk": "ordinale (rang de gravite, non proportionnelle aux montants de majoration)",
+            "methode_arrondi": "Math.round (half-up) — favorable a l'entite auditee aux frontieres",
             "poids_severite": {"critique": 4, "haute": 3, "moyenne": 2, "faible": 1},
             "documents_entree": doc_hashes,
             "nb_documents": len(doc_hashes),
@@ -277,7 +279,11 @@ class ScoreProofRecord:
                 "score": score_global.get("score", 0),
                 "grade": score_global.get("grade", ""),
                 "methode_ponderation": "Nk/Somme_Nk (proportionnelle)",
+                "grade_informatif": True,
+                "non_opposable": True,
             },
+            "horodatage_source": "horloge systeme UTC (non certifie RFC 3161)",
+            "delai_validation_jours": 30,
             "references_legales_applicables": references_legales or {},
             "avertissement": (
                 "SCORE PROVISOIRE - Outil d'aide a la decision, non decision "

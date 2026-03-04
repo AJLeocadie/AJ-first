@@ -516,6 +516,14 @@ async def scores_methodologie():
             "irregularite. Tout constat est soumis a procedure contradictoire avant integration "
             "definitive dans le score (art. L121-1 CRPA, principe du contradictoire)."
         ),
+        "delai_validation_provisoire": {
+            "delai_jours": 30,
+            "description": "Un score PROVISOIRE non valide dans les 30 jours calendaires doit "
+                           "etre requalifie en EXPIRE et ne peut plus etre utilise a des fins "
+                           "decisionnelles sans revalidation.",
+            "base_legale": "Principe de securite juridique - un score indicatif ne peut rester "
+                           "indefiniment en statut provisoire.",
+        },
         "procedure_contradictoire": {
             "principe": "Tout constat impactant le score peut etre conteste par l entite auditee "
                         "avant integration definitive (art. L121-1 CRPA)",
@@ -9693,8 +9701,17 @@ for(var j=0;j<constats.length;j++){var cc=constats[j];var ct=(cc.categorie||"").
 return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas,totalW:totalW,Wmax:Wmax,Sbrut:Sbrut,Fc:Fc,intervalle:{bas:scoreBas,haut:scoreHaut,marge:marge},nb_constats_contestables:nbContest};}
 function calculateTripleScore(data){
 var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
-var urssafC=[],fiscalC=[],cdcC=[],routageTrace=[];
+/* Deduplication des constats (principe non bis in idem) :
+ * triplet (titre_normalise, categorie, severite) identifie un constat unique */
+var seen={};var deduped=[];
+for(var di=0;di<constats.length;di++){
+var dc=constats[di];var dkey=((dc.titre||"").toLowerCase().trim())+"|"+((dc.categorie||"").toLowerCase())+"|"+((dc.severite||"").toLowerCase());
+if(!seen[dkey]){seen[dkey]=true;deduped.push(dc);}}
+var nbDeduplicated=constats.length-deduped.length;
+constats=deduped;
+var urssafC=[],fiscalC=[],cdcC=[],routageTrace=[];var nbRoutageDefaut=0;
 for(var i=0;i<constats.length;i++){var c=constats[i];var routing=categToDomain(c.categorie,c.reference_legale,c.titre);var dom=routing.domain;
+if(routing.regle.indexOf("defaut")>=0||routing.regle.indexOf("aucune regle")>=0)nbRoutageDefaut++;
 routageTrace.push({constat:c.titre||"",categorie:c.categorie||"",domaine_affecte:dom,regle_appliquee:routing.regle});
 if(dom==="fiscal")fiscalC.push(c);else if(dom==="cdc")cdcC.push(c);else urssafC.push(c);}
 var su=_scoreOne(urssafC,nbDecl,"urssaf");var sf=_scoreOne(fiscalC,nbDecl,"fiscal");var sc=_scoreOne(cdcC,nbDecl,"cdc");
@@ -9725,10 +9742,19 @@ for(var ic=0;ic<constats.length;ic++){if((constats[ic].categorie||"").toLowerCas
 var penaliteIncoherences=0;
 if(nbIncoherences>5){penaliteIncoherences=Math.min(15,(nbIncoherences-5)*2);global=Math.max(0,global-penaliteIncoherences);}
 var ggrade="F";if(global>=90)ggrade="A";else if(global>=75)ggrade="B";else if(global>=60)ggrade="C";else if(global>=45)ggrade="D";else if(global>=30)ggrade="E";
+/* Avertissement incertitude si marge > 10 sur un domaine */
+var avertissements=[];
+if(su.intervalle&&su.intervalle.marge>10)avertissements.push("URSSAF: incertitude significative (marge="+su.intervalle.marge+")");
+if(sf.intervalle&&sf.intervalle.marge>10)avertissements.push("DGFIP: incertitude significative (marge="+sf.intervalle.marge+")");
+if(sc.intervalle&&sc.intervalle.marge>10)avertissements.push("CDC: incertitude significative (marge="+sc.intervalle.marge+")");
+if(nbRoutageDefaut>0&&constats.length>0&&nbRoutageDefaut/constats.length>0.2)
+avertissements.push("Routage par defaut: "+nbRoutageDefaut+"/"+constats.length+" constats routes vers URSSAF par defaut (>20%)");
 return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length,
+nb_constats_dedupliques:nbDeduplicated,
 nb_incoherences:nbIncoherences,penalite_incoherences:penaliteIncoherences,
+nb_routage_defaut:nbRoutageDefaut,
 poids:{urssaf:wu,fiscal:wf,cdc:wc},methode:"Moyenne ponderee par nombre de points de controle (Nk/Somme_Nk)",
-routage_domaine:routageTrace,statut_validation:"provisoire"};}
+routage_domaine:routageTrace,statut_validation:"provisoire",avertissements:avertissements};}
 function calculateConformityScore(data){
 var ts=calculateTripleScore(data);var g=ts.global;var p=ts.poids;
 var allDetails=ts.urssaf.details.concat(ts.fiscal.details).concat(ts.cdc.details);

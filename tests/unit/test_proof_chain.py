@@ -358,6 +358,22 @@ class TestProofChainGetEntries:
         entries = chain.get_entries(limit=0)
         assert len(entries) == 10
 
+    def test_get_entries_avec_lignes_vides(self, tmp_path):
+        """Les lignes vides sont ignorees lors de la lecture."""
+        chain = _make_chain(tmp_path)
+        chain.append("evt1", {"n": 1})
+        chain.append("evt2", {"n": 2})
+
+        # Inserer des lignes vides
+        content = chain.chain_path.read_text(encoding="utf-8")
+        lines = content.strip().split("\n")
+        chain.chain_path.write_text(
+            "\n" + lines[0] + "\n\n" + lines[1] + "\n\n", encoding="utf-8"
+        )
+
+        entries = chain.get_entries()
+        assert len(entries) == 2
+
     def test_get_entries_chaine_vide(self, tmp_path):
         """Lecture d'une chaine inexistante retourne liste vide."""
         chain = _make_chain(tmp_path)
@@ -387,6 +403,23 @@ class TestProofChainGetEntries:
         """Recherche dans une chaine vide retourne None."""
         chain = _make_chain(tmp_path)
         assert chain.get_entry_by_seq(1) is None
+
+    def test_get_entry_by_seq_avec_lignes_vides(self, tmp_path):
+        """Les lignes vides sont ignorees lors de la recherche par seq."""
+        chain = _make_chain(tmp_path)
+        chain.append("evt1", {"n": 1})
+        chain.append("evt2", {"n": 2})
+
+        # Inserer des lignes vides entre les entrees
+        content = chain.chain_path.read_text(encoding="utf-8")
+        lines = content.strip().split("\n")
+        chain.chain_path.write_text(
+            lines[0] + "\n\n\n" + lines[1] + "\n", encoding="utf-8"
+        )
+
+        entry = chain.get_entry_by_seq(2)
+        assert entry is not None
+        assert entry["seq"] == 2
 
 
 class TestProofChainGetLastEntry:
@@ -700,6 +733,13 @@ class TestConstantsVersioner:
         """Les taux de cotisations sont presents."""
         snapshot = ConstantsVersioner.snapshot_constants()
         assert len(snapshot["taux_cotisations"]) > 0
+
+    def test_snapshot_legal_references(self):
+        """Le snapshot des references legales contient les champs attendus."""
+        snapshot = ConstantsVersioner.snapshot_legal_references(2026)
+        assert snapshot["annee"] == 2026
+        assert "date_snapshot" in snapshot
+        assert "legislation" in snapshot
 
 
 # ──────────────────────────────────────────────

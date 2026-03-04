@@ -95,6 +95,45 @@ class TestAuditLogger:
         entries = audit.lire_journal()
         assert entries == []
 
+    def test_log_analyse(self, tmp_path):
+        """Test de la methode log_analyse."""
+        log_path = tmp_path / "audit.log"
+        audit = AuditLogger(log_path)
+        audit.log_analyse("s1", "AnomalyDetector", 5)
+        entries = audit.lire_journal()
+        assert entries[0]["operation"] == "analyse"
+        assert entries[0]["details"]["analyseur"] == "AnomalyDetector"
+        assert entries[0]["details"]["nb_findings"] == 5
+
+    def test_log_rapport(self, tmp_path):
+        """Test de la methode log_rapport."""
+        log_path = tmp_path / "audit.log"
+        audit = AuditLogger(log_path)
+        audit.log_rapport("s1", "pdf", "/tmp/rapport.pdf")
+        entries = audit.lire_journal()
+        assert entries[0]["operation"] == "generation_rapport"
+        assert entries[0]["details"]["format"] == "pdf"
+        assert entries[0]["details"]["chemin"] == "/tmp/rapport.pdf"
+
+    def test_log_chiffrement(self, tmp_path):
+        """Test de la methode log_chiffrement."""
+        log_path = tmp_path / "audit.log"
+        audit = AuditLogger(log_path)
+        audit.log_chiffrement("s1", "/tmp/fichier.enc", "encrypt")
+        entries = audit.lire_journal()
+        assert entries[0]["operation"] == "chiffrement_encrypt"
+        assert entries[0]["fichier"] == "/tmp/fichier.enc"
+
+    def test_log_erreur_ecriture(self, tmp_path):
+        """Le logger gere proprement les erreurs d'ecriture (pas d'exception levee)."""
+        from unittest.mock import patch, mock_open
+        log_path = tmp_path / "audit.log"
+        audit = AuditLogger(log_path)
+        # Simuler une erreur d'ecriture OS
+        with patch("builtins.open", side_effect=OSError("Disk full")):
+            # Ne doit PAS lever d'exception
+            audit.log("test", "s1")
+
 
 class TestSecureStorage:
     """Tests du stockage securise."""

@@ -172,6 +172,7 @@ class AnalyzerEngine:
                     "documents contenant des lignes de cotisations detaillees."
                 ),
                 detecte_par="AnalyzerEngine",
+                reference_legale="Art. L241-1 CSS - Cotisations de securite sociale obligatoires",
             ))
 
         # 5. Accumulation d'incoherences inter-documents = alerte aggregate

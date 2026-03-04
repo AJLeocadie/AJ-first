@@ -318,3 +318,97 @@ class TestChiffrementDonnees:
         chiffre = chiffrer_donnees(data, "password")
         resultat = dechiffrer_donnees(chiffre, "password")
         assert resultat == data
+
+
+# ──────────────────────────────────────────────
+# Tests HAS_CRYPTOGRAPHY=False (garde defensive)
+# ──────────────────────────────────────────────
+
+class TestSansCryptography:
+    """Tests des branches defensives quand cryptography est absent."""
+
+    def test_derive_key_sans_crypto(self):
+        """_derive_key leve EncryptionError sans cryptography."""
+        import urssaf_analyzer.security.encryption as enc_module
+        original = enc_module.HAS_CRYPTOGRAPHY
+        try:
+            enc_module.HAS_CRYPTOGRAPHY = False
+            with pytest.raises(EncryptionError, match="cryptography"):
+                _derive_key("password", b"0" * SALT_LENGTH)
+        finally:
+            enc_module.HAS_CRYPTOGRAPHY = original
+
+    def test_chiffrer_fichier_sans_crypto(self, tmp_path):
+        """chiffrer_fichier leve EncryptionError sans cryptography."""
+        import urssaf_analyzer.security.encryption as enc_module
+        original = enc_module.HAS_CRYPTOGRAPHY
+        try:
+            enc_module.HAS_CRYPTOGRAPHY = False
+            source = tmp_path / "s.txt"
+            source.write_bytes(b"test")
+            with pytest.raises(EncryptionError, match="cryptography"):
+                chiffrer_fichier(source, tmp_path / "out.enc", "pwd")
+        finally:
+            enc_module.HAS_CRYPTOGRAPHY = original
+
+    def test_dechiffrer_fichier_sans_crypto(self, tmp_path):
+        """dechiffrer_fichier leve EncryptionError sans cryptography."""
+        import urssaf_analyzer.security.encryption as enc_module
+        original = enc_module.HAS_CRYPTOGRAPHY
+        try:
+            enc_module.HAS_CRYPTOGRAPHY = False
+            with pytest.raises(EncryptionError, match="cryptography"):
+                dechiffrer_fichier(tmp_path / "in.enc", tmp_path / "out.txt", "pwd")
+        finally:
+            enc_module.HAS_CRYPTOGRAPHY = original
+
+    def test_chiffrer_donnees_sans_crypto(self):
+        """chiffrer_donnees leve EncryptionError sans cryptography."""
+        import urssaf_analyzer.security.encryption as enc_module
+        original = enc_module.HAS_CRYPTOGRAPHY
+        try:
+            enc_module.HAS_CRYPTOGRAPHY = False
+            with pytest.raises(EncryptionError, match="cryptography"):
+                chiffrer_donnees(b"test", "pwd")
+        finally:
+            enc_module.HAS_CRYPTOGRAPHY = original
+
+    def test_dechiffrer_donnees_sans_crypto(self):
+        """dechiffrer_donnees leve EncryptionError sans cryptography."""
+        import urssaf_analyzer.security.encryption as enc_module
+        original = enc_module.HAS_CRYPTOGRAPHY
+        try:
+            enc_module.HAS_CRYPTOGRAPHY = False
+            with pytest.raises(EncryptionError, match="cryptography"):
+                dechiffrer_donnees(HEADER_MAGIC + b"x" * 100, "pwd")
+        finally:
+            enc_module.HAS_CRYPTOGRAPHY = original
+
+
+# ──────────────────────────────────────────────
+# Tests erreurs E/S (OSError paths)
+# ──────────────────────────────────────────────
+
+class TestErreursES:
+    """Tests des chemins d'erreur E/S."""
+
+    def test_dechiffrer_fichier_destination_interdite(self, tmp_path):
+        """Dechiffrement echoue si la destination est non-inscriptible."""
+        source = tmp_path / "source.txt"
+        chiffre = tmp_path / "chiffre.enc"
+        source.write_bytes(b"test content")
+        chiffrer_fichier(source, chiffre, "password")
+
+        # Destination dans un repertoire inexistant
+        dest = tmp_path / "nonexistent_dir" / "subdir" / "result.txt"
+        with pytest.raises(EncryptionError):
+            dechiffrer_fichier(chiffre, dest, "password")
+
+    def test_chiffrer_fichier_destination_interdite(self, tmp_path):
+        """Chiffrement echoue si la destination est non-inscriptible."""
+        source = tmp_path / "source.txt"
+        source.write_bytes(b"test content")
+
+        dest = tmp_path / "nonexistent_dir" / "subdir" / "result.enc"
+        with pytest.raises(EncryptionError):
+            chiffrer_fichier(source, dest, "password")
