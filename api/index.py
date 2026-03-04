@@ -5245,6 +5245,169 @@ async def declarations_entreprise(
 
 
 # ==============================
+# PROFILS INDEPENDANTS (T.I.)
+# ==============================
+
+@app.post("/api/independants")
+async def creer_profil_independant(
+    type_statut: str = Form(...),
+    siret: str = Form(""),
+    activite: str = Form(""),
+    code_naf: str = Form(""),
+    regime_fiscal: str = Form(""),
+    option_is: bool = Form(False),
+    tva_franchise: bool = Form(True),
+    caisse_retraite: str = Form(""),
+    acre: bool = Form(False),
+    annee_creation: int = Form(0),
+    chiffre_affaires_annuel: float = Form(0),
+    benefice_annuel: float = Form(0),
+    remuneration_nette: float = Form(0),
+):
+    """Cree un profil travailleur independant."""
+    import uuid as _uuid
+    ind_id = str(_uuid.uuid4())
+    profil_id = "default"  # En contexte reel, extrait du JWT
+    db = get_db()
+    db.execute(
+        """INSERT INTO profils_independants
+           (id, profil_id, type_statut, siret, activite, code_naf, regime_fiscal,
+            option_is, tva_franchise, caisse_retraite, acre, annee_creation,
+            chiffre_affaires_annuel, benefice_annuel, remuneration_nette)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (ind_id, profil_id, type_statut, siret, activite, code_naf, regime_fiscal,
+         1 if option_is else 0, 1 if tva_franchise else 0, caisse_retraite,
+         1 if acre else 0, annee_creation,
+         chiffre_affaires_annuel, benefice_annuel, remuneration_nette),
+    )
+    log_action("utilisateur", "ajout_independant", f"{type_statut} - {activite or siret}")
+    return _get_independant(db, ind_id)
+
+
+@app.get("/api/independants")
+async def liste_independants(q: str = Query("")):
+    """Liste les profils independants."""
+    db = get_db()
+    if q:
+        rows = db.execute(
+            """SELECT * FROM profils_independants
+               WHERE actif = 1 AND (
+                   activite LIKE ? OR siret LIKE ? OR type_statut LIKE ? OR code_naf LIKE ?
+               ) ORDER BY date_creation DESC""",
+            (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"),
+        )
+    else:
+        rows = db.execute(
+            "SELECT * FROM profils_independants WHERE actif = 1 ORDER BY date_creation DESC"
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/independants/{ind_id}")
+async def detail_independant(ind_id: str):
+    db = get_db()
+    ind = _get_independant(db, ind_id)
+    if not ind:
+        raise HTTPException(404, "Profil independant non trouve")
+    return ind
+
+
+@app.put("/api/independants/{ind_id}")
+async def modifier_independant(ind_id: str, request: Request):
+    db = get_db()
+    data = await request.json()
+    champs_autorises = {
+        "type_statut", "siret", "activite", "code_naf", "regime_fiscal",
+        "option_is", "tva_franchise", "caisse_retraite", "acre", "annee_creation",
+        "chiffre_affaires_annuel", "benefice_annuel", "remuneration_nette",
+    }
+    updates = {k: v for k, v in data.items() if k in champs_autorises}
+    if not updates:
+        return _get_independant(db, ind_id)
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [ind_id]
+    db.execute(
+        f"UPDATE profils_independants SET {set_clause}, date_modification = datetime('now') WHERE id = ?",
+        tuple(values),
+    )
+    log_action("utilisateur", "modif_independant", ind_id)
+    return _get_independant(db, ind_id)
+
+
+@app.delete("/api/independants/{ind_id}")
+async def supprimer_independant(ind_id: str):
+    db = get_db()
+    db.execute(
+        "UPDATE profils_independants SET actif = 0, date_modification = datetime('now') WHERE id = ?",
+        (ind_id,),
+    )
+    log_action("utilisateur", "suppression_independant", ind_id)
+    return {"ok": True}
+
+
+@app.get("/api/independants/{ind_id}/dashboard")
+async def dashboard_independant(ind_id: str):
+    """Tableau de bord pour un profil independant."""
+    db = get_db()
+    ind = _get_independant(db, ind_id)
+    if not ind:
+        raise HTTPException(404, "Profil independant non trouve")
+
+    # Cotisations estimees selon le statut
+    from decimal import Decimal
+    rev = Decimal(str(ind.get("remuneration_nette", 0) or ind.get("benefice_annuel", 0) or 0))
+    ca = Decimal(str(ind.get("chiffre_affaires_annuel", 0) or 0))
+    statut = ind.get("type_statut", "")
+    cotisations = {}
+
+    if statut == "micro_entrepreneur":
+        taux_map = {"prestations_bnc": "0.22", "prestations_bic": "0.217", "vente_marchandises": "0.123", "location_meublee": "0.06"}
+        taux = Decimal(taux_map.get(ind.get("regime_fiscal", ""), "0.22"))
+        if ind.get("acre"):
+            taux = taux / 2
+        total = round(float(ca * taux), 2)
+        cotisations = {"base_ca": float(ca), "taux": float(taux), "total_cotisations": total, "net_apres_cotisations": float(ca) - total}
+    elif rev > 0:
+        base = rev
+        maladie = round(float(base * Decimal("0.065")), 2)
+        vieillesse_base = round(float(min(base, Decimal("46368")) * Decimal("0.1775")), 2)
+        vieillesse_compl = round(float(min(base, Decimal("185472")) * Decimal("0.07")), 2)
+        invalidite = round(float(base * Decimal("0.013")), 2)
+        af = round(float(base * Decimal("0.0310")), 2)
+        csg_crds = round(float(base * Decimal("0.097")), 2)
+        formation = round(float(base * Decimal("0.0025")), 2)
+        total = maladie + vieillesse_base + vieillesse_compl + invalidite + af + csg_crds + formation
+        if ind.get("acre"):
+            total = round(total * 0.5, 2)
+        cotisations = {
+            "base_revenu": float(rev), "maladie": maladie,
+            "vieillesse_base": vieillesse_base, "vieillesse_complementaire": vieillesse_compl,
+            "invalidite_deces": invalidite, "allocations_familiales": af,
+            "csg_crds": csg_crds, "formation": formation,
+            "total_cotisations": total, "net_apres_cotisations": float(rev) - total,
+        }
+
+    # Historique analyses
+    analyses = db.execute(
+        """SELECT * FROM analyses WHERE independant_id = ? ORDER BY date_analyse DESC LIMIT 10""",
+        (ind_id,),
+    )
+    analyses_list = [dict(r) for r in analyses]
+
+    return {
+        "profil": ind,
+        "cotisations_estimees": cotisations,
+        "nb_analyses": len(analyses_list),
+        "dernieres_analyses": analyses_list,
+    }
+
+
+def _get_independant(db, ind_id: str):
+    rows = db.execute("SELECT * FROM profils_independants WHERE id = ?", (ind_id,))
+    return dict(rows[0]) if rows else None
+
+
+# ==============================
 # DOCUMENTS / BIBLIOTHEQUE
 # ==============================
 
@@ -10378,16 +10541,69 @@ APP_HTML += """
 
 <!-- ===== PORTEFEUILLE ===== -->
 <div class="sec" id="s-portefeuille">
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+<button class="tab active" onclick="showPortTab('employeur',this)">&#127970; Compte Employeur</button>
+<button class="tab" onclick="showPortTab('ti',this)">&#128188; Compte T.I.</button>
+<button class="tab" onclick="showPortTab('vue',this)">&#128202; Vue d'ensemble</button>
+</div>
+
+<!-- Onglet Employeur -->
+<div class="port-panel" id="port-employeur">
 <div class="g2">
 <div class="card">
-<h2>Ajouter une entreprise</h2>
+<h2>&#127970; Ajouter une entreprise (Employeur)</h2>
 <label>SIRET</label><input id="ent-siret" placeholder="12345678901234" maxlength="14">
 <label>Raison sociale</label><input id="ent-raison" placeholder="Nom">
 <div class="g2"><div><label>Forme</label><select id="ent-forme"><option value="">--</option><option>SAS</option><option>SARL</option><option>SA</option><option>EURL</option><option>EI</option><option>SASU</option><option>SCI</option><option>SNC</option><option>Association</option></select></div><div><label>NAF</label><input id="ent-naf" placeholder="6201Z"></div></div>
 <div class="g2"><div><label>Effectif</label><input type="number" id="ent-eff" value="0"></div><div><label>Ville</label><input id="ent-ville" placeholder="Paris"></div></div>
-<button class="btn btn-p btn-f" onclick="ajouterEnt()">Ajouter</button>
+<button class="btn btn-p btn-f" onclick="ajouterEnt()">Ajouter l'entreprise</button>
 </div>
-<div class="card"><h2>Portefeuille</h2><input id="ent-search" placeholder="Rechercher..." oninput="rechEnt()"><div id="ent-list"></div></div>
+<div class="card"><h2>Entreprises (Employeur)</h2><input id="ent-search" placeholder="Rechercher..." oninput="rechEnt()"><div id="ent-list"></div></div>
+</div>
+</div>
+
+<!-- Onglet Travailleur Independant -->
+<div class="port-panel" id="port-ti" style="display:none">
+<div class="g2">
+<div class="card">
+<h2>&#128188; Ajouter un compte T.I.</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Gerant majoritaire, micro-entrepreneur, profession liberale, artisan, commercant... Ajoutez votre profil independant pour gerer vos cotisations personnelles.</p>
+<label>Statut</label><select id="ti-statut">
+<option value="gerant_majoritaire">Gerant majoritaire (SARL/EURL)</option>
+<option value="micro_entrepreneur">Micro-entrepreneur</option>
+<option value="profession_liberale">Profession liberale</option>
+<option value="entreprise_individuelle_ir">EI classique (IR)</option>
+<option value="entreprise_individuelle_is">EI a l'IS</option>
+<option value="artisan">Artisan</option>
+<option value="commercant">Commercant</option>
+</select>
+<div class="g2"><div><label>SIRET personnel</label><input id="ti-siret" placeholder="12345678901234" maxlength="14"></div><div><label>NAF</label><input id="ti-naf" placeholder="6201Z"></div></div>
+<label>Activite</label><input id="ti-activite" placeholder="Ex: Conseil en gestion">
+<div class="g2"><div><label>Regime fiscal</label><select id="ti-regime"><option value="">--</option><option value="prestations_bnc">BNC (prestations)</option><option value="prestations_bic">BIC (prestations)</option><option value="vente_marchandises">BIC (vente)</option><option value="location_meublee">BIC (location meublee)</option><option value="is">IS (impot societes)</option></select></div><div><label>Caisse retraite</label><select id="ti-caisse"><option value="">--</option><option value="cipav">CIPAV</option><option value="ssi">SSI (ex-RSI)</option><option value="carpimko">CARPIMKO</option><option value="carcdsf">CARCDSF</option><option value="cnbf">CNBF</option><option value="cavec">CAVEC</option><option value="carmf">CARMF</option><option value="autre">Autre</option></select></div></div>
+<div class="g3"><div><label>ACRE</label><select id="ti-acre"><option value="false">Non</option><option value="true">Oui</option></select></div><div><label>Option IS</label><select id="ti-is"><option value="false">Non</option><option value="true">Oui</option></select></div><div><label>Franchise TVA</label><select id="ti-tva"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
+<div class="g3"><div><label>Annee creation</label><input type="number" id="ti-annee" placeholder="2020" min="1950" max="2030"></div><div><label>CA annuel (EUR)</label><input type="number" id="ti-ca" value="0" step="100"></div><div><label>Benefice (EUR)</label><input type="number" id="ti-benefice" value="0" step="100"></div></div>
+<label>Remuneration nette (EUR/an)</label><input type="number" id="ti-remun" value="0" step="100">
+<button class="btn btn-blue btn-f" onclick="ajouterTI()">Ajouter le profil T.I.</button>
+</div>
+<div class="card"><h2>Profils T.I.</h2><input id="ti-search" placeholder="Rechercher..." oninput="rechTI()"><div id="ti-list"></div></div>
+</div>
+</div>
+
+<!-- Vue d'ensemble -->
+<div class="port-panel" id="port-vue" style="display:none">
+<div class="card">
+<h2>&#128202; Vue d'ensemble du portefeuille</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Synthese de vos comptes Employeur et Travailleur Independant.</p>
+<div class="g3" id="port-stats" style="margin-bottom:16px">
+<div class="card" style="background:var(--bg2);text-align:center;padding:16px"><div style="font-size:2em;font-weight:700" id="port-nb-emp">-</div><div style="font-size:.82em;color:var(--tx2)">Entreprises (Employeur)</div></div>
+<div class="card" style="background:var(--bg2);text-align:center;padding:16px"><div style="font-size:2em;font-weight:700" id="port-nb-ti">-</div><div style="font-size:.82em;color:var(--tx2)">Profils T.I.</div></div>
+<div class="card" style="background:var(--bg2);text-align:center;padding:16px"><div style="font-size:2em;font-weight:700" id="port-nb-total">-</div><div style="font-size:.82em;color:var(--tx2)">Total comptes</div></div>
+</div>
+<h3 style="margin-top:16px">Comptes Employeur</h3>
+<div id="port-vue-emp"></div>
+<h3 style="margin-top:16px">Comptes T.I.</h3>
+<div id="port-vue-ti"></div>
+</div>
 </div>
 </div>
 
@@ -10885,7 +11101,7 @@ var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
 if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
 var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
 if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
-if(typeof rechEnt==="function"&&n==="portefeuille")rechEnt();
+if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();}
 if(typeof loadDash==="function"&&n==="dashboard")loadDash();
 if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
 if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
@@ -11497,8 +11713,16 @@ fetch("/api/veille/legislation/"+a).then(safeJson).then(function(l){var h="<p st
 function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),a1=a2-1;fetch("/api/veille/baremes/comparer/"+a1+"/"+a2).then(safeJson).then(function(d){if(!d.length){toast("Pas de differences.","info");return;}var h="<table><tr><th>Parametre</th><th class='num'>"+a1+"</th><th class='num'>"+a2+"</th><th>Evolution</th></tr>";for(var i=0;i<d.length;i++){h+="<tr><td>"+d[i].parametre+"</td><td class='num'>"+(d[i]["valeur_"+a1]||"-")+"</td><td class='num'>"+(d[i]["valeur_"+a2]||"-")+"</td><td>"+d[i].evolution+"</td></tr>";}h+="</table>";document.getElementById("v-comp").innerHTML=h;document.getElementById("v-comp-card").style.display="block";}).catch(function(e){toast(e.message);});}
 
 /* === PORTEFEUILLE === */
+var _tiStatutLabels={"gerant_majoritaire":"Gerant majoritaire","micro_entrepreneur":"Micro-entrepreneur","profession_liberale":"Profession liberale","entreprise_individuelle_ir":"EI (IR)","entreprise_individuelle_is":"EI (IS)","artisan":"Artisan","commercant":"Commercant"};
+
+function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
+document.getElementById("port-"+name).style.display="block";
+document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
+if(el)el.classList.add("active");
+if(name==="vue")loadPortVue();if(name==="ti")rechTI();if(name==="employeur")rechEnt();}
+
 function ajouterEnt(){var fd=new FormData();fd.append("siret",document.getElementById("ent-siret").value);fd.append("raison_sociale",document.getElementById("ent-raison").value);fd.append("forme_juridique",document.getElementById("ent-forme").value);fd.append("code_naf",document.getElementById("ent-naf").value);fd.append("effectif",document.getElementById("ent-eff").value||"0");fd.append("ville",document.getElementById("ent-ville").value);
-fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();}).catch(function(e){toast(e.message);});}
+fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();document.getElementById("ent-siret").value="";document.getElementById("ent-raison").value="";}).catch(function(e){toast(e.message);});}
 
 function rechEnt(){var q=(document.getElementById("ent-search")||{}).value||"";
 fetch("/api/entreprises?q="+encodeURIComponent(q)).then(safeJson).then(function(d){
@@ -11506,10 +11730,95 @@ var el=document.getElementById("ent-list");if(!d.length){el.innerHTML="<p style=
 var h="";for(var i=0;i<d.length;i++){var e=d[i];
 h+="<div class='ent-item'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px'><strong>"+e.raison_sociale+"</strong>";
 if(e.forme_juridique)h+="<span class='badge badge-blue'>"+e.forme_juridique+"</span>";
+h+="<span class='badge badge-green' style='font-size:.7em'>Employeur</span>";
 h+="</div><div style='font-size:.84em;color:var(--tx2);margin-top:4px'>SIRET: "+e.siret;
 if(e.ville)h+=" | "+e.ville;if(e.code_naf)h+=" | NAF: "+e.code_naf;
 if(e.effectif)h+=" | "+e.effectif+" sal.";h+="</div></div>";}
 el.innerHTML=h;}).catch(function(){});}
+
+/* === T.I. (Travailleur Independant) === */
+function ajouterTI(){var fd=new FormData();
+fd.append("type_statut",document.getElementById("ti-statut").value);
+fd.append("siret",document.getElementById("ti-siret").value);
+fd.append("code_naf",document.getElementById("ti-naf").value);
+fd.append("activite",document.getElementById("ti-activite").value);
+fd.append("regime_fiscal",document.getElementById("ti-regime").value);
+fd.append("caisse_retraite",document.getElementById("ti-caisse").value);
+fd.append("acre",document.getElementById("ti-acre").value);
+fd.append("option_is",document.getElementById("ti-is").value);
+fd.append("tva_franchise",document.getElementById("ti-tva").value);
+fd.append("annee_creation",document.getElementById("ti-annee").value||"0");
+fd.append("chiffre_affaires_annuel",document.getElementById("ti-ca").value||"0");
+fd.append("benefice_annuel",document.getElementById("ti-benefice").value||"0");
+fd.append("remuneration_nette",document.getElementById("ti-remun").value||"0");
+fetch("/api/independants",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Profil T.I. ajoute !","ok");rechTI();}).catch(function(e){toast(e.message);});}
+
+function rechTI(){var q=(document.getElementById("ti-search")||{}).value||"";
+fetch("/api/independants?q="+encodeURIComponent(q)).then(safeJson).then(function(d){
+var el=document.getElementById("ti-list");if(!d.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun profil T.I. enregistre.</p>";return;}
+var h="";for(var i=0;i<d.length;i++){var t=d[i];var label=_tiStatutLabels[t.type_statut]||t.type_statut;
+h+="<div class='ent-item' style='border-left:3px solid var(--b)'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px'>";
+h+="<strong>"+(t.activite||label)+"</strong>";
+h+="<span class='badge badge-amber'>"+label+"</span>";
+h+="<span class='badge' style='background:var(--p);color:#fff;font-size:.7em'>T.I.</span>";
+h+="</div><div style='font-size:.84em;color:var(--tx2);margin-top:4px'>";
+if(t.siret)h+="SIRET: "+t.siret+" | ";
+if(t.code_naf)h+="NAF: "+t.code_naf+" | ";
+if(t.regime_fiscal)h+="Regime: "+t.regime_fiscal+" | ";
+if(t.chiffre_affaires_annuel)h+="CA: "+fmtN(t.chiffre_affaires_annuel)+" EUR | ";
+if(t.acre)h+="<span class='badge badge-green' style='font-size:.72em'>ACRE</span> ";
+h+="</div><div style='display:flex;gap:6px;margin-top:8px'>";
+h+="<button class='btn btn-s btn-sm' onclick='voirDashTI(\""+t.id+"\")'>&#128202; Dashboard</button>";
+h+="<button class='btn btn-sm' style='background:var(--r);color:#fff' onclick='supprimerTI(\""+t.id+"\")'>&#128465; Supprimer</button>";
+h+="</div></div>";}
+el.innerHTML=h;}).catch(function(){});}
+
+function supprimerTI(id){if(!confirm("Supprimer ce profil T.I. ?"))return;
+fetch("/api/independants/"+id,{method:"DELETE"}).then(safeJson).then(function(){toast("Profil T.I. supprime.","ok");rechTI();}).catch(function(e){toast(e.message);});}
+
+function voirDashTI(id){
+fetch("/api/independants/"+id+"/dashboard").then(safeJson).then(function(d){
+var p=d.profil;var c=d.cotisations_estimees||{};var label=_tiStatutLabels[p.type_statut]||p.type_statut;
+var h="<div class='card' style='border-left:4px solid var(--p)'><h2>&#128188; "+label;
+if(p.activite)h+=" - "+p.activite;h+="</h2>";
+h+="<div class='g3' style='margin:12px 0'>";
+if(p.siret)h+="<div><strong>SIRET</strong><br>"+p.siret+"</div>";
+if(p.regime_fiscal)h+="<div><strong>Regime fiscal</strong><br>"+p.regime_fiscal+"</div>";
+if(p.caisse_retraite)h+="<div><strong>Caisse retraite</strong><br>"+p.caisse_retraite+"</div>";
+if(p.annee_creation)h+="<div><strong>Annee creation</strong><br>"+p.annee_creation+"</div>";
+h+="<div><strong>ACRE</strong><br>"+(p.acre?"Oui":"Non")+"</div>";
+h+="<div><strong>Franchise TVA</strong><br>"+(p.tva_franchise?"Oui":"Non")+"</div>";
+h+="</div>";
+if(c.total_cotisations!==undefined){
+h+="<h3 style='margin-top:16px'>&#128176; Cotisations sociales estimees</h3>";
+h+="<table><tr><th>Poste</th><th class='num'>Montant (EUR)</th></tr>";
+for(var k in c){if(k==="base_ca"||k==="base_revenu"||k==="taux")continue;
+var lbl=k.replace(/_/g," ").replace(/^./, function(m){return m.toUpperCase();});
+var cls=k==="total_cotisations"?"font-weight:700;color:var(--r)":k==="net_apres_cotisations"?"font-weight:700;color:var(--g)":"";
+h+="<tr><td>"+lbl+"</td><td class='num' style='"+cls+"'>"+fmtN(c[k])+"</td></tr>";}
+h+="</table>";}
+if(d.nb_analyses>0){h+="<h3 style='margin-top:16px'>&#128200; "+d.nb_analyses+" analyse(s)</h3>";}
+h+="</div>";
+var el=document.getElementById("ti-list");el.innerHTML=h+"<br><button class='btn btn-s' onclick='rechTI()'>&#8592; Retour a la liste</button>";
+}).catch(function(e){toast(e.message);});}
+
+function loadPortVue(){
+Promise.all([fetch("/api/entreprises?q=").then(safeJson),fetch("/api/independants?q=").then(safeJson)]).then(function(r){
+var emps=r[0],tis=r[1];
+document.getElementById("port-nb-emp").textContent=emps.length;
+document.getElementById("port-nb-ti").textContent=tis.length;
+document.getElementById("port-nb-total").textContent=emps.length+tis.length;
+var he="";if(!emps.length)he="<p style='color:var(--tx2)'>Aucun compte employeur.</p>";
+for(var i=0;i<emps.length;i++){var e=emps[i];he+="<div class='ent-item'><span class='badge badge-green' style='font-size:.7em'>Employeur</span> <strong>"+e.raison_sociale+"</strong>";
+if(e.forme_juridique)he+=" <span class='badge badge-blue'>"+e.forme_juridique+"</span>";
+he+="<div style='font-size:.82em;color:var(--tx2)'>SIRET: "+e.siret;if(e.effectif)he+=" | "+e.effectif+" sal.";he+="</div></div>";}
+document.getElementById("port-vue-emp").innerHTML=he;
+var ht="";if(!tis.length)ht="<p style='color:var(--tx2)'>Aucun compte T.I.</p>";
+for(var j=0;j<tis.length;j++){var t=tis[j];var label=_tiStatutLabels[t.type_statut]||t.type_statut;
+ht+="<div class='ent-item' style='border-left:3px solid var(--p)'><span class='badge' style='background:var(--p);color:#fff;font-size:.7em'>T.I.</span> <strong>"+(t.activite||label)+"</strong> <span class='badge badge-amber'>"+label+"</span>";
+ht+="<div style='font-size:.82em;color:var(--tx2)'>";if(t.siret)ht+="SIRET: "+t.siret+" | ";if(t.chiffre_affaires_annuel)ht+="CA: "+fmtN(t.chiffre_affaires_annuel)+" EUR";ht+="</div></div>";}
+document.getElementById("port-vue-ti").innerHTML=ht;
+}).catch(function(){});}
 
 /* === EQUIPE === */
 function inviterCollab(){
