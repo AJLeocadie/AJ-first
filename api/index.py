@@ -407,9 +407,9 @@ async def scores_methodologie():
         "formule_par_domaine": {
             "description": "S = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
             "Wk_severite": {
-                "critique": {"poids": 4, "justification": "Manquement delibere, sanction >= 40% (CSS L243-7-2, CGI art. 1729)"},
-                "haute": {"poids": 3, "justification": "Retard/omission significatif, sanction 10-25% (CSS L243-7-1)"},
-                "moyenne": {"poids": 2, "justification": "Ecart formel, tolerance 5% (CSS L243-7-6)"},
+                "critique": {"poids": 4, "justification": "Manquement delibere, majoration 40% (CSS L243-7-7, CGI art. 1729)"},
+                "haute": {"poids": 3, "justification": "Retard/omission significatif, majoration 10% (CSS L243-7-2, CGI art. 1728)"},
+                "moyenne": {"poids": 2, "justification": "Ecart formel, droit a regularisation (CSS L243-6-7, tolerance BOSS)"},
                 "faible": {"poids": 1, "justification": "Anomalie mineure, pas de sanction directe"},
             },
             "Wmax": "max(Sigma(Wk), 4 * Npoints) - normalise par la capacite de controle du domaine",
@@ -489,10 +489,30 @@ async def scores_methodologie():
         },
         "avertissement": (
             "Les scores NormaCheck v4.0 sont des indicateurs methodologiques internes. "
-            "Ils ne constituent pas une certification officielle. "
+            "Ils ne constituent pas une certification officielle et ne sont pas opposables "
+            "aux administrations (URSSAF, DGFIP, Cour des comptes). "
             "La methodologie est concue pour etre objectivable, reproductible et non-discretionnaire "
-            "conformement aux exigences de l'art. L.243-6-3 CSS."
+            "conformement aux exigences de l'art. L.243-6-3 CSS. "
+            "Les constats de type pattern_suspect (Benford, nombres ronds, outliers) sont des "
+            "indicateurs statistiques non probants, insuffisants a eux seuls pour etablir une "
+            "irregularite. Tout constat est soumis a procedure contradictoire avant integration "
+            "definitive dans le score (art. L121-1 CRPA, principe du contradictoire)."
         ),
+        "procedure_contradictoire": {
+            "principe": "Tout constat impactant le score peut etre conteste par l entite auditee "
+                        "avant integration definitive (art. L121-1 CRPA)",
+            "constats_contestables": [
+                "PATTERN_SUSPECT : indicateurs statistiques (Benford, nombres ronds, outliers) - "
+                "non probants, soumis a verification croisee",
+                "DONNEE_MANQUANTE : peut resulter d un perimetre d audit par sondage et non exhaustif",
+            ],
+            "procedure": [
+                "1. Notification des constats provisoires a l entite auditee",
+                "2. Delai de reponse de 30 jours pour observations (art. R*243-59 CSS)",
+                "3. Prise en compte des observations dans le score definitif",
+                "4. Motivation ecrite des constats maintenus apres contradictoire",
+            ],
+        },
         "changelog": {
             "v4.0": "Refonte methodologique : suppression coefficients arbitraires, poids proportionnels Nk/Somme_Nk, "
                      "deductions Wk basees sur sanctions legales, suppression bonus subjectifs, facteur couverture continu",
@@ -3554,7 +3574,12 @@ async def export_pdf(request: Request):
     nb_fichiers = synthese.get("nb_fichiers", 0)
     impact = synthese.get("impact_financier_total", 0)
     score_risque = synthese.get("score_risque_global", 0)
-    conformite = max(0, 100 - score_risque)
+    # Score de conformite v4.0 : utilise le score triple si disponible, sinon fallback
+    conformite_triple = data.get("score_conformite_v4", None)
+    if conformite_triple is not None:
+        conformite = max(0, min(100, conformite_triple))
+    else:
+        conformite = max(0, 100 - score_risque)
     ent = dict(_entete_config)
     date_str = datetime.now().strftime("%d/%m/%Y")
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{titre}</title>
@@ -8204,13 +8229,14 @@ APP_HTML += """
 <strong>Formule (v4.0) :</strong><br>
 S<sub>URSSAF</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
 <strong>Poids de gravite W<sub>k</sub> (derives des sanctions legales) :</strong><br>
-&bull; Critique (W<sub>k</sub>=4) : manquement delibere, sanction &ge; 40% (CSS L243-7-2)<br>
-&bull; Haute (W<sub>k</sub>=3) : retard/omission significatif, sanction 10-25% (CSS L243-7-1)<br>
-&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, tolerance 5% (CSS L243-7-6)<br>
+&bull; Critique (W<sub>k</sub>=4) : manquement delibere, majoration 40% (CSS L243-7-7)<br>
+&bull; Haute (W<sub>k</sub>=3) : retard/omission significatif, majoration 10% (CSS L243-7-2)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, droit a regularisation (CSS L243-6-7)<br>
 &bull; Faible (W<sub>k</sub>=1) : anomalie mineure, pas de sanction directe<br><br>
 <strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 10<br>
-<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3) - facteur continu, pas de seuil arbitraire<br>
-<strong>Pas de bonus subjectif</strong> - seuls les constats impactent le score
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3) - facteur continu<br>
+<strong>Pas de bonus subjectif</strong> - seuls les constats impactent le score<br>
+<strong>Intervalle de confiance :</strong> Score &plusmn; marge selon qualite des documents analyses
 </div>
 <div style="margin-top:12px;font-size:.86em;line-height:1.8">
 <h3 style="margin-bottom:8px">Perimetres de controle</h3>
@@ -8240,9 +8266,9 @@ S<sub>URSSAF</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</s
 <strong>Formule (v4.0) :</strong><br>
 S<sub>DGFIP</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
 <strong>Poids de gravite W<sub>k</sub> (derives des sanctions legales) :</strong><br>
-&bull; Critique (W<sub>k</sub>=4) : manquement delibere, sanction 40% (CGI art. 1729)<br>
-&bull; Haute (W<sub>k</sub>=3) : retard declaration, sanction 10% (CGI art. 1728)<br>
-&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, sanction 5% (CGI art. 1727)<br>
+&bull; Critique (W<sub>k</sub>=4) : manquement delibere, majoration 40% (CGI art. 1729)<br>
+&bull; Haute (W<sub>k</sub>=3) : retard declaration, majoration 10% (CGI art. 1728)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, interet de retard 0.2%/mois (CGI art. 1727)<br>
 &bull; Faible (W<sub>k</sub>=1) : anomalie mineure, pas de sanction directe<br><br>
 <strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 10<br>
 <strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3)<br>
@@ -8274,18 +8300,15 @@ S<sub>DGFIP</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</su
 <h2 style="color:var(--tl)">3. Score Cour des comptes - Regularite comptable</h2>
 <div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
 <strong>Formule :</strong><br>
-S<sub>CDC</sub> = 100 - &Sigma;<sub>i</sub> P(sev<sub>i</sub>) + B<sub>cdc</sub><br><br>
-<strong>Penalites P(sev) par constat comptable :</strong><br>
-&bull; Critique : -15 pts (ex: comptes non certifiables, anomalie significative)<br>
-&bull; Haute : -10 pts (ex: ecart BS/DSN > 5%, cut-off non respecte)<br>
-&bull; Moyenne : -5 pts (ex: piece justificative manquante, rapprochement partiel)<br>
-&bull; Faible : -2 pts (ex: ecart arrondi, libelle imprecis)<br><br>
-<strong>Bonus B<sub>cdc</sub> :</strong><br>
-&bull; +5 pts si aucun constat critique<br>
-&bull; +3 pts si &ge; 3 sources analysees<br>
-&bull; +5 pts si audit CDC &ge; 80% de couverture<br>
-&bull; +3 pts si rapprochement des masses concordant (ecart &lt; 1%)<br>
-&bull; Plafond a 80% si &le; 1 document analyse
+S<sub>CDC</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
+<strong>Poids de gravite W<sub>k</sub> (derives des normes d audit) :</strong><br>
+&bull; Critique (W<sub>k</sub>=4) : comptes non certifiables, anomalie significative (NEP 700, ISA 705)<br>
+&bull; Haute (W<sub>k</sub>=3) : ecart BS/DSN &gt; 5%, cut-off non respecte (ISA 450)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : piece justificative manquante, rapprochement partiel (ISA 500)<br>
+&bull; Faible (W<sub>k</sub>=1) : ecart arrondi, libelle imprecis - non significatif<br><br>
+<strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 8<br>
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3)<br>
+<strong>Pas de bonus subjectif</strong> - seuls les constats impactent le score
 </div>
 <div style="margin-top:12px;font-size:.86em;line-height:1.8">
 <h3 style="margin-bottom:8px">Perimetres de controle</h3>
@@ -9120,6 +9143,8 @@ if(r.indexOf("code du travail")>=0&&r.indexOf("cgi")<0)return"urssaf";
 if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||c.indexOf("taxe_sur_salaires")>=0)return"fiscal";
 /* CDC domain: NEP, ISA, code de commerce, comptabilite */
 if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0)return"cdc";
+/* Default: urssaf. Log pour traçabilite - un constat non classe est affecte au domaine social par defaut */
+if(typeof console!=="undefined")console.info("Constat non classe par domaine, affecte a URSSAF par defaut:",cat,ref);
 return"urssaf";}
 /*
  * METHODOLOGIE DE SCORING v4.0 - Approche proportionnelle non-discretionnaire
@@ -9132,9 +9157,9 @@ return"urssaf";}
  * 4. NON-DISCRETIONNAIRE : aucun coefficient arbitraire
  *
  * Gravite reglementaire (Wk) - derivee des sanctions legales :
- *   - Critique (Wk=4) : manquement delibere, sanction >= 40% (CSS L243-7-2, CGI 1729)
- *   - Haute (Wk=3) : retard/omission significatif, sanction 10-25% (CSS L243-7-1)
- *   - Moyenne (Wk=2) : ecart formel, sanction 5% (CSS L243-7-6 tolerance)
+ *   - Critique (Wk=4) : manquement delibere, majoration 40% (CSS L243-7-7, CGI art. 1729)
+ *   - Haute (Wk=3) : retard/omission significatif, majoration 10% (CSS L243-7-2, CGI art. 1728)
+ *   - Moyenne (Wk=2) : ecart formel, droit a regularisation (CSS L243-6-7, tolerance BOSS)
  *   - Faible (Wk=1) : anomalie mineure, pas de sanction directe
  *
  * Formule par domaine :
@@ -9170,7 +9195,15 @@ var score=Math.round(Sbrut*(0.5+0.5*Fc));
 score=Math.max(0,Math.min(100,score));
 if(Fc<1){details.push({deduction:0,raison:"Facteur couverture documentaire : Fc="+Fc.toFixed(2)+" ("+nbDecl+"/3 sources). Score ajuste de "+Sbrut+" a "+score,ref:"Methodologie NormaCheck v4.0",severite:"info",poids:0});}
 var grade="F";if(score>=90)grade="A";else if(score>=75)grade="B";else if(score>=60)grade="C";else if(score>=45)grade="D";else if(score>=30)grade="E";
-return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas,totalW:totalW,Wmax:Wmax,Sbrut:Sbrut,Fc:Fc};}
+/* Intervalle de confiance : marge proportionnelle a l incertitude documentaire */
+var marge=Math.round((1-Fc)*15+constats.length*0.5);
+marge=Math.min(marge,20);
+var scoreBas=Math.max(0,score-marge);
+var scoreHaut=Math.min(100,score+marge);
+/* Nombre de constats contestables (patterns statistiques = interpretables) */
+var nbContest=0;
+for(var j=0;j<constats.length;j++){var cc=constats[j];var ct=(cc.categorie||"").toLowerCase();if(ct==="pattern_suspect")nbContest++;}
+return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas,totalW:totalW,Wmax:Wmax,Sbrut:Sbrut,Fc:Fc,intervalle:{bas:scoreBas,haut:scoreHaut,marge:marge},nb_constats_contestables:nbContest};}
 function calculateTripleScore(data){
 var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
 var urssafC=[],fiscalC=[],cdcC=[];
@@ -9224,6 +9257,9 @@ h+="<div style='margin-top:10px;padding:10px;background:var(--bg);border-radius:
 h+="S<sub>"+sc.domaine+"</sub> = max(0, 100 &times; (1 - &Sigma;Wk/Wmax)) &times; (0.5 + 0.5 &times; Fc)<br>";
 h+="= max(0, 100 &times; (1 - "+sc.totalW+"/"+sc.Wmax+")) &times; (0.5 + 0.5 &times; "+sc.Fc.toFixed(2)+")<br>";
 h+="= "+sc.Sbrut+" &times; "+(0.5+0.5*sc.Fc).toFixed(2)+" = <strong>"+sc.score+"</strong></div>";
+if(sc.intervalle){h+="<div style='margin-top:8px;padding:8px;background:var(--pl);border-radius:6px;font-size:.84em'><strong>Intervalle de confiance :</strong> ["+sc.intervalle.bas+" - "+sc.intervalle.haut+"] (&plusmn;"+sc.intervalle.marge+" pts)";
+if(sc.nb_constats_contestables>0){h+=" | <span style='color:var(--r)'>"+sc.nb_constats_contestables+" constat(s) statistique(s) contestable(s) (patterns)</span>";}
+h+="<br><span style='font-size:.9em;color:var(--tx2)'>L intervalle reflete l incertitude liee a la couverture documentaire et au nombre de constats. Les constats de type pattern_suspect sont des indicateurs statistiques non probants.</span></div>";}
 el.innerHTML=h;}
 renderDomainDetail("score-detail-urssaf",ts.urssaf);
 renderDomainDetail("score-detail-fiscal",ts.fiscal);
@@ -9232,6 +9268,7 @@ var gel=document.getElementById("score-detail-global");
 if(gel){var gh="<div style='font-size:.9em;line-height:1.8'>";
 gh+="<strong>Methode :</strong> Moyenne ponderee par nombre de points de controle (Nk/&Sigma;Nk) - non discretionnaire<br>";
 gh+="<strong>Calcul :</strong> S<sub>global</sub> = ("+ts.urssaf.score+" &times; "+p.urssaf.toFixed(4)+") + ("+ts.fiscal.score+" &times; "+p.fiscal.toFixed(4)+") + ("+ts.cdc.score+" &times; "+p.cdc.toFixed(4)+") = <strong>"+ts.global.score+"/100 ("+ts.global.grade+")</strong></div>";
+gh+="<div style='margin-top:10px;padding:10px;background:var(--pl);border-radius:8px;font-size:.84em'><strong>Avertissement juridique :</strong> Ce score est un indicateur methodologique interne, non opposable aux administrations. Les constats de type pattern_suspect sont des indicateurs statistiques non probants (art. L243-7 CSS). Tout constat est soumis a procedure contradictoire (art. L121-1 CRPA).</div>";
 gh+="<div class='g3' style='margin-top:12px'>";
 gh+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF (N="+DOMAIN_CONTROL_POINTS.urssaf+", w="+(p.urssaf*100).toFixed(1)+"%)</div></div>";
 gh+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP (N="+DOMAIN_CONTROL_POINTS.fiscal+", w="+(p.fiscal*100).toFixed(1)+"%)</div></div>";
@@ -9274,14 +9311,14 @@ html+="<h2>Recommandations</h2>";var recos=analysisData.recommandations||[];for(
 function _pdfScoreTable(sc,title,color){
 html+="<div style='margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;border-left:4px solid "+color+";font-size:.85em'>";
 html+="<h3 style='color:"+color+"'>"+title+" - "+sc.score+"/100 ("+sc.grade+")</h3>";
-html+="<p style='margin:6px 0'>Formule : S = 100 - &Sigma; P(severite) + Bonus. Penalites : critique(-15), haute(-10), moyenne(-5), faible(-2).</p>";
+html+="<p style='margin:6px 0'>Formule : S = max(0, 100 &times; (1 - &Sigma;Wk / Wmax)) &times; (0.5 + 0.5 &times; Fc). Poids : critique(Wk=4), haute(Wk=3), moyenne(Wk=2), faible(Wk=1).</p>";
 html+="<table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:"+color+";color:#fff'><th style='padding:6px 10px;text-align:left'>Points</th><th style='padding:6px 10px;text-align:left'>Raison</th><th style='padding:6px 10px;text-align:left'>Reference</th></tr>";
 for(var i=0;i<sc.details.length;i++){var d=sc.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td><td style='padding:4px 10px;font-size:.9em;color:#64748b'>"+(d.ref||"")+"</td></tr>";}
 html+="</table></div>";}
 _pdfScoreTable(ts.urssaf,"Score URSSAF (Securite sociale)","#1e40af");
 _pdfScoreTable(ts.fiscal,"Score DGFIP (Fiscal)","#7c3aed");
 _pdfScoreTable(ts.cdc,"Score Cour des comptes (Regularite comptable)","#0d9488");
-html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.8 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
+html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v4.0 - Indicateur methodologique interne, non opposable aux administrations (art. L.243-6-3 CSS). Score indicatif soumis a procedure contradictoire.</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 

@@ -65,15 +65,18 @@ class PatternAnalyzer(BaseAnalyzer):
         if ratio > SEUIL_NOMBRES_RONDS_PCT:
             findings.append(Finding(
                 categorie=FindingCategory.PATTERN_SUSPECT,
-                severite=Severity.MOYENNE,
+                severite=Severity.FAIBLE,
                 titre="Proportion elevee de montants arrondis",
                 description=(
                     f"{ronds}/{len(montants)} montants ({ratio:.0%}) sont des nombres "
                     f"ronds (divisibles par 100). Ce pattern peut indiquer une "
-                    f"estimation plutot qu'un calcul reel."
+                    f"estimation plutot qu'un calcul reel. Cependant, certains baremes "
+                    f"reglementaires produisent legitimement des montants ronds. "
+                    f"Indicateur statistique non probant a lui seul."
                 ),
-                score_risque=55,
+                score_risque=25,
                 recommandation=(
+                    "Indicateur a croiser avec d'autres constats. "
                     "Verifier que les montants de cotisations sont effectivement "
                     "calcules et non estimes ou forfaitises."
                 ),
@@ -148,18 +151,25 @@ class PatternAnalyzer(BaseAnalyzer):
         mois_manquants = mois_attendus - mois_declares
         if mois_manquants:
             mois_str = ", ".join(f"{m:02d}/{y}" for y, m in sorted(mois_manquants))
+            # Adapter la severite selon le ratio de mois manquants
+            # Si > 50% des mois manquent, c'est probablement un audit par sondage
+            ratio_manquants = len(mois_manquants) / len(mois_attendus) if mois_attendus else 0
+            severite = Severity.MOYENNE if ratio_manquants > 0.5 else Severity.HAUTE
             findings.append(Finding(
                 categorie=FindingCategory.DONNEE_MANQUANTE,
-                severite=Severity.HAUTE,
+                severite=severite,
                 titre="Mois de declaration manquants",
                 description=(
                     f"Les mois suivants sont absents des declarations : {mois_str}. "
-                    f"Cela peut indiquer des declarations non transmises."
+                    f"Cela peut indiquer des declarations non transmises, ou un "
+                    f"perimetre d'audit par sondage (echantillonnage). "
+                    f"{'Proportion elevee de mois manquants : audit par sondage probable.' if ratio_manquants > 0.5 else ''}"
                 ),
-                score_risque=80,
+                score_risque=50 if ratio_manquants > 0.5 else 80,
                 recommandation=(
-                    "Verifier que toutes les declarations mensuelles (DSN) ont ete "
-                    "correctement transmises pour les mois concernes."
+                    "Verifier si l'absence de certains mois resulte d'un choix "
+                    "d'echantillonnage (audit par sondage) ou d'un defaut de transmission. "
+                    "En cas d'audit par sondage, ce constat n'est pas significatif."
                 ),
                 detecte_par=self.nom,
                 reference_legale="Art. L133-5-3 CSS - Obligation de declaration mensuelle (DSN)",
@@ -208,18 +218,22 @@ class PatternAnalyzer(BaseAnalyzer):
 
             findings.append(Finding(
                 categorie=FindingCategory.PATTERN_SUSPECT,
-                severite=Severity.MOYENNE,
+                severite=Severity.FAIBLE,
                 titre="Distribution non conforme a la loi de Benford",
                 description=(
                     f"La distribution des premiers chiffres des montants de cotisations "
                     f"ne suit pas la loi de Benford (chi2={chi2:.2f}, seuil={SEUIL_BENFORD_CHI2}). "
-                    f"Cela peut indiquer une manipulation ou fabrication de donnees.\n{details}"
+                    f"ATTENTION : les cotisations sociales (salaire x taux reglementaire) ne suivent "
+                    f"pas necessairement la loi de Benford. Ce constat est un indicateur statistique "
+                    f"non probant, insuffisant a lui seul pour etablir une irregularite.\n{details}"
                 ),
-                score_risque=60,
+                score_risque=30,
                 recommandation=(
-                    "Approfondir le controle sur l'origine des montants. "
-                    "La non-conformite a Benford n'est pas une preuve de fraude "
-                    "mais justifie une investigation."
+                    "Indicateur statistique a interpreter avec prudence. "
+                    "La non-conformite a Benford sur des montants de cotisations (derives de "
+                    "salaires x taux fixes) n'est PAS une preuve de fraude et ne constitue "
+                    "pas un element probant au sens de l'art. L243-7 CSS. "
+                    "A croiser avec d'autres constats avant toute conclusion."
                 ),
                 detecte_par=self.nom,
             ))
@@ -265,11 +279,14 @@ class PatternAnalyzer(BaseAnalyzer):
                     description=(
                         f"Le montant {c.montant_patronal} pour {type_cot} "
                         f"est statistiquement atypique (intervalle normal : "
-                        f"{lower:.2f} - {upper:.2f})."
+                        f"{lower:.2f} - {upper:.2f}). "
+                        f"Les ecarts de remuneration (dirigeant, cadre superieur) "
+                        f"sont une cause frequente de faux positif. "
+                        f"Indicateur statistique non probant a lui seul."
                     ),
                     montant_impact=c.montant_patronal,
-                    score_risque=30,
-                    recommandation="Verifier si ce montant est justifie.",
+                    score_risque=20,
+                    recommandation="Verifier si ce montant est justifie par le niveau de remuneration (dirigeant, cadre).",
                     detecte_par=self.nom,
                     documents_concernes=[c.source_document_id],
                 ))

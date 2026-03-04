@@ -447,10 +447,17 @@ TOLERANCE_MONTANT = Decimal("0.01")       # 1 centime
 TOLERANCE_TAUX = Decimal("0.0001")        # 0.01%
 TOLERANCE_ARRONDI_PCT = Decimal("0.005")  # 0.5% d'ecart tolere
 
-# Seuils de detection de patterns
-SEUIL_NOMBRES_RONDS_PCT = Decimal("0.30")  # 30% de nombres ronds = suspect
+# Seuils de detection de patterns (indicateurs statistiques NON PROBANTS)
+# Ces seuils declenchent des constats de type PATTERN_SUSPECT qui sont des
+# indicateurs a croiser avec d'autres elements. Ils ne constituent pas
+# une preuve d'irregularite au sens juridique (art. L243-7 CSS).
+SEUIL_NOMBRES_RONDS_PCT = Decimal("0.30")  # 30% de nombres ronds = indicateur
 SEUIL_BENFORD_CHI2 = Decimal("15.51")      # Chi2 critique a 5% avec 8 ddl
+# NB: Benford s'applique aux donnees naturellement distribuees. Les cotisations
+# (salaire x taux reglementaire) ne suivent pas necessairement cette loi.
 SEUIL_OUTLIER_IQR = Decimal("1.5")         # Coefficient IQR standard
+# NB: Les ecarts de remuneration (dirigeant vs salaries) sont une cause
+# frequente de faux positif sur ce seuil.
 
 # Formats de fichiers supportes
 SUPPORTED_EXTENSIONS = {
