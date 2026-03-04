@@ -219,6 +219,41 @@ def _save_users():
 
 
 # =========================================
+# ADMIN BOOTSTRAP
+# =========================================
+
+_DEFAULT_ADMIN_EMAIL = os.getenv("NORMACHECK_ADMIN_EMAIL", "admin@normacheck.fr")
+_DEFAULT_ADMIN_PASSWORD = os.getenv("NORMACHECK_ADMIN_PASSWORD", "Admin2026!Norma")
+
+def bootstrap_admin():
+    """Cree un compte admin par defaut si aucun admin n'existe."""
+    has_admin = any(u.get("role") == "admin" for u in _users.values())
+    if has_admin:
+        return None
+    email = _DEFAULT_ADMIN_EMAIL
+    password = _DEFAULT_ADMIN_PASSWORD
+    if email in _users:
+        # L'utilisateur existe mais n'est pas admin, promouvoir
+        _users[email]["role"] = "admin"
+        _save_users()
+        return _safe_user(_users[email])
+    user = {
+        "id": str(uuid.uuid4())[:8],
+        "email": email,
+        "nom": "Admin",
+        "prenom": "NormaCheck",
+        "password_hash": hash_password(password),
+        "role": "admin",
+        "tenant_id": "default",
+        "created_at": datetime.now().isoformat(),
+        "active": True,
+    }
+    _users[email] = user
+    _save_users()
+    return _safe_user(user)
+
+
+# =========================================
 # TOKEN GENERATION
 # =========================================
 

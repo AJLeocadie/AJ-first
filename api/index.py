@@ -47,7 +47,7 @@ from auth import (
     set_auth_cookie, clear_auth_cookie,
     get_current_user, get_optional_user, require_role,
     save_dashboard, load_dashboard, list_users_by_tenant, set_user_tenant,
-    jwt_decode, revoke_token,
+    jwt_decode, revoke_token, bootstrap_admin,
 )
 
 # --- Detection environnement ---
@@ -94,6 +94,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+# --- Bootstrap admin au demarrage ---
+_admin = bootstrap_admin()
+if _admin:
+    logger.info("Compte admin cree: %s", _admin["email"])
 
 
 # --- Middleware securite : CSP + en-tetes de protection ---
