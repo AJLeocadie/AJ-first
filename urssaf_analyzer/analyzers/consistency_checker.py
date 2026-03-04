@@ -181,6 +181,7 @@ class ConsistencyChecker(BaseAnalyzer):
             findings.extend(self._comparer_employe_details_inter_documents(declarations))
             findings.extend(self._comparer_totaux_patronaux_inter_documents(declarations))
             findings.extend(self._comparer_exonerations_inter_documents(declarations))
+            findings.extend(self._verifier_exonerations_temporelles(declarations))
 
         # Coherence assiettes plafonnees/deplafonnees (intra-document)
         for decl in declarations:
@@ -2056,6 +2057,102 @@ class ConsistencyChecker(BaseAnalyzer):
                                     extra={"nir": nir},
                                 ),
                             ))
+
+        return findings
+
+    # =================================================================
+    # Cour des Comptes : Controle exonerations ACRE temporellement bornees
+    # =================================================================
+
+    def _verifier_exonerations_temporelles(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Cour des Comptes : verifie que les exonerations temporaires
+        (ACRE, ZRR, ZFU) ne depassent pas leur duree legale.
+
+        - ACRE : 12 mois max (CSS art. L131-6-4)
+        - ZRR : 12 mois taux plein + 12 mois degressif (CSS art. L131-4-2)
+        - ZFU : 5 ans + 3 a 9 ans degressif
+        """
+        findings: list[Finding] = []
+
+        exo_types_temporaires = {
+            ContributionType.ACRE,
+            ContributionType.EXONERATION_ZRR,
+            ContributionType.EXONERATION_ZFU,
+        }
+
+        # Pour chaque employe, trouver les periodes d'exoneration
+        employe_exo_periodes: dict[str, list[tuple]] = defaultdict(list)
+
+        for decl in declarations:
+            if not decl.periode:
+                continue
+            nir_map = _employe_id_to_nir(decl)
+            for c in decl.cotisations:
+                if c.type_cotisation in exo_types_temporaires:
+                    montant_exo = abs(c.montant_patronal) + abs(c.montant_salarial)
+                    if montant_exo > TOLERANCE_MONTANT:
+                        nir = nir_map.get(c.employe_id, c.employe_id)
+                        employe_exo_periodes[nir].append((
+                            decl.periode.debut,
+                            decl.periode.fin,
+                            c.type_cotisation,
+                            montant_exo,
+                            decl.source_document_id,
+                        ))
+
+        # Verifier la duree totale d'exoneration par employe
+        for nir, periodes in employe_exo_periodes.items():
+            if not periodes:
+                continue
+            # Trier par date de debut
+            periodes_triees = sorted(periodes, key=lambda p: p[0])
+            premiere_date = periodes_triees[0][0]
+            derniere_date = periodes_triees[-1][1]
+            duree_mois = (derniere_date.year - premiere_date.year) * 12 + (derniere_date.month - premiere_date.month)
+            type_exo = periodes_triees[0][2]
+            total_exo = sum(p[3] for p in periodes_triees)
+
+            # Duree max selon type
+            duree_max = 12  # ACRE par defaut
+            if type_exo == ContributionType.EXONERATION_ZRR:
+                duree_max = 24  # 12 plein + 12 degressif
+            elif type_exo == ContributionType.EXONERATION_ZFU:
+                duree_max = 60  # 5 ans
+
+            if duree_mois > duree_max:
+                doc_ids = list(set(p[4] for p in periodes_triees))
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.HAUTE,
+                    titre=f"Exoneration {type_exo.value} au-dela de la duree legale (NIR {nir[:5]}...)",
+                    description=(
+                        f"L'exoneration {type_exo.value} est appliquee depuis "
+                        f"{duree_mois} mois (du {premiere_date.isoformat()} au "
+                        f"{derniere_date.isoformat()}) pour le NIR {nir}. "
+                        f"La duree maximale legale est de {duree_max} mois.\\n\\n"
+                        f"Total exonere sur la periode : {formater_montant(total_exo)}.\\n\\n"
+                        f"Point Cour des Comptes : les exonerations temporaires doivent "
+                        f"etre arretees a l'echeance. Leur prolongation indue constitue "
+                        f"une perte de recettes pour les organismes sociaux.\\n"
+                        f"Point URSSAF : recuperation possible sur 3 ans avec majorations."
+                    ),
+                    montant_impact=total_exo,
+                    score_risque=85,
+                    recommandation=(
+                        f"Supprimer l'exoneration {type_exo.value} qui a depasse sa "
+                        f"duree legale de {duree_max} mois. Regulariser les cotisations "
+                        f"pour les periodes au-dela de la limite."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=doc_ids[:5],
+                    reference_legale=(
+                        "CSS art. L131-6-4 (ACRE 12 mois), "
+                        "CSS art. L131-4-2 (ZRR), "
+                        "CGI art. 44 octies (ZFU)"
+                    ),
+                ))
 
         return findings
 

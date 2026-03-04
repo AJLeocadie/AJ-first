@@ -227,7 +227,7 @@ class PatternAnalyzer(BaseAnalyzer):
                     f"pas necessairement la loi de Benford. Ce constat est un indicateur statistique "
                     f"non probant, insuffisant a lui seul pour etablir une irregularite.\n{details}"
                 ),
-                score_risque=30,
+                score_risque=15,
                 recommandation=(
                     "Indicateur statistique a interpreter avec prudence. "
                     "La non-conformite a Benford sur des montants de cotisations (derives de "

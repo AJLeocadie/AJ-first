@@ -51,6 +51,7 @@ class AnomalyDetector(BaseAnalyzer):
         ContributionType.ALLOCATIONS_FAMILIALES,
         ContributionType.ACCIDENT_TRAVAIL,
         ContributionType.CSG_DEDUCTIBLE,
+        ContributionType.CSG_NON_DEDUCTIBLE,
         ContributionType.CRDS,
         ContributionType.ASSURANCE_CHOMAGE,
         ContributionType.AGS,
@@ -59,6 +60,7 @@ class AnomalyDetector(BaseAnalyzer):
         ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE,
         ContributionType.FORMATION_PROFESSIONNELLE,
         ContributionType.TAXE_APPRENTISSAGE,
+        ContributionType.CONTRIBUTION_DIALOGUE_SOCIAL,
     ]
 
     # Cotisations conditionnelles par seuil d'effectif
@@ -67,6 +69,8 @@ class AnomalyDetector(BaseAnalyzer):
          "Art. L2333-64 CGCT", "Versement mobilite obligatoire >= 11 salaries (zone avec AOM)"),
         (SEUIL_EFFECTIF_20, ContributionType.PEEC,
          "Art. L313-1 Code construction", "Participation effort construction obligatoire >= 20 salaries"),
+        (SEUIL_EFFECTIF_11, ContributionType.FORFAIT_SOCIAL,
+         "CSS art. L137-15", "Forfait social obligatoire >= 11 salaries sur interessement/participation"),
     ]
 
     def analyser(self, declarations: list[Declaration]) -> list[Finding]:
@@ -117,13 +121,19 @@ class AnomalyDetector(BaseAnalyzer):
                 # CSG peut etre regroupee, pas de faux positif si CSG non deductible manque
                 if ct == ContributionType.CSG_DEDUCTIBLE and ContributionType.CSG_NON_DEDUCTIBLE in types_presents:
                     continue
+                # Inversement : CSG non deductible souvent regroupee avec CSG deductible
+                if ct == ContributionType.CSG_NON_DEDUCTIBLE and ContributionType.CSG_DEDUCTIBLE in types_presents:
+                    continue
                 if ct == ContributionType.CRDS and ContributionType.CSG_DEDUCTIBLE in types_presents:
                     continue  # CRDS souvent regroupee avec CSG
+                if ct == ContributionType.CRDS and ContributionType.CSG_NON_DEDUCTIBLE in types_presents:
+                    continue  # CRDS aussi regroupee avec CSG non deductible
                 # Retraite T1 peut apparaitre comme "retraite complementaire" generique
                 if ct == ContributionType.RETRAITE_COMPLEMENTAIRE_T1 and ContributionType.RETRAITE_COMPLEMENTAIRE_T2 in types_presents:
                     continue
-                # FNAL et CSA souvent non detailles sur bulletins simplifies
-                if ct in (ContributionType.FNAL, ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE):
+                # FNAL, CSA et dialogue social souvent non detailles sur bulletins simplifies
+                if ct in (ContributionType.FNAL, ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE,
+                          ContributionType.CONTRIBUTION_DIALOGUE_SOCIAL):
                     severity = Severity.FAIBLE
                     score = 30
                 else:
@@ -586,6 +596,84 @@ class AnomalyDetector(BaseAnalyzer):
                             reference_legale="CSS art. L242-8 - Proratisation du plafond temps partiel",
                         ))
 
+        # --- Avantages en nature non soumis a cotisations ---
+        # URSSAF : les avantages en nature (vehicule, logement, repas, NTIC)
+        # doivent etre integres a l'assiette de cotisations (art. L242-1 CSS)
+        # DGFIP : ces memes avantages constituent un revenu imposable (art. 82 CGI)
+        avantage_types = (ContributionType.AVANTAGE_NATURE,)
+        for emp in decl.employes:
+            emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+            if emp_cots:
+                brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                an_cots = [c for c in emp_cots if c.type_cotisation in avantage_types]
+                # Si un employe a un brut eleve et aucun avantage en nature,
+                # c'est un point d'attention (cadres dirigeants ont souvent des AN)
+                if brut > SMIC_MENSUEL_BRUT * 5 and not an_cots:
+                    statut = (emp.statut or "").lower()
+                    if any(kw in statut for kw in ("dirigeant", "directeur", "gerant", "cadre dirigeant", "president")):
+                        findings.append(Finding(
+                            categorie=FindingCategory.PATTERN_SUSPECT,
+                            severite=Severity.FAIBLE,
+                            titre=f"Cadre dirigeant sans avantage en nature declare ({emp.prenom} {emp.nom})",
+                            description=(
+                                f"{emp.prenom} {emp.nom} est identifie comme {statut} avec un "
+                                f"salaire brut de {brut:.2f} EUR, sans aucun avantage en nature "
+                                f"declare. Les cadres dirigeants beneficient frequemment de "
+                                f"vehicule de fonction, logement de fonction ou telephone/NTIC.\\n\\n"
+                                f"L'absence d'avantage en nature pour un cadre dirigeant est un "
+                                f"point d'attention classique du controle URSSAF (travail dissimule "
+                                f"partiel par minoration d'assiette) et du controle fiscal DGFIP "
+                                f"(avantage en nature non declare = revenu non impose).\\n\\n"
+                                f"Ref: CSS art. L242-1, CGI art. 82"
+                            ),
+                            score_risque=35,
+                            recommandation=(
+                                "Verifier si le cadre dirigeant beneficie d'avantages en nature "
+                                "(vehicule, logement, NTIC) non integres a l'assiette. "
+                                "Indicateur a croiser avec d'autres elements."
+                            ),
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="CSS art. L242-1, arrete du 10/12/2002 - Evaluation AN ; CGI art. 82",
+                        ))
+
+        # --- Prevoyance non-cadre CCN manquante ---
+        # URSSAF : obligation de prevoyance conventionnelle (verifier si CCN l'impose)
+        for emp in decl.employes:
+            emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+            statut = (emp.statut or "").lower()
+            if emp_cots and "cadre" not in statut and not _est_apprenti(emp):
+                prev_cots = [c for c in emp_cots if c.type_cotisation in (
+                    ContributionType.PREVOYANCE_NON_CADRE,
+                    ContributionType.PREVOYANCE_CADRE,
+                    ContributionType.MUTUELLE_OBLIGATOIRE,
+                )]
+                if not prev_cots:
+                    findings.append(Finding(
+                        categorie=FindingCategory.DONNEE_MANQUANTE,
+                        severite=Severity.FAIBLE,
+                        titre=f"Mutuelle/prevoyance non detectee ({emp.prenom} {emp.nom})",
+                        description=(
+                            f"Aucune cotisation de mutuelle obligatoire ou de prevoyance "
+                            f"n'est detectee pour {emp.prenom} {emp.nom}.\\n\\n"
+                            f"Depuis l'ANI du 11/01/2013, tout employeur doit proposer "
+                            f"une complementaire sante avec prise en charge minimale de 50%. "
+                            f"De plus, de nombreuses conventions collectives imposent une "
+                            f"prevoyance supplementaire (incapacite, invalidite, deces).\\n\\n"
+                            f"Note : cette cotisation peut etre regroupee sous un autre libelle "
+                            f"ou prelevee hors paie."
+                        ),
+                        score_risque=30,
+                        recommandation=(
+                            "Verifier la presence de la mutuelle obligatoire (ANI 2013) et "
+                            "de la prevoyance conventionnelle. Si prelevee hors paie, "
+                            "ce constat n'est pas significatif."
+                        ),
+                        detecte_par=self.nom,
+                        documents_concernes=[decl.source_document_id or decl.id],
+                        reference_legale="CSS art. L911-7 (ANI 2013 mutuelle obligatoire), CCN applicable",
+                    ))
+
         # --- Retraite complementaire T2 ---
         for emp in decl.employes:
             emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
@@ -647,6 +735,198 @@ class AnomalyDetector(BaseAnalyzer):
                                 documents_concernes=[decl.source_document_id or decl.id],
                                 reference_legale="ANI AGIRC-ARRCO art. 36 - Tranche 2 (1-8 PASS)",
                             ))
+
+        # ---------------------------------------------------------------
+        # DGFIP : Controles fiscaux sur les remunerations
+        # ---------------------------------------------------------------
+
+        # --- DGFIP : Coherence net imposable / assiette PAS ---
+        # Le prelevement a la source doit etre calcule sur le net imposable.
+        # Si les cotisations salariales sont incoherentes, le PAS sera faux.
+        for emp in decl.employes:
+            emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+            if emp_cots:
+                brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                total_salarial = sum(
+                    c.montant_salarial for c in emp_cots if c.montant_salarial > 0
+                )
+                if brut > 0 and total_salarial > 0:
+                    # Le taux de charges salariales doit etre entre 20% et 30% du brut
+                    # pour un salarie du regime general
+                    ratio_salarial = total_salarial / brut
+                    if ratio_salarial < Decimal("0.15"):
+                        findings.append(Finding(
+                            categorie=FindingCategory.PATTERN_SUSPECT,
+                            severite=Severity.MOYENNE,
+                            titre=f"Taux de charges salariales anormalement bas ({emp.prenom} {emp.nom})",
+                            description=(
+                                f"Le total des cotisations salariales pour {emp.prenom} {emp.nom} "
+                                f"({total_salarial:.2f} EUR) ne represente que "
+                                f"{float(ratio_salarial)*100:.1f}% du brut ({brut:.2f} EUR).\\n\\n"
+                                f"En regime general, le taux de charges salariales se situe "
+                                f"habituellement entre 20% et 28% du brut. Un taux anormalement "
+                                f"bas peut indiquer :\\n"
+                                f"- Des cotisations salariales manquantes\\n"
+                                f"- Une exoneration non documentee\\n"
+                                f"- Une erreur de parametrage\\n\\n"
+                                f"Impact fiscal (DGFIP) : un taux salarial trop bas gonfle "
+                                f"artificiellement le net imposable et donc le prelevement a "
+                                f"la source (PAS).\\n"
+                                f"Impact URSSAF : possible minoration d'assiette."
+                            ),
+                            valeur_constatee=f"{float(ratio_salarial)*100:.1f}%",
+                            valeur_attendue="20% - 28%",
+                            score_risque=55,
+                            recommandation=(
+                                "Verifier que toutes les cotisations salariales sont presentes. "
+                                "Si une exoneration s'applique (apprenti, ACRE), documenter la justification."
+                            ),
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="CGI art. 83 (charges deductibles du revenu imposable), CSS art. L242-1",
+                        ))
+                    elif ratio_salarial > Decimal("0.35"):
+                        findings.append(Finding(
+                            categorie=FindingCategory.PATTERN_SUSPECT,
+                            severite=Severity.MOYENNE,
+                            titre=f"Taux de charges salariales anormalement eleve ({emp.prenom} {emp.nom})",
+                            description=(
+                                f"Le total des cotisations salariales pour {emp.prenom} {emp.nom} "
+                                f"({total_salarial:.2f} EUR) represente "
+                                f"{float(ratio_salarial)*100:.1f}% du brut ({brut:.2f} EUR).\\n\\n"
+                                f"Un taux superieur a 35% est inhabituel et peut indiquer :\\n"
+                                f"- Des doublons de cotisations\\n"
+                                f"- Une cotisation patronale comptee en salarial\\n"
+                                f"- Un regime special non identifie"
+                            ),
+                            valeur_constatee=f"{float(ratio_salarial)*100:.1f}%",
+                            valeur_attendue="20% - 28%",
+                            score_risque=50,
+                            recommandation="Verifier la repartition patronal/salarial de chaque cotisation.",
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="CSS art. L241-1 et s. - Repartition des cotisations",
+                        ))
+
+        # --- DGFIP : Remuneration dirigeant vs masse salariale ---
+        # Les remuneration excessives de dirigeants sont un axe classique de controle fiscal
+        # (art. 39-1 CGI : charges non deductibles si excessives)
+        if decl.employes and len(decl.employes) >= 3:
+            bruts = []
+            for emp in decl.employes:
+                emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+                if emp_cots:
+                    brut = max((c.base_brute for c in emp_cots), default=Decimal("0"))
+                    if brut > 0:
+                        bruts.append((emp, brut))
+            if len(bruts) >= 3:
+                bruts_values = [b for _, b in bruts]
+                brut_median = sorted(bruts_values)[len(bruts_values) // 2]
+                for emp, brut in bruts:
+                    if brut_median > 0 and brut > brut_median * 10:
+                        findings.append(Finding(
+                            categorie=FindingCategory.PATTERN_SUSPECT,
+                            severite=Severity.FAIBLE,
+                            titre=f"Remuneration tres superieure a la mediane ({emp.prenom} {emp.nom})",
+                            description=(
+                                f"La remuneration de {emp.prenom} {emp.nom} ({brut:.2f} EUR) "
+                                f"est superieure a 10x la mediane des salaires ({brut_median:.2f} EUR).\\n\\n"
+                                f"Point d'attention DGFIP : les remunerations excessives de dirigeants "
+                                f"sont susceptibles de reintegration dans le benefice imposable "
+                                f"(CGI art. 39-1-1° : charges deductibles si elles ne sont pas "
+                                f"excessives par rapport aux services rendus).\\n\\n"
+                                f"Point d'attention Cour des Comptes : en controle de gestion, "
+                                f"un ecart de remuneration important peut signaler un risque "
+                                f"de gouvernance."
+                            ),
+                            score_risque=25,
+                            recommandation=(
+                                "Indicateur statistique a croiser avec d'autres elements. "
+                                "Verifier que la remuneration correspond aux services effectifs "
+                                "et aux usages du secteur d'activite."
+                            ),
+                            detecte_par=self.nom,
+                            documents_concernes=[decl.source_document_id or decl.id],
+                            reference_legale="CGI art. 39-1-1° (deductibilite des charges / remuneration excessive)",
+                        ))
+
+        # ---------------------------------------------------------------
+        # COUR DES COMPTES : Controles de regularite et de gestion
+        # ---------------------------------------------------------------
+
+        # --- CdC : Variation anormale des effectifs entre declarations ---
+        # La Cour des comptes verifie la coherence des donnees RH
+        # entre les differentes sources et periodes
+        if decl.effectif_declare > 0 and decl.employes:
+            nb_employes = len(decl.employes)
+            # Si plus de 20% d'ecart entre effectif declare et employes identifies
+            if nb_employes > 0:
+                ecart_pct = abs(nb_employes - decl.effectif_declare) / max(nb_employes, decl.effectif_declare)
+                if ecart_pct > Decimal("0.20") and abs(nb_employes - decl.effectif_declare) > 2:
+                    findings.append(Finding(
+                        categorie=FindingCategory.INCOHERENCE,
+                        severite=Severity.MOYENNE,
+                        titre=f"Ecart significatif effectif/employes identifies ({decl.effectif_declare} vs {nb_employes})",
+                        description=(
+                            f"L'effectif declare ({decl.effectif_declare}) differe de plus de 20% "
+                            f"du nombre d'employes identifies ({nb_employes}). "
+                            f"Ecart : {abs(nb_employes - decl.effectif_declare)} "
+                            f"({float(ecart_pct)*100:.0f}%).\\n\\n"
+                            f"Point Cour des Comptes : cet ecart peut reveler :\\n"
+                            f"- Des employes non declares (travail dissimule)\\n"
+                            f"- Un effectif moyen annuel mal calcule\\n"
+                            f"- Des employes sortis non retires de la declaration\\n\\n"
+                            f"Impact : l'effectif determine les obligations de cotisations "
+                            f"(FNAL, versement mobilite, PEEC, forfait social)."
+                        ),
+                        score_risque=60,
+                        recommandation=(
+                            "Reconcilier l'effectif declare avec le registre unique du personnel. "
+                            "Verifier les entrees/sorties du mois."
+                        ),
+                        detecte_par=self.nom,
+                        documents_concernes=[decl.source_document_id or decl.id],
+                        reference_legale="CSS art. L130-1 (calcul effectif), Code du travail art. L1221-13 (registre du personnel)",
+                    ))
+
+        # --- CdC : Cout total employeur par salarie ---
+        # Verification que le cout employeur est coherent avec les pratiques sectorielles
+        if decl.employeur and decl.employeur.code_naf and decl.cotisations:
+            total_patronal = sum(
+                c.montant_patronal for c in decl.cotisations if c.montant_patronal > 0
+            )
+            total_bases = sum(
+                c.base_brute for c in decl.cotisations if c.base_brute > 0
+            )
+            if total_bases > 0 and total_patronal > 0:
+                ratio_patronal = total_patronal / total_bases
+                # Le ratio charges patronales / brut est habituellement 40-55%
+                if ratio_patronal < Decimal("0.25"):
+                    findings.append(Finding(
+                        categorie=FindingCategory.PATTERN_SUSPECT,
+                        severite=Severity.MOYENNE,
+                        titre="Ratio charges patronales / brut anormalement bas",
+                        description=(
+                            f"Le ratio charges patronales / bases brutes est de "
+                            f"{float(ratio_patronal)*100:.1f}%. Le ratio habituel en "
+                            f"regime general se situe entre 40% et 55%.\\n\\n"
+                            f"Un ratio inferieur a 25% peut indiquer :\\n"
+                            f"- Des exonerations importantes (ACRE, ZRR, ZFU)\\n"
+                            f"- Des cotisations patronales manquantes\\n"
+                            f"- Un regime special non identifie\\n\\n"
+                            f"Point Cour des Comptes : verifier que les exonerations "
+                            f"appliquees sont justifiees et documentees."
+                        ),
+                        score_risque=45,
+                        recommandation=(
+                            "Verifier la justification des exonerations ou le parametrage "
+                            "des cotisations patronales. Documenter les dispositifs d'aide "
+                            "appliques (ACRE, aide embauche, ZRR, etc.)."
+                        ),
+                        detecte_par=self.nom,
+                        documents_concernes=[decl.source_document_id or decl.id],
+                        reference_legale="CSS art. L241-13 (RGDU), L131-4-2 (ACRE), rapports annuels Cour des comptes",
+                    ))
 
         return findings
 
