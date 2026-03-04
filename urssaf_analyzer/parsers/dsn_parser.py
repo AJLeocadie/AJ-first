@@ -22,7 +22,7 @@ from decimal import Decimal
 from datetime import date
 from pathlib import Path
 from typing import Any
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 
 from urssaf_analyzer.core.exceptions import ParseError
 from urssaf_analyzer.models.documents import (

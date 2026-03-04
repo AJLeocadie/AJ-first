@@ -18,6 +18,7 @@ import hashlib
 import json
 import fcntl
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,7 @@ class ProofChain:
         self.lock_path = chain_path.with_suffix(".lock")
         self.tsa_enabled = tsa_enabled
         self._tsa = None
+        self._thread_lock = threading.Lock()
         chain_path.parent.mkdir(parents=True, exist_ok=True)
 
         if tsa_enabled:
@@ -101,7 +103,7 @@ class ProofChain:
         Returns:
             L'entree complete avec hash et sequence.
         """
-        with open(self.lock_path, "a+") as lf:
+        with self._thread_lock, open(self.lock_path, "a+") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
                 last = self._get_last_entry()

@@ -3,7 +3,8 @@
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
+from xml.etree.ElementTree import Element
 
 from urssaf_analyzer.core.exceptions import ParseError
 from urssaf_analyzer.models.documents import (
@@ -57,7 +58,7 @@ class XMLParser(BaseParser):
 
         return declarations
 
-    def _strip_namespaces(self, root: ET.Element) -> None:
+    def _strip_namespaces(self, root: Element) -> None:
         """Supprime les namespaces XML pour simplifier le parsing."""
         for elem in root.iter():
             if "}" in elem.tag:
@@ -67,15 +68,15 @@ class XMLParser(BaseParser):
                     new_key = key.split("}", 1)[1]
                     elem.attrib[new_key] = elem.attrib.pop(key)
 
-    def _est_dsn_like(self, root: ET.Element) -> bool:
+    def _est_dsn_like(self, root: Element) -> bool:
         tag = root.tag.lower()
         return "dsn" in tag or "declaration_sociale" in tag
 
-    def _est_bordereau(self, root: ET.Element) -> bool:
+    def _est_bordereau(self, root: Element) -> bool:
         tag = root.tag.lower()
         return "bordereau" in tag or "ducs" in tag
 
-    def _parser_dsn_structure(self, root: ET.Element, doc_id: str) -> list[Declaration]:
+    def _parser_dsn_structure(self, root: Element, doc_id: str) -> list[Declaration]:
         """Parse une structure DSN-like en XML."""
         declarations = []
         # Chercher les blocs de declaration
@@ -112,7 +113,7 @@ class XMLParser(BaseParser):
                     declarations.append(d)
         return declarations
 
-    def _parser_bordereau(self, root: ET.Element, doc_id: str) -> list[Declaration]:
+    def _parser_bordereau(self, root: Element, doc_id: str) -> list[Declaration]:
         """Parse un bordereau de cotisations."""
         cotisations = []
         for elem in root.iter():
@@ -131,7 +132,7 @@ class XMLParser(BaseParser):
             )]
         return []
 
-    def _parser_generique(self, root: ET.Element, doc_id: str) -> list[Declaration]:
+    def _parser_generique(self, root: Element, doc_id: str) -> list[Declaration]:
         """Parsing generique : cherche des patterns de cotisations dans tout le XML."""
         cotisations = []
         for elem in root.iter():
@@ -147,7 +148,7 @@ class XMLParser(BaseParser):
             )]
         return []
 
-    def _parser_element_cotisation(self, elem: ET.Element, doc_id: str) -> Cotisation | None:
+    def _parser_element_cotisation(self, elem: Element, doc_id: str) -> Cotisation | None:
         """Extrait une cotisation depuis un element XML."""
         c = Cotisation(source_document_id=doc_id)
         found = False
@@ -194,7 +195,7 @@ class XMLParser(BaseParser):
 
         return c if found else None
 
-    def _parser_element_employe(self, elem: ET.Element, doc_id: str) -> Employe | None:
+    def _parser_element_employe(self, elem: Element, doc_id: str) -> Employe | None:
         e = Employe(source_document_id=doc_id)
         found = False
         for child in elem:
@@ -213,7 +214,7 @@ class XMLParser(BaseParser):
                 found = True
         return e if found else None
 
-    def _parser_element_employeur(self, elem: ET.Element, doc_id: str) -> Employeur | None:
+    def _parser_element_employeur(self, elem: Element, doc_id: str) -> Employeur | None:
         emp = Employeur(source_document_id=doc_id)
         for child in elem:
             tag = child.tag.lower()

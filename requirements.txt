@@ -15,6 +15,7 @@ lxml>=4.9.0
 
 # Security
 cryptography>=41.0.0
+defusedxml>=0.7.0
 
 # Reporting
 jinja2>=3.1.0

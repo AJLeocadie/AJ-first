@@ -21,7 +21,7 @@ from enum import Enum
 PASS_ANNUEL = Decimal("48060.00")
 PASS_MENSUEL = Decimal("4005.00")
 PASS_TRIMESTRIEL = Decimal("12015.00")
-PASS_JOURNALIER = Decimal("185.00")
+PASS_JOURNALIER = Decimal("220.00")
 PASS_HORAIRE = Decimal("27.00")
 
 # Plafonds specifiques
@@ -169,7 +169,7 @@ TAUX_COTISATIONS_2026 = {
 
     ContributionType.VIEILLESSE_DEPLAFONNEE: {
         "patronal": Decimal("0.0211"),            # 2.11% (hausse 2026 vs 2.02%)
-        "salarial": Decimal("0.024"),             # 2.40%
+        "salarial": Decimal("0.004"),             # 0.40%
         "assiette": "totalite",
         "ref": "CSS art. L241-3, hausse LFSS 2026",
     },
@@ -324,7 +324,7 @@ TAUX_COTISATIONS_2026 = {
     },
 
     ContributionType.RETRAITE_COMPLEMENTAIRE_T2: {
-        "patronal": Decimal("0.1229"),            # 12.29% (60% de 21.59%)
+        "patronal": Decimal("0.1295"),            # 12.95% (60% de 21.59%)
         "salarial": Decimal("0.0864"),            # 8.64% (40% de 21.59%)
         "total": Decimal("0.2159"),               # 21.59%
         "plancher": PASS_MENSUEL,

@@ -157,7 +157,7 @@ class TestUserManagement:
         auth._users = {}
 
     def test_create_user(self):
-        user = create_user("test@example.com", "password123", "Dupont", "Jean")
+        user = create_user("test@example.com", "SecurePass123!", "Dupont", "Jean")
         assert user is not None
         assert user["email"] == "test@example.com"
         assert user["nom"] == "Dupont"
@@ -166,23 +166,23 @@ class TestUserManagement:
 
     def test_create_duplicate_user(self):
         import pytest
-        create_user("dup@example.com", "pass123456", "User", "One")
+        create_user("dup@example.com", "SecurePass123!", "User", "One")
         with pytest.raises(ValueError, match="deja utilise"):
-            create_user("dup@example.com", "pass654321", "User", "Two")
+            create_user("dup@example.com", "SecurePass456!", "User", "Two")
 
     def test_create_user_password_trop_court(self):
         import pytest
         with pytest.raises(ValueError, match="trop court"):
-            create_user("short@example.com", "12345", "Short", "Pass")
+            create_user("short@example.com", "Short1", "Short", "Pass")
 
     def test_authenticate_success(self):
-        create_user("login@example.com", "mypassword", "Login", "User")
-        user = authenticate("login@example.com", "mypassword")
+        create_user("login@example.com", "SecurePass123!", "Login", "User")
+        user = authenticate("login@example.com", "SecurePass123!")
         assert user is not None
         assert user["email"] == "login@example.com"
 
     def test_authenticate_wrong_password(self):
-        create_user("wrong@example.com", "correct_pass", "Wrong", "User")
+        create_user("wrong@example.com", "SecurePass123!", "Wrong", "User")
         user = authenticate("wrong@example.com", "incorrect")
         assert user is None
 
@@ -191,15 +191,15 @@ class TestUserManagement:
         assert user is None
 
     def test_user_has_role(self):
-        user = create_user("admin@example.com", "admin12345", "Admin", "User")
+        user = create_user("admin@example.com", "SecurePass123!", "Admin", "User")
         assert "role" in user
         assert user["role"] == "collaborateur"
 
     def test_user_has_id(self):
-        user = create_user("id@example.com", "password123", "ID", "User")
+        user = create_user("id@example.com", "SecurePass123!", "ID", "User")
         assert "id" in user
         assert len(user["id"]) > 0
 
     def test_user_has_tenant(self):
-        user = create_user("tenant@example.com", "password123", "Tenant", "User")
+        user = create_user("tenant@example.com", "SecurePass123!", "Tenant", "User")
         assert "tenant_id" in user

@@ -85,11 +85,13 @@ app = FastAPI(
     version="3.8.1",
 )
 
+_CORS_ORIGINS = os.getenv("NORMACHECK_CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -353,7 +355,7 @@ async def auth_register(
     email: str = Form(...), mot_de_passe: str = Form(...)
 ):
     try:
-        user = create_user(email, mot_de_passe, nom, prenom, role="admin")
+        user = create_user(email, mot_de_passe, nom, prenom, role="collaborateur")
     except ValueError as e:
         raise HTTPException(400, str(e))
     token = generate_token(user)
@@ -1352,7 +1354,12 @@ async def analyser_documents(
             total_size += len(data)
             if total_size > _MAX_UPLOAD_MB * 1024 * 1024:
                 raise HTTPException(400, f"Taille totale depasse {_MAX_UPLOAD_MB} Mo.")
-            chemin = Path(td) / f.filename
+            # Securite : empecher le path traversal via filename
+            raw_name = (f.filename or "").replace("\\", "/")
+            safe_name = Path(raw_name).name if raw_name else ""
+            if not safe_name or safe_name.startswith("."):
+                safe_name = f"upload_{len(chemins)}"
+            chemin = Path(td) / safe_name
             chemin.write_bytes(data)
             chemins.append(chemin)
 
@@ -1360,8 +1367,8 @@ async def analyser_documents(
             orchestrator.analyser_documents(chemins, format_rapport)
         except URSSAFAnalyzerError as e:
             raise HTTPException(422, str(e))
-        except Exception as e:
-            raise HTTPException(500, f"Erreur interne : {str(e)}")
+        except Exception:
+            raise HTTPException(500, "Erreur interne lors de l'analyse")
 
         result = orchestrator.result
 
@@ -2225,7 +2232,11 @@ async def analyser_facture(fichier: UploadFile = File(...)):
 
     with tempfile.TemporaryDirectory() as td:
         data = await fichier.read()
-        chemin = Path(td) / fichier.filename
+        raw_name = (fichier.filename or "").replace("\\", "/")
+        safe_name = Path(raw_name).name if raw_name else "upload"
+        if not safe_name or safe_name.startswith("."):
+            safe_name = "upload"
+        chemin = Path(td) / safe_name
         chemin.write_bytes(data)
         ext = chemin.suffix.lower()
 
@@ -3723,8 +3734,9 @@ async def telecharger_document_demo(
     doc = docs[index]
     from fastapi.responses import Response
     content = doc["contenu"].replace("\\n", "\n")
+    safe_doc_name = Path(doc["nom"].replace("\\", "/")).name if doc.get("nom") else "document.txt"
     return Response(content=content, media_type="text/plain",
-                    headers={"Content-Disposition": f'attachment; filename="{doc["nom"]}"'})
+                    headers={"Content-Disposition": f'attachment; filename="{safe_doc_name}"'})
 
 
 @app.get("/api/simulation/demo-documents/telecharger-tout")

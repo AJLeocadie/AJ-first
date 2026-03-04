@@ -18,9 +18,16 @@ from typing import Optional
 from fastapi import Request, HTTPException, Response
 
 # --- Configuration ---
-SECRET_KEY = os.getenv("NORMACHECK_SECRET_KEY", "normacheck-dev-key-CHANGEZ-EN-PRODUCTION")
+_DEFAULT_SECRET = "normacheck-dev-key-CHANGEZ-EN-PRODUCTION"
+SECRET_KEY = os.getenv("NORMACHECK_SECRET_KEY", _DEFAULT_SECRET)
+if SECRET_KEY == _DEFAULT_SECRET and os.getenv("NORMACHECK_ENV") in ("production", "staging"):
+    raise RuntimeError(
+        "SECURITE: NORMACHECK_SECRET_KEY doit etre defini en production/staging. "
+        "Generez une cle avec: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    )
 TOKEN_EXPIRY_HOURS = int(os.getenv("NORMACHECK_TOKEN_EXPIRY", "24"))
 PBKDF2_ITERATIONS = 150_000
+MIN_PASSWORD_LENGTH = 12
 
 # --- Environment ---
 _IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
@@ -110,8 +117,10 @@ def create_user(email: str, password: str, nom: str, prenom: str,
     email = email.strip().lower()
     if email in _users:
         raise ValueError("Email deja utilise")
-    if len(password) < 6:
-        raise ValueError("Mot de passe trop court (min. 6 caracteres)")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Mot de passe trop court (min. {MIN_PASSWORD_LENGTH} caracteres)")
+    if password.lower() == password or password.upper() == password:
+        raise ValueError("Le mot de passe doit contenir majuscules et minuscules")
     if not tenant_id:
         tenant_id = str(uuid.uuid4())[:8]
     user = {
