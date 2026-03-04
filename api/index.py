@@ -10647,7 +10647,7 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.8.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+NormaCheck v3.8.1 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 <span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
 </footer>
 <script>
@@ -10731,7 +10731,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 9 - Droit applicable</h2>
 <p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
 </div>
-<footer>NormaCheck v3.8.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -10788,7 +10788,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 8 - Droit applicable</h2>
 <p>Les presentes CGV sont soumises au droit francais. Tout litige releve de la competence des tribunaux francais.</p>
 </div>
-<footer>NormaCheck v3.8.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -10874,7 +10874,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Droit applicable</h2>
 <p>Le present site et ses mentions legales sont regis par le droit francais.</p>
 </div>
-<footer>NormaCheck v3.8.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -11145,7 +11145,7 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="logout" onclick="doLogout()"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.1 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
 """
