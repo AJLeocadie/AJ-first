@@ -1,0 +1,66 @@
+# ============================================================
+# NormaCheck - Configuration qualite et outillage
+# Prerequis certification ISO/IEC 25010, 27001, 42001
+# ============================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "-x",
+]
+markers = [
+    "determinisme: tests de determinisme du scoring (ISO 42001)",
+    "reproductibilite: tests de reproductibilite (NF Z42-013)",
+    "securite: tests de securite (ISO 27001)",
+    "rgpd: tests de conformite RGPD (ISO 27701)",
+    "certification: tests de certification readiness",
+]
+
+[tool.coverage.run]
+source = ["urssaf_analyzer"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/veille/*",
+]
+
+[tool.coverage.report]
+fail_under = 40
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "S",    # flake8-bandit (security)
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "S101",   # assert in tests
+    "S311",   # random (not crypto)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

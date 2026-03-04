@@ -395,6 +395,20 @@ async def dashboard_load(request: Request):
     return {"status": "ok", "data": entry["data"], "saved_at": entry["saved_at"]}
 
 
+@app.get("/api/certification/readiness")
+async def certification_readiness():
+    """Evaluation de maturite du moteur pour certification par un organisme tiers.
+
+    Retourne le diagnostic complet : normes ISO pertinentes, gap analysis,
+    plan de remediation en 3 phases, et metriques de maturite.
+    Conforme ISO/IEC 25010, 27001, 42001, NF Z42-013.
+    """
+    from urssaf_analyzer.certification.certification_readiness import (
+        evaluer_maturite_certification,
+    )
+    return evaluer_maturite_certification()
+
+
 @app.get("/api/scores/methodologie")
 async def scores_methodologie():
     """Retourne la methodologie complete des 3 scores de conformite pour certification."""
