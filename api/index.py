@@ -9161,9 +9161,9 @@ h+="</div>";}
 h+="<p style='font-size:.78em;color:var(--tx2);margin-top:12px'>Derniere mise a jour : "+s.derniere_maj+"</p>";
 el.innerHTML=h;}).catch(function(){});}
 function loadBiblio(){
-fetch("/api/documents/bibliotheque").then(safeJson).then(function(docs){
+fetch("/api/documents/bibliotheque").then(safeJson).then(function(raw){var docs=(raw&&raw.items&&typeof raw.total==="number")?raw.items:raw;
 var el=document.getElementById("biblio-list");
-if(!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
+if(!docs||!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
 var h="";for(var i=0;i<docs.length;i++){var d=docs[i];var de=d.donnees_extraites||{};
 h+="<div class='doc-item'><div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px'>";
 var bStatCls=d.statut==="non_reconnu"?"badge-red":(d.statut==="erreur"?"badge-red":"badge-blue");
@@ -9348,9 +9348,9 @@ toast("Fichier DSN telecharge.","ok");
 }
 
 function loadDSNBrouillons(){
-fetch("/api/dsn/brouillons").then(safeJson).then(function(list){
+fetch("/api/dsn/brouillons").then(safeJson).then(function(raw){var list=(raw&&raw.items&&typeof raw.total==="number")?raw.items:raw;
 var el=document.getElementById("dsn-brouillons");
-if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun brouillon.</p>";document.getElementById("dsn-brouillons-card").style.display="none";return;}
+if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun brouillon.</p>";document.getElementById("dsn-brouillons-card").style.display="none";return;}
 document.getElementById("dsn-brouillons-card").style.display="block";
 var h="<table><tr><th>Date</th><th>Mois</th><th>Entreprise</th><th class='num'>Salaries</th><th class='num'>Brut total</th></tr>";
 for(var i=0;i<list.length;i++){var d=list[i];
@@ -10029,7 +10029,7 @@ function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(
 if(n==="salaries")loadRHSalaries();if(n==="contrats"){loadRHContrats();loadRHAvenants();}if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
-function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
+function rhGet(url,cb){fetch(url).then(safeJson).then(function(d){return (d&&d.items&&typeof d.total==="number")?d.items:d;}).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
 function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
