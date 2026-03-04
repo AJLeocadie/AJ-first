@@ -280,9 +280,12 @@ class ScoreProofRecord:
             },
             "references_legales_applicables": references_legales or {},
             "avertissement": (
-                "Score indicatif non opposable. Constats de type pattern_suspect "
-                "= indicateurs statistiques non probants (art. L243-7 CSS). "
-                "Soumis a procedure contradictoire (art. L121-1 CRPA)."
+                "SCORE PROVISOIRE - Outil d'aide a la decision, non decision "
+                "automatisee (art. 22 RGPD). Score indicatif non opposable. "
+                "Constats de type pattern_suspect = indicateurs statistiques "
+                "non probants (art. L243-7 CSS). Soumis a procedure "
+                "contradictoire (art. L121-1 CRPA). Validation humaine requise "
+                "avant utilisation a des fins decisionnelles (art. 22(3) RGPD)."
             ),
         }
 

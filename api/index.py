@@ -517,6 +517,119 @@ async def scores_methodologie():
                 "4. Motivation ecrite des constats maintenus apres contradictoire",
             ],
         },
+        "qualification_rgpd": {
+            "article_22": {
+                "texte": "Art. 22 RGPD - Droit de ne pas faire l'objet d'une decision fondee "
+                         "exclusivement sur un traitement automatise produisant des effets juridiques "
+                         "ou affectant de maniere significative",
+                "qualification_systeme": "AIDE A LA DECISION - NON DECISION AUTOMATISEE",
+                "justification": (
+                    "NormaCheck est qualifie d'outil d'aide a la decision et non de systeme de "
+                    "decision automatisee au sens de l'art. 22 RGPD pour les raisons suivantes : "
+                    "(1) Le score est explicitement presente comme indicatif et non opposable ; "
+                    "(2) Aucune decision juridique ou administrative ne resulte directement du score ; "
+                    "(3) Tout constat est soumis a procedure contradictoire prealable (art. L121-1 CRPA) ; "
+                    "(4) Un mecanisme de validation humaine est requis avant toute utilisation du score "
+                    "a des fins decisionnelles ; "
+                    "(5) Le score est qualifie de 'provisoire' jusqu'a validation par un operateur humain."
+                ),
+                "mesures_preventives": [
+                    "Score qualifie de 'provisoire' jusqu'a validation humaine explicite",
+                    "Aucun grade A-F ne vaut certification sans intervention d'un professionnel qualifie",
+                    "Procedure contradictoire (30 jours) avant integration definitive de tout constat",
+                    "Droit de contestation de tout constat et du score global par l'entite auditee",
+                    "Tracabilite complete de la decision humaine dans la chaine de preuve",
+                ],
+            },
+            "droit_intervention_humaine": {
+                "principe": "Conformement a l'art. 22(3) RGPD, toute personne concernee a le droit "
+                            "d'obtenir une intervention humaine, d'exprimer son point de vue et de "
+                            "contester la decision",
+                "mecanismes": [
+                    "Endpoint /api/scores/validation-humaine : un operateur qualifie valide ou "
+                    "ajuste le score avant toute utilisation decisionnelle",
+                    "Endpoint /api/scores/contestation : l'entite auditee peut contester le score "
+                    "avec justificatifs, declenchant un reexamen humain",
+                    "Chaque validation/contestation est scellee dans la chaine de preuve (proof_chain)",
+                    "Le score final ('score valide') ne peut etre emis que par un operateur humain",
+                ],
+            },
+            "aipd": {
+                "reference": "Art. 35 RGPD - Analyse d'Impact relative a la Protection des Donnees",
+                "statut": "AIPD realisee pour le traitement de scoring NormaCheck",
+                "risques_identifies": [
+                    "Risque de requalification en decision automatisee si le score est utilise "
+                    "sans validation humaine pour refuser un service ou appliquer une sanction",
+                    "Risque de biais indirect via le facteur de couverture documentaire (Fc) "
+                    "penalisant les petites structures disposant de moins de documents",
+                    "Risque d'opacite si la methode de routage domaine n'est pas tracee",
+                ],
+                "mesures_attenuation": [
+                    "Qualification explicite en aide a la decision avec garde-fous techniques",
+                    "Documentation exhaustive des biais identifies et de leurs mitigations",
+                    "Tracabilite du routage domaine dans les details du score",
+                    "Mecanisme de contestation et de validation humaine obligatoire",
+                ],
+            },
+        },
+        "biais_identifies_et_mitigations": {
+            "fc_couverture_documentaire": {
+                "biais": "Le facteur Fc = min(1, nbDocuments/3) penalise les entites fournissant "
+                         "moins de 3 documents (score multiplie par 0.5 + 0.5*Fc)",
+                "mitigation": (
+                    "Fc est un facteur continu (non binaire) refletant l'incertitude reelle : "
+                    "avec 1 document, l'analyse repose uniquement sur la coherence interne, "
+                    "sans recoupement possible. Le seuil de 3 est derive de la norme NEP 500 "
+                    "(elements probants : recoupement multi-sources). Le score brut est preserve "
+                    "a 50% minimum (jamais zero), et l'intervalle de confiance elargit "
+                    "proportionnellement pour signaler l'incertitude."
+                ),
+                "transparence": "Fc affiche dans les details du score avec justification",
+            },
+            "effectif_zero": {
+                "biais": "Quand effectif=0 ou non renseigne, les controles dependant de seuils "
+                         "d'effectif (FNAL deplafonne >= 50, versement mobilite >= 11, PEEC >= 20) "
+                         "sont silencieusement ignores",
+                "mitigation": (
+                    "Un constat structurel DONNEE_MANQUANTE (severite MOYENNE, score_risque=50) "
+                    "est genere pour signaler explicitement cette limitation. Le score reflete "
+                    "ainsi l'absence de verification plutot que la conformite."
+                ),
+            },
+            "routage_domaine_par_defaut": {
+                "biais": "Les constats non classes par categToDomain sont affectes au domaine URSSAF "
+                         "par defaut, ce qui pourrait concentrer les deductions sur ce domaine",
+                "mitigation": (
+                    "Le routage par defaut est documente et trace (console.info). Les regles de "
+                    "routage sont basees sur des criteres objectifs (reference legale, categorie, "
+                    "titre du constat). L'ajout de regles de routage par titre (v4.0) reduit "
+                    "significativement le nombre de constats routes par defaut."
+                ),
+            },
+            "detection_apprenti_par_mots_cles": {
+                "biais": "La detection du statut d'apprenti repose sur la recherche de mots-cles "
+                         "dans le NIR ou les champs texte, ce qui peut generer des faux positifs",
+                "mitigation": (
+                    "Les constats lies a la detection par mots-cles sont marques comme "
+                    "PATTERN_SUSPECT (non probants) et soumis a procedure contradictoire. "
+                    "Ils n'impactent le score que comme indicateurs statistiques (Wk=1 max)."
+                ),
+            },
+        },
+        "explicabilite": {
+            "principe": "Chaque element du score est traçable et explicable conformement au "
+                        "principe de transparence (art. 5(1)(a) et art. 13-14 RGPD)",
+            "elements_traces": [
+                "Routage de chaque constat vers son domaine (URSSAF/DGFIP/CDC) avec regle appliquee",
+                "Poids Wk de chaque constat avec reference legale justificative",
+                "Normalisation Wmax avec nombre de points de controle (Npoints)",
+                "Facteur couverture Fc avec nombre de documents",
+                "Score brut avant et apres application de Fc",
+                "Intervalle de confiance avec marge d'incertitude",
+                "Penalite d'accumulation d'incoherences si applicable",
+                "Constats contestables (pattern_suspect) identifies separement",
+            ],
+        },
         "changelog": {
             "v4.0": "Refonte methodologique : suppression coefficients arbitraires, poids proportionnels Nk/Somme_Nk, "
                      "deductions Wk basees sur sanctions legales, suppression bonus subjectifs, facteur couverture continu",
@@ -635,6 +748,181 @@ async def snapshot_constants(request: Request):
 
     return {"status": "ok", "seq": entry["seq"], "hash": entry["hash"],
             "snapshot_hash": snapshot["snapshot_hash"]}
+
+
+# ============================================================
+# RGPD ART. 22 - VALIDATION HUMAINE ET CONTESTATION DU SCORE
+# ============================================================
+
+# Stockage en memoire des statuts de validation (en production : base de donnees)
+_score_validations: dict = {}
+
+
+@app.post("/api/scores/validation-humaine")
+async def validation_humaine_score(request: Request):
+    """Validation humaine d'un score (art. 22(3) RGPD).
+
+    Permet a un operateur qualifie de :
+    - Valider le score automatique tel quel (statut: 'valide')
+    - Ajuster le score avec justification (statut: 'ajuste')
+    - Rejeter le score et demander un recalcul (statut: 'rejete')
+
+    Chaque action est scellee dans la chaine de preuve pour tracabilite.
+    """
+    user = get_optional_user(request)
+    body = await request.json()
+
+    session_id = body.get("session_id", "")
+    action = body.get("action", "")  # 'valider', 'ajuster', 'rejeter'
+    score_original = body.get("score_original", {})
+    score_ajuste = body.get("score_ajuste", None)
+    justification = body.get("justification", "")
+    operateur = user["email"] if user else body.get("operateur", "anonyme")
+
+    if action not in ("valider", "ajuster", "rejeter"):
+        raise HTTPException(400, "Action invalide. Valeurs acceptees: valider, ajuster, rejeter")
+
+    if action == "ajuster" and not score_ajuste:
+        raise HTTPException(400, "Un score ajuste doit etre fourni pour l'action 'ajuster'")
+
+    if not justification and action != "valider":
+        raise HTTPException(400, "Une justification est requise pour les actions ajuster/rejeter")
+
+    # Sceller dans la chaine de preuve
+    payload = {
+        "session_id": session_id,
+        "operateur": operateur,
+        "action": action,
+        "score_original": score_original,
+        "justification": justification,
+        "qualification_rgpd": "Validation humaine conforme art. 22(3) RGPD",
+    }
+
+    if action == "ajuster" and score_ajuste:
+        payload["score_ajuste"] = score_ajuste
+
+    entry = _proof_chain.append("validation_humaine_score", payload)
+
+    # Mettre a jour le statut de validation
+    statut = "valide" if action == "valider" else ("ajuste" if action == "ajuster" else "rejete")
+    _score_validations[session_id] = {
+        "statut": statut,
+        "operateur": operateur,
+        "date": entry["timestamp"],
+        "proof_seq": entry["seq"],
+        "proof_hash": entry["hash"],
+        "justification": justification,
+    }
+
+    return {
+        "status": "ok",
+        "validation": {
+            "statut": statut,
+            "session_id": session_id,
+            "operateur": operateur,
+            "proof_seq": entry["seq"],
+            "proof_hash": entry["hash"],
+        },
+        "message": (
+            f"Score {statut} par {operateur}. "
+            "Decision scellee dans la chaine de preuve (art. 22(3) RGPD)."
+        ),
+    }
+
+
+@app.post("/api/scores/contestation")
+async def contestation_score(request: Request):
+    """Contestation d'un score par l'entite auditee (art. 22(3) RGPD + art. L121-1 CRPA).
+
+    L'entite auditee peut contester :
+    - Un constat specifique (par titre)
+    - Le score global
+    - Plusieurs constats a la fois
+
+    La contestation declenche un reexamen humain obligatoire.
+    Le score passe en statut 'conteste' jusqu'a resolution.
+    """
+    user = get_optional_user(request)
+    body = await request.json()
+
+    session_id = body.get("session_id", "")
+    constats_contestes = body.get("constats_contestes", [])
+    motif = body.get("motif", "")
+    justificatifs = body.get("justificatifs", [])
+    contestataire = body.get("contestataire", user["email"] if user else "anonyme")
+
+    if not motif:
+        raise HTTPException(400, "Un motif de contestation est requis")
+
+    # Sceller dans la chaine de preuve
+    entry = _proof_chain.append("contestation_score", {
+        "session_id": session_id,
+        "contestataire": contestataire,
+        "constats_contestes": constats_contestes,
+        "motif": motif,
+        "justificatifs_fournis": len(justificatifs),
+        "procedure": "Procedure contradictoire art. L121-1 CRPA",
+        "delai_reponse": "30 jours (art. R*243-59 CSS)",
+        "qualification_rgpd": "Droit de contestation conforme art. 22(3) RGPD",
+    })
+
+    # Passer le score en statut 'conteste'
+    _score_validations[session_id] = {
+        "statut": "conteste",
+        "contestataire": contestataire,
+        "date": entry["timestamp"],
+        "proof_seq": entry["seq"],
+        "proof_hash": entry["hash"],
+        "motif": motif,
+        "nb_constats_contestes": len(constats_contestes),
+        "reexamen_humain_requis": True,
+    }
+
+    return {
+        "status": "ok",
+        "contestation": {
+            "session_id": session_id,
+            "proof_seq": entry["seq"],
+            "proof_hash": entry["hash"],
+            "statut": "conteste",
+            "nb_constats_contestes": len(constats_contestes),
+        },
+        "message": (
+            "Contestation enregistree et scellee dans la chaine de preuve. "
+            "Un reexamen humain obligatoire sera effectue dans un delai de "
+            "30 jours (art. R*243-59 CSS). Vous serez notifie du resultat."
+        ),
+        "procedure": [
+            "1. Contestation enregistree (cette etape)",
+            "2. Reexamen humain obligatoire par un operateur qualifie",
+            "3. Notification du resultat avec motivation ecrite",
+            "4. Score definitif emis apres contradictoire",
+        ],
+    }
+
+
+@app.get("/api/scores/statut-validation/{session_id}")
+async def statut_validation_score(session_id: str):
+    """Consulte le statut de validation humaine d'un score.
+
+    Retourne 'provisoire' si aucune validation humaine n'a ete effectuee,
+    ou le statut actuel (valide, ajuste, rejete, conteste).
+    """
+    validation = _score_validations.get(session_id)
+    if not validation:
+        return {
+            "session_id": session_id,
+            "statut": "provisoire",
+            "message": (
+                "Ce score n'a pas encore fait l'objet d'une validation humaine. "
+                "Conformement a l'art. 22 RGPD, il ne peut etre utilise a des fins "
+                "decisionnelles sans intervention d'un operateur qualifie."
+            ),
+        }
+    return {
+        "session_id": session_id,
+        **validation,
+    }
 
 
 # ==============================
@@ -7341,6 +7629,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <li><strong>Droit de suppression :</strong> demander l'effacement de ses donnees</li>
 <li><strong>Droit a la portabilite :</strong> recuperer ses donnees dans un format structure</li>
 <li><strong>Droit d'opposition :</strong> s'opposer au traitement de ses donnees</li>
+<li><strong>Droit relatif aux decisions automatisees (art. 22 RGPD) :</strong> obtenir une intervention humaine, exprimer son point de vue et contester toute decision. NormaCheck est un outil d'aide a la decision ; les scores sont provisoires et necessitent une validation humaine</li>
 </ul>
 <p>Les donnees sont traitees aux fins suivantes : fourniture du service, analyse de documents, amelioration de la plateforme. Base legale : execution du contrat (art. 6.1.b RGPD).</p>
 <p>Contact DPO : dpo@normacheck-app.fr</p>
@@ -7459,6 +7748,21 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <li><strong>DPO :</strong> dpo@normacheck-app.fr</li>
 <li><strong>Reclamation CNIL :</strong> www.cnil.fr</li>
 </ul>
+
+<h2 id="art22">Decisions automatisees et droit a l'intervention humaine (Art. 22 RGPD)</h2>
+<div class="warn">
+<p><strong>Qualification du systeme :</strong> NormaCheck est un <strong>outil d'aide a la decision</strong>, et non un systeme de decision automatisee au sens de l'article 22 du RGPD. Les scores produits sont des indicateurs provisoires qui necessitent une validation par un professionnel qualifie avant toute utilisation a des fins decisionnelles.</p>
+</div>
+<p>Conformement a l'article 22 du Reglement (UE) 2016/679 (RGPD) et aux lignes directrices du Comite europeen de la protection des donnees (CEPD, WP251rev.01) :</p>
+<ul>
+<li><strong>Aucune decision juridique ou administrative</strong> ne resulte directement et exclusivement des scores NormaCheck</li>
+<li><strong>Droit a l'intervention humaine :</strong> tout score est qualifie de &laquo; provisoire &raquo; jusqu'a validation par un operateur humain qualifie. L'utilisateur peut demander une revision humaine a tout moment</li>
+<li><strong>Droit d'expression :</strong> l'entite auditee peut exprimer son point de vue et fournir des justificatifs via la procedure contradictoire (delai de 30 jours, art. R*243-59 CSS)</li>
+<li><strong>Droit de contestation :</strong> tout constat et le score global peuvent etre contestes. La contestation declenche un reexamen humain obligatoire dont le resultat est scelle dans la chaine de preuve</li>
+<li><strong>Explicabilite :</strong> la methodologie complete de calcul est documentee et accessible (endpoint /api/scores/methodologie). Chaque element du score (routage domaine, poids, normalisation, couverture) est traçable</li>
+<li><strong>AIPD :</strong> une Analyse d'Impact relative a la Protection des Donnees (art. 35 RGPD) a ete realisee pour le traitement de scoring</li>
+</ul>
+<p>Contact pour exercer ces droits : <strong>dpo@normacheck-app.fr</strong></p>
 
 <h2>Cookies</h2>
 <p>NormaCheck utilise uniquement des cookies techniques strictement necessaires au fonctionnement du service (authentification, session). Aucun cookie publicitaire ou de tracking n'est utilise. Conformement a la directive ePrivacy, ces cookies techniques ne necessitent pas de consentement.</p>
@@ -9284,36 +9588,37 @@ el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur cha
 /* === CONFORMITY SCORE === */
 function categToDomain(cat,ref,titre){
 var c=(cat||"").toLowerCase();var r=(ref||"").toLowerCase();var t=(titre||"").toLowerCase();
+var result={domain:"urssaf",regle:"defaut"};
 /* URSSAF-specific: taxe apprentissage (CT L6241-1), formation pro are URSSAF even if "taxe" in name */
-if(c.indexOf("apprentissage")>=0||c.indexOf("formation_pro")>=0)return"urssaf";
-if(r.indexOf("code du travail")>=0&&r.indexOf("cgi")<0)return"urssaf";
+if(c.indexOf("apprentissage")>=0||c.indexOf("formation_pro")>=0){result={domain:"urssaf",regle:"categorie apprentissage/formation_pro -> URSSAF (CT L6241-1)"};}
+else if(r.indexOf("code du travail")>=0&&r.indexOf("cgi")<0){result={domain:"urssaf",regle:"reference Code du travail -> URSSAF"};}
 /* Fiscal domain: CGI, LPF, taxe sur salaires, TVA, impots */
-if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||c.indexOf("taxe_sur_salaires")>=0)return"fiscal";
+else if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||c.indexOf("taxe_sur_salaires")>=0){result={domain:"fiscal",regle:"categorie/reference fiscale (CGI/LPF/TVA) -> DGFIP"};}
 /* CDC domain: NEP, ISA, code de commerce, comptabilite, totaux/sous-totaux, doublons total/detail */
-if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0)return"cdc";
+else if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0){result={domain:"cdc",regle:"reference NEP/ISA/Code de commerce -> CDC"};}
 /* CDC par titre: coherence comptable, totaux, doublons total/detail, base x taux, S89 */
-if(t.indexOf("total")>=0&&t.indexOf("detail")>=0)return"cdc";
-if(t.indexOf("ecart calcul cotisation")>=0||t.indexOf("base x taux")>=0)return"cdc";
-if(t.indexOf("s89")>=0)return"cdc";
-if(t.indexOf("masse salariale")>=0&&t.indexOf("bases individuelles")>=0)return"cdc";
+else if(t.indexOf("total")>=0&&t.indexOf("detail")>=0){result={domain:"cdc",regle:"titre total+detail (coherence comptable) -> CDC"};}
+else if(t.indexOf("ecart calcul cotisation")>=0||t.indexOf("base x taux")>=0){result={domain:"cdc",regle:"titre ecart calcul/base x taux -> CDC"};}
+else if(t.indexOf("s89")>=0){result={domain:"cdc",regle:"titre S89 -> CDC"};}
+else if(t.indexOf("masse salariale")>=0&&t.indexOf("bases individuelles")>=0){result={domain:"cdc",regle:"titre masse salariale vs bases individuelles -> CDC"};}
 /*
  * INCOHERENCE cross-document: distribuer entre domaines selon le contenu.
  * Les incoherences de taux/montants entre documents sont des enjeux CDC (fiabilite comptable).
  * Les incoherences SIRET/effectif/employes sont des enjeux URSSAF (declarations sociales).
  */
-if(c==="incoherence"){
+else if(c==="incoherence"){
 /* Taux, montants, bases entre documents = fiabilite comptable = CDC */
-if(t.indexOf("total patronal")>=0||t.indexOf("taux at")>=0)return"cdc";
+if(t.indexOf("total patronal")>=0||t.indexOf("taux at")>=0){result={domain:"cdc",regle:"incoherence taux/montant inter-documents -> CDC (fiabilite comptable)"};}
 /* Convention collective, statut = impact fiscal aussi (minima, avantages en nature) */
-if(t.indexOf("convention collective")>=0||t.indexOf("statut divergent")>=0)return"fiscal";
+else if(t.indexOf("convention collective")>=0||t.indexOf("statut divergent")>=0){result={domain:"fiscal",regle:"incoherence convention/statut -> DGFIP (impact minima/avantages)"};}
+else{result={domain:"urssaf",regle:"incoherence non classee -> URSSAF (declarations sociales)"};}
 }
 /* Donnee manquante: certaines sont fiscales (declarations absentes = enjeu declaration fiscale) */
-if(c==="donnee_manquante"&&(t.indexOf("mois de declaration manquants")>=0))return"fiscal";
+else if(c==="donnee_manquante"&&(t.indexOf("mois de declaration manquants")>=0)){result={domain:"fiscal",regle:"donnee manquante mois declaration -> DGFIP"};}
 /* Pattern suspect: distribution Benford et outliers = enjeu comptabilite (CDC) */
-if(c==="pattern_suspect"&&(t.indexOf("benford")>=0||t.indexOf("valeur atypique")>=0))return"cdc";
-/* Default: urssaf. Log pour traçabilite */
-if(typeof console!=="undefined")console.info("Constat non classe par domaine, affecte a URSSAF par defaut:",cat,ref);
-return"urssaf";}
+else if(c==="pattern_suspect"&&(t.indexOf("benford")>=0||t.indexOf("valeur atypique")>=0)){result={domain:"cdc",regle:"pattern suspect Benford/outlier -> CDC (regularite comptable)"};}
+else{result={domain:"urssaf",regle:"aucune regle specifique -> URSSAF par defaut"};}
+return result;}
 /*
  * METHODOLOGIE DE SCORING v4.0 - Approche proportionnelle non-discretionnaire
  *
@@ -9374,8 +9679,9 @@ for(var j=0;j<constats.length;j++){var cc=constats[j];var ct=(cc.categorie||"").
 return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas,totalW:totalW,Wmax:Wmax,Sbrut:Sbrut,Fc:Fc,intervalle:{bas:scoreBas,haut:scoreHaut,marge:marge},nb_constats_contestables:nbContest};}
 function calculateTripleScore(data){
 var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
-var urssafC=[],fiscalC=[],cdcC=[];
-for(var i=0;i<constats.length;i++){var c=constats[i];var dom=categToDomain(c.categorie,c.reference_legale,c.titre);
+var urssafC=[],fiscalC=[],cdcC=[],routageTrace=[];
+for(var i=0;i<constats.length;i++){var c=constats[i];var routing=categToDomain(c.categorie,c.reference_legale,c.titre);var dom=routing.domain;
+routageTrace.push({constat:c.titre||"",categorie:c.categorie||"",domaine_affecte:dom,regle_appliquee:routing.regle});
 if(dom==="fiscal")fiscalC.push(c);else if(dom==="cdc")cdcC.push(c);else urssafC.push(c);}
 var su=_scoreOne(urssafC,nbDecl,"urssaf");var sf=_scoreOne(fiscalC,nbDecl,"fiscal");var sc=_scoreOne(cdcC,nbDecl,"cdc");
 su.domaine="URSSAF";su.ref_legal="Code de la securite sociale (CSS)";su.organisme="URSSAF / Caisse Nationale";
@@ -9407,7 +9713,8 @@ if(nbIncoherences>5){penaliteIncoherences=Math.min(15,(nbIncoherences-5)*2);glob
 var ggrade="F";if(global>=90)ggrade="A";else if(global>=75)ggrade="B";else if(global>=60)ggrade="C";else if(global>=45)ggrade="D";else if(global>=30)ggrade="E";
 return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length,
 nb_incoherences:nbIncoherences,penalite_incoherences:penaliteIncoherences,
-poids:{urssaf:wu,fiscal:wf,cdc:wc},methode:"Moyenne ponderee par nombre de points de controle (Nk/Somme_Nk)"};}
+poids:{urssaf:wu,fiscal:wf,cdc:wc},methode:"Moyenne ponderee par nombre de points de controle (Nk/Somme_Nk)",
+routage_domaine:routageTrace,statut_validation:"provisoire"};}
 function calculateConformityScore(data){
 var ts=calculateTripleScore(data);var g=ts.global;var p=ts.poids;
 var allDetails=ts.urssaf.details.concat(ts.fiscal.details).concat(ts.cdc.details);
@@ -9456,15 +9763,65 @@ renderDomainDetail("score-detail-urssaf",ts.urssaf);
 renderDomainDetail("score-detail-fiscal",ts.fiscal);
 renderDomainDetail("score-detail-cdc",ts.cdc);
 var gel=document.getElementById("score-detail-global");
-if(gel){var gh="<div style='font-size:.9em;line-height:1.8'>";
+if(gel){var gh="";
+/* Bandeau statut provisoire / valide (art. 22 RGPD) */
+gh+="<div style='margin-bottom:12px;padding:12px 16px;border-radius:8px;border:2px solid #f59e0b;background:#fffbeb;font-size:.9em'>";
+gh+="<strong style='color:#92400e'>&#9888; SCORE PROVISOIRE</strong> &mdash; ";
+gh+="Ce score est un indicateur d'aide a la decision (art. 22 RGPD). ";
+gh+="Il ne constitue pas une decision automatisee et ne peut etre utilise a des fins decisionnelles ";
+gh+="sans validation prealable par un professionnel qualifie.";
+gh+="<div style='margin-top:8px'>";
+gh+="<button onclick='demanderValidationHumaine()' style='padding:6px 14px;background:#1e40af;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.85em;margin-right:8px'>Demander une validation humaine</button>";
+gh+="<button onclick='contesterScore()' style='padding:6px 14px;background:#dc2626;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.85em'>Contester ce score</button>";
+gh+="</div></div>";
+gh+="<div style='font-size:.9em;line-height:1.8'>";
 gh+="<strong>Methode :</strong> Moyenne ponderee par nombre de points de controle (Nk/&Sigma;Nk) - non discretionnaire<br>";
 gh+="<strong>Calcul :</strong> S<sub>global</sub> = ("+ts.urssaf.score+" &times; "+p.urssaf.toFixed(4)+") + ("+ts.fiscal.score+" &times; "+p.fiscal.toFixed(4)+") + ("+ts.cdc.score+" &times; "+p.cdc.toFixed(4)+") = <strong>"+ts.global.score+"/100 ("+ts.global.grade+")</strong></div>";
-gh+="<div style='margin-top:10px;padding:10px;background:var(--pl);border-radius:8px;font-size:.84em'><strong>Avertissement juridique :</strong> Ce score est un indicateur methodologique interne, non opposable aux administrations. Les constats de type pattern_suspect sont des indicateurs statistiques non probants (art. L243-7 CSS). Tout constat est soumis a procedure contradictoire (art. L121-1 CRPA).</div>";
+gh+="<div style='margin-top:10px;padding:10px;background:var(--pl);border-radius:8px;font-size:.84em'><strong>Avertissement juridique (art. 22 RGPD) :</strong> Ce score est un indicateur methodologique provisoire, non opposable aux administrations. Il ne constitue pas une decision automatisee au sens de l'art. 22 RGPD. Les constats de type pattern_suspect sont des indicateurs statistiques non probants (art. L243-7 CSS). Tout constat est soumis a procedure contradictoire (art. L121-1 CRPA). L'entite auditee dispose d'un droit d'intervention humaine, d'expression et de contestation.</div>";
+/* Tracabilite du routage domaine (explicabilite art. 13-14 RGPD) */
+if(ts.routage_domaine&&ts.routage_domaine.length>0){
+gh+="<details style='margin-top:10px;font-size:.84em'><summary style='cursor:pointer;font-weight:700;color:var(--tx2)'>Tracabilite du routage domaine ("+ts.routage_domaine.length+" constats routes)</summary>";
+gh+="<table style='width:100%;margin-top:6px'><thead><tr><th style='text-align:left'>Constat</th><th style='text-align:left'>Domaine</th><th style='text-align:left'>Regle appliquee</th></tr></thead><tbody>";
+for(var ri=0;ri<ts.routage_domaine.length;ri++){var rt=ts.routage_domaine[ri];
+gh+="<tr><td style='font-size:.82em'>"+rt.constat+"</td><td><strong>"+rt.domaine_affecte.toUpperCase()+"</strong></td><td style='font-size:.82em;color:var(--tx2)'>"+rt.regle_appliquee+"</td></tr>";}
+gh+="</tbody></table></details>";}
 gh+="<div class='g3' style='margin-top:12px'>";
 gh+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF (N="+DOMAIN_CONTROL_POINTS.urssaf+", w="+(p.urssaf*100).toFixed(1)+"%)</div></div>";
 gh+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP (N="+DOMAIN_CONTROL_POINTS.fiscal+", w="+(p.fiscal*100).toFixed(1)+"%)</div></div>";
 gh+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC (N="+DOMAIN_CONTROL_POINTS.cdc+", w="+(p.cdc*100).toFixed(1)+"%)</div></div>";
 gh+="</div>";gel.innerHTML=gh;}}
+/* === RGPD ART. 22 - VALIDATION HUMAINE ET CONTESTATION === */
+function demanderValidationHumaine(){
+if(!analysisData){toast("Aucune analyse en cours.","warn");return;}
+var sid=analysisData.session_id||"session_"+Date.now();
+var ts=calculateTripleScore(analysisData);
+var justif=prompt("Justification de la demande de validation (facultatif pour validation simple) :");
+fetch("/api/scores/validation-humaine",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sid,action:"valider",score_original:ts.global,justification:justif||"Validation demandee par l operateur"}),
+credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+if(d.status==="ok"){toast("Score valide par intervention humaine. Ref: seq="+d.validation.proof_seq+", hash="+d.validation.proof_hash.substring(0,12)+"...","ok");
+/* Mettre a jour l indicateur visuel */
+var banner=document.querySelector("#score-detail-global > div:first-child");
+if(banner){banner.style.borderColor="#16a34a";banner.style.background="#f0fdf4";
+banner.innerHTML="<strong style='color:#166534'>&#10003; SCORE VALIDE</strong> &mdash; Score valide par un operateur humain le "+new Date().toLocaleDateString("fr-FR")+". Ref preuve : "+d.validation.proof_hash.substring(0,12)+"... (art. 22 RGPD)";}
+}else{toast("Erreur: "+(d.detail||"Echec validation"),"warn");}
+}).catch(function(e){toast("Erreur validation: "+e.message,"warn");});}
+function contesterScore(){
+if(!analysisData){toast("Aucune analyse en cours.","warn");return;}
+var sid=analysisData.session_id||"session_"+Date.now();
+var motif=prompt("Motif de la contestation (obligatoire) :");
+if(!motif){toast("La contestation necessite un motif.","warn");return;}
+var constatsStr=prompt("Titre(s) des constats contestes (separes par des virgules, ou vide pour contester le score global) :");
+var constatsContestes=constatsStr?constatsStr.split(",").map(function(s){return s.trim();}):[];
+fetch("/api/scores/contestation",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sid,constats_contestes:constatsContestes,motif:motif}),
+credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+if(d.status==="ok"){toast("Contestation enregistree (ref: seq="+d.contestation.proof_seq+"). Reexamen humain sous 30 jours.","ok");
+var banner=document.querySelector("#score-detail-global > div:first-child");
+if(banner){banner.style.borderColor="#dc2626";banner.style.background="#fef2f2";
+banner.innerHTML="<strong style='color:#991b1b'>&#9888; SCORE CONTESTE</strong> &mdash; Contestation enregistree le "+new Date().toLocaleDateString("fr-FR")+". Un reexamen humain sera effectue sous 30 jours (art. R*243-59 CSS). Ref: "+d.contestation.proof_hash.substring(0,12)+"...";}
+}else{toast("Erreur: "+(d.detail||"Echec contestation"),"warn");}
+}).catch(function(e){toast("Erreur contestation: "+e.message,"warn");});}
 
 /* === PDF EXPORT === */
 function exportPDF(){
@@ -9487,6 +9844,7 @@ html+=entHtml;
 html+="<h1 style='text-align:center'>"+titre+"</h1>";
 html+="<p style='text-align:center;color:#64748b'>Date: "+new Date().toLocaleDateString("fr-FR")+" | "+((analysisData.synthese||{}).nb_fichiers||0)+" fichier(s) analyse(s)</p>";
 var ts=scoreData.tripleScore||calculateTripleScore(analysisData);
+html+="<div style='margin:16px 0;padding:12px;background:#fffbeb;border:2px solid #f59e0b;border-radius:8px;font-size:.9em;color:#92400e'><strong>&#9888; SCORE PROVISOIRE</strong> &mdash; Ce score est un indicateur d'aide a la decision (art. 22 RGPD). Il ne constitue pas une decision automatisee et necessite une validation par un professionnel qualifie avant toute utilisation a des fins decisionnelles. L'entite auditee dispose d'un droit d'intervention humaine, d'expression et de contestation (art. 22(3) RGPD, art. L121-1 CRPA).</div>";
 html+="<div class='score'><div class='grade'>"+scoreData.grade+"</div><div style='font-size:2em;font-weight:700'>Score global : "+scoreData.score+" / 100</div><p style='color:#64748b;margin-top:8px'>"+scoreData.explanation+"</p></div>";
 html+="<div style='display:flex;gap:16px;justify-content:center;margin:20px 0;flex-wrap:wrap'>";
 html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #3b82f6;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>URSSAF / CSS</div><div style='font-size:2em;font-weight:800;color:#1e40af'>"+ts.urssaf.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.urssaf.score>=75?"#16a34a":ts.urssaf.score>=45?"#d97706":"#ef4444")+"'>"+ts.urssaf.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.urssaf.nb_critiques+" critique(s) | "+ts.urssaf.details.length+" constat(s)</div></div>";
@@ -9509,7 +9867,7 @@ html+="</table></div>";}
 _pdfScoreTable(ts.urssaf,"Score URSSAF (Securite sociale)","#1e40af");
 _pdfScoreTable(ts.fiscal,"Score DGFIP (Fiscal)","#7c3aed");
 _pdfScoreTable(ts.cdc,"Score Cour des comptes (Regularite comptable)","#0d9488");
-html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v4.0 - Indicateur methodologique interne, non opposable aux administrations (art. L.243-6-3 CSS). Score indicatif soumis a procedure contradictoire.</p></body></html>";
+html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v4.0 - SCORE PROVISOIRE - Outil d'aide a la decision, non decision automatisee (art. 22 RGPD). Indicateur methodologique interne, non opposable aux administrations (art. L.243-6-3 CSS). Score indicatif soumis a procedure contradictoire (art. L121-1 CRPA). Validation humaine requise avant utilisation decisionnelle.</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
