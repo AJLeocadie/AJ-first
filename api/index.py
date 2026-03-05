@@ -6842,10 +6842,49 @@ async def creer_contrat(
     convention_collective: str = Form(""),
     periode_essai_jours: str = Form("0"),
     motif_cdd: str = Form(""),
+    nir: str = Form(""),
 ):
     """Cree un contrat de travail avec toutes les mentions legales obligatoires (Code du travail L.1221-1 et suivants)."""
     contrat_id = str(uuid.uuid4())[:8]
     salarie_id = str(uuid.uuid4())[:8]
+
+    # Detection de doublons par Nom/Prenom et NIR
+    nir_value = nir.strip() if nir else ""
+    doublons_detectes = []
+    nom_norm = nom_salarie.strip().lower()
+    prenom_norm = prenom_salarie.strip().lower()
+
+    for c in _rh_contrats:
+        c_nom = c.get("nom_salarie", "").strip().lower()
+        c_prenom = c.get("prenom_salarie", "").strip().lower()
+        c_nir = c.get("nir", "")
+
+        # Match par NIR (plus fiable)
+        if nir_value and c_nir and nir_value.replace(" ", "") == c_nir.replace(" ", ""):
+            doublons_detectes.append({
+                "id": c["id"],
+                "nom": c.get("nom_salarie", ""),
+                "prenom": c.get("prenom_salarie", ""),
+                "poste": c.get("poste", ""),
+                "type_contrat": c.get("type_contrat", ""),
+                "date_debut": c.get("date_debut", ""),
+                "motif": "nir_identique",
+                "nir": c_nir,
+            })
+            continue
+
+        # Match par nom + prenom (insensible a la casse)
+        if c_nom == nom_norm and c_prenom == prenom_norm:
+            doublons_detectes.append({
+                "id": c["id"],
+                "nom": c.get("nom_salarie", ""),
+                "prenom": c.get("prenom_salarie", ""),
+                "poste": c.get("poste", ""),
+                "type_contrat": c.get("type_contrat", ""),
+                "date_debut": c.get("date_debut", ""),
+                "motif": "nom_prenom_identique",
+                "nir": c_nir,
+            })
 
     # Validation du type de contrat
     types_valides = ("CDI", "CDD", "CTT", "Apprentissage", "Professionnalisation", "Saisonnier", "Intermittent")
@@ -6939,6 +6978,7 @@ async def creer_contrat(
         "periode_essai_jours": pe_jours,
         "motif_cdd": motif_cdd,
         "mentions_legales": mentions_legales,
+        "nir": nir_value,
         "statut": "actif",
         "date_creation": datetime.now().isoformat(),
         "clauses_obligatoires": {
@@ -7020,8 +7060,147 @@ async def creer_contrat(
         pass
 
     contrat["cascading_effects"] = cascading
+
+    # Ajouter l'alerte de doublons au retour
+    if doublons_detectes:
+        contrat["doublons_detectes"] = doublons_detectes
+        contrat["alerte_doublon"] = (
+            f"Attention : {len(doublons_detectes)} fiche(s) existante(s) trouvee(s) pour "
+            f"{prenom_salarie} {nom_salarie}. Verifiez qu'il ne s'agit pas d'un doublon."
+        )
+
     log_action("utilisateur", "creation_contrat", f"{type_contrat} {prenom_salarie} {nom_salarie} - {poste}")
     return contrat
+
+
+@app.get("/api/rh/doublons")
+async def detecter_doublons_salaries():
+    """Detecte les doublons potentiels parmi les salaries (par Nom/Prenom et NIR)."""
+    doublons = []
+    seen_noms = {}  # (nom_lower, prenom_lower) -> [contrats]
+    seen_nirs = {}  # nir -> [contrats]
+
+    for c in _rh_contrats:
+        nom = c.get("nom_salarie", "").strip().lower()
+        prenom = c.get("prenom_salarie", "").strip().lower()
+        nir = c.get("nir", "").strip()
+
+        # Detection par nom + prenom
+        if nom and prenom:
+            cle = (nom, prenom)
+            if cle not in seen_noms:
+                seen_noms[cle] = []
+            seen_noms[cle].append(c)
+
+        # Detection par NIR
+        if nir and not nir.startswith("unknown_"):
+            if nir not in seen_nirs:
+                seen_nirs[nir] = []
+            seen_nirs[nir].append(c)
+
+    # Collecter les doublons par nom/prenom
+    for cle, contrats in seen_noms.items():
+        if len(contrats) > 1:
+            doublons.append({
+                "type": "nom_prenom",
+                "valeur": f"{contrats[0].get('prenom_salarie', '')} {contrats[0].get('nom_salarie', '')}",
+                "nb_occurrences": len(contrats),
+                "fiches": [{
+                    "id": c["id"],
+                    "nom": c.get("nom_salarie", ""),
+                    "prenom": c.get("prenom_salarie", ""),
+                    "poste": c.get("poste", ""),
+                    "type_contrat": c.get("type_contrat", ""),
+                    "date_debut": c.get("date_debut", ""),
+                    "nir": c.get("nir", ""),
+                    "source": c.get("source", ""),
+                    "salaire_brut": c.get("salaire_brut", "0"),
+                } for c in contrats],
+            })
+
+    # Collecter les doublons par NIR
+    for nir, contrats in seen_nirs.items():
+        if len(contrats) > 1:
+            # Verifier que ce n'est pas deja couvert par le doublon nom/prenom
+            deja_couvert = False
+            for d in doublons:
+                ids_existants = {f["id"] for f in d["fiches"]}
+                ids_nir = {c["id"] for c in contrats}
+                if ids_nir.issubset(ids_existants):
+                    deja_couvert = True
+                    break
+            if not deja_couvert:
+                doublons.append({
+                    "type": "nir",
+                    "valeur": nir,
+                    "nb_occurrences": len(contrats),
+                    "fiches": [{
+                        "id": c["id"],
+                        "nom": c.get("nom_salarie", ""),
+                        "prenom": c.get("prenom_salarie", ""),
+                        "poste": c.get("poste", ""),
+                        "type_contrat": c.get("type_contrat", ""),
+                        "date_debut": c.get("date_debut", ""),
+                        "nir": c.get("nir", ""),
+                        "source": c.get("source", ""),
+                        "salaire_brut": c.get("salaire_brut", "0"),
+                    } for c in contrats],
+                })
+
+    return {
+        "nb_doublons": len(doublons),
+        "doublons": doublons,
+    }
+
+
+@app.post("/api/rh/doublons/fusionner")
+async def fusionner_doublons(request: Request):
+    """Fusionne deux fiches salarie en une seule (garde la plus complete)."""
+    body = await request.json()
+    id_garder = body.get("id_garder", "")
+    id_supprimer = body.get("id_supprimer", "")
+
+    if not id_garder or not id_supprimer:
+        raise HTTPException(400, "id_garder et id_supprimer sont requis")
+    if id_garder == id_supprimer:
+        raise HTTPException(400, "Les deux identifiants doivent etre differents")
+
+    fiche_garder = None
+    fiche_supprimer = None
+    idx_supprimer = -1
+    for i, c in enumerate(_rh_contrats):
+        if c["id"] == id_garder:
+            fiche_garder = c
+        if c["id"] == id_supprimer:
+            fiche_supprimer = c
+            idx_supprimer = i
+
+    if not fiche_garder:
+        raise HTTPException(404, f"Fiche a garder ({id_garder}) non trouvee")
+    if not fiche_supprimer:
+        raise HTTPException(404, f"Fiche a supprimer ({id_supprimer}) non trouvee")
+
+    # Fusionner: completer la fiche gardee avec les infos manquantes
+    champs_a_fusionner = [
+        "nir", "poste", "convention_collective", "salaire_brut",
+        "date_debut", "date_fin", "duree_hebdo",
+    ]
+    for champ in champs_a_fusionner:
+        val_garder = fiche_garder.get(champ, "")
+        val_supprimer = fiche_supprimer.get(champ, "")
+        if (not val_garder or val_garder == "0" or val_garder == "") and val_supprimer and val_supprimer != "0":
+            fiche_garder[champ] = val_supprimer
+
+    # Supprimer la fiche doublon
+    if idx_supprimer >= 0:
+        _rh_contrats.pop(idx_supprimer)
+
+    log_action("utilisateur", "fusion_doublons", f"Garde {id_garder}, supprime {id_supprimer}")
+    return {
+        "status": "ok",
+        "fiche_gardee": fiche_garder,
+        "message": f"Fiche {id_supprimer} fusionnee dans {id_garder} et supprimee.",
+    }
 
 
 @app.get("/api/rh/contrats")
@@ -7418,25 +7597,111 @@ _sous_comptes: list[dict] = []
 
 
 @app.get("/api/comptabilite/suggestions")
-async def suggestions_comptes(compte: str = Query("")):
-    """Suggestions de comptes pour l'assistance a la saisie d'ecritures."""
+async def suggestions_comptes(compte: str = Query(""), description: str = Query("")):
+    """Suggestions de comptes pour l'assistance a la saisie d'ecritures.
+
+    Supporte la recherche par numero, libelle, OU par description en langage naturel
+    (ex: 'loyer', 'achat fournitures', 'salaire') pour guider les utilisateurs
+    ne connaissant pas le plan comptable.
+    """
     pc = get_plan_comptable()
     suggestions = []
     contreparties = []
 
-    if compte:
-        # Recherche par numero ou libelle
+    # Guide par mots-cles en langage naturel (pour les non-comptables)
+    _GUIDE_COMPTES = {
+        "loyer": [("613000", "Locations", "Loyers et charges locatives de vos locaux professionnels")],
+        "location": [("613000", "Locations", "Loyers de bureaux, ateliers, entrepots"), ("612000", "Redevances de credit-bail", "Leasing de materiel ou vehicules")],
+        "electricite": [("606100", "Fournitures non stockables (eau, energie)", "Factures EDF, eau, gaz pour vos locaux")],
+        "eau": [("606100", "Fournitures non stockables (eau, energie)", "Factures d'eau et d'energie")],
+        "gaz": [("606100", "Fournitures non stockables (eau, energie)", "Factures de gaz et d'energie")],
+        "energie": [("606100", "Fournitures non stockables (eau, energie)", "Toutes les factures d'energie (EDF, gaz, eau)")],
+        "telephone": [("626000", "Frais postaux et de telecommunications", "Factures de telephone, internet, abonnements telecom")],
+        "internet": [("626000", "Frais postaux et de telecommunications", "Abonnement internet, fibre, services cloud")],
+        "assurance": [("616000", "Primes d'assurances", "Assurance RC pro, locaux, vehicules, multirisque")],
+        "salaire": [("641100", "Salaires, appointements", "Salaires bruts verses aux employes")],
+        "paie": [("641100", "Salaires, appointements", "Salaires bruts mensuels des salaries")],
+        "remuneration": [("641100", "Salaires, appointements", "Remunerations brutes du personnel")],
+        "cotisation": [("645100", "Cotisations URSSAF", "Cotisations sociales URSSAF patronales"), ("645300", "Cotisations retraite complementaire", "Cotisations AGIRC-ARRCO")],
+        "urssaf": [("645100", "Cotisations URSSAF", "Charges patronales URSSAF"), ("431000", "Securite sociale (URSSAF)", "Dette URSSAF a payer")],
+        "banque": [("512000", "Banque", "Compte bancaire principal de l'entreprise"), ("627000", "Services bancaires et assimiles", "Frais et commissions bancaires")],
+        "frais bancaire": [("627000", "Services bancaires et assimiles", "Commissions, frais de tenue de compte, agios")],
+        "achat": [("607000", "Achats de marchandises", "Marchandises achetees pour revente"), ("601000", "Achats de matieres premieres", "Matieres premieres pour la production"), ("606000", "Achats non stockes de matieres et fournitures", "Fournitures consommables")],
+        "marchandise": [("607000", "Achats de marchandises", "Marchandises destinees a la revente")],
+        "fourniture": [("606000", "Achats non stockes de matieres et fournitures", "Fournitures de bureau, consommables"), ("606400", "Fournitures administratives", "Papeterie, cartouches, petit materiel de bureau")],
+        "materiel": [("218100", "Materiel de bureau et informatique", "Ordinateurs, imprimantes, mobilier (immobilisations > 500 EUR)"), ("606300", "Fournitures d'entretien et petit equipement", "Petit materiel < 500 EUR (charge directe)")],
+        "informatique": [("218100", "Materiel de bureau et informatique", "Ordinateurs, serveurs, logiciels (immobilisations)"), ("606400", "Fournitures administratives", "Petit materiel informatique < 500 EUR")],
+        "vehicule": [("218200", "Materiel de transport", "Achat de vehicule (immobilisation)"), ("625000", "Deplacements, missions et receptions", "Frais de deplacement, carburant, peages")],
+        "voiture": [("218200", "Materiel de transport", "Achat de vehicule professionnel"), ("625000", "Deplacements, missions et receptions", "Frais de route, carburant")],
+        "carburant": [("625000", "Deplacements, missions et receptions", "Carburant, peages, parking professionnel")],
+        "deplacement": [("625000", "Deplacements, missions et receptions", "Frais de transport, hotel, repas en deplacement")],
+        "restaurant": [("625000", "Deplacements, missions et receptions", "Repas d'affaires, frais de reception")],
+        "hotel": [("625000", "Deplacements, missions et receptions", "Frais d'hebergement en deplacement professionnel")],
+        "vente": [("707000", "Ventes de marchandises", "Ventes de biens et marchandises"), ("706000", "Prestations de services", "Ventes de services et prestations")],
+        "prestation": [("706000", "Prestations de services", "Facturation de services rendus aux clients")],
+        "service": [("706000", "Prestations de services", "Prestations de services facturees"), ("604000", "Achats d'etudes et prestations de services", "Prestations de services achetees a des tiers")],
+        "client": [("411000", "Clients", "Creances dues par vos clients"), ("707000", "Ventes de marchandises", "Chiffre d'affaires ventes")],
+        "fournisseur": [("401000", "Fournisseurs", "Dettes envers vos fournisseurs")],
+        "honoraire": [("622000", "Remunerations d'intermediaires et honoraires", "Honoraires d'avocat, comptable, consultant")],
+        "comptable": [("622600", "Honoraires comptables", "Honoraires de l'expert-comptable")],
+        "avocat": [("622700", "Frais d'actes et de contentieux", "Honoraires d'avocats et frais juridiques")],
+        "publicite": [("623000", "Publicite, publications, relations publiques", "Frais de publicite, communication, marketing")],
+        "marketing": [("623000", "Publicite, publications, relations publiques", "Campagnes marketing, reseaux sociaux, flyers")],
+        "entretien": [("615000", "Entretien et reparations", "Travaux d'entretien et de reparation des locaux/materiel")],
+        "reparation": [("615000", "Entretien et reparations", "Reparations de materiel, locaux, equipements")],
+        "tva": [("445660", "TVA deductible sur autres biens et services", "TVA recuperable sur vos achats"), ("445710", "TVA collectee", "TVA facturee a vos clients")],
+        "impot": [("695000", "Impots sur les benefices", "IS ou IR sur les benefices de l'entreprise"), ("635100", "Contribution economique territoriale (CET)", "CFE + CVAE")],
+        "sous-traitance": [("611000", "Sous-traitance generale", "Travaux sous-traites a d'autres entreprises")],
+        "formation": [("618000", "Divers (documentation, colloques...)", "Frais de formation professionnelle, conferences"), ("631300", "Participation formation continue", "Contribution formation professionnelle obligatoire")],
+        "mutuelle": [("645200", "Cotisations aux mutuelles", "Part patronale de la mutuelle obligatoire"), ("437220", "Mutuelle obligatoire", "Dette mutuelle a payer")],
+        "prevoyance": [("645200", "Cotisations aux mutuelles", "Cotisations de prevoyance complementaire"), ("437210", "Prevoyance complementaire", "Dette prevoyance a payer")],
+        "retraite": [("645300", "Cotisations retraite complementaire", "Cotisations AGIRC-ARRCO patronales"), ("437100", "Retraite complementaire (AGIRC-ARRCO)", "Dette retraite complementaire")],
+        "amortissement": [("681000", "Dotations aux amortissements et provisions - Exploitation", "Amortissement annuel des immobilisations")],
+        "capital": [("101000", "Capital social", "Capital social de la societe")],
+        "emprunt": [("661000", "Charges d'interets", "Interets d'emprunts bancaires")],
+        "dividende": [("455000", "Associes - Comptes courants", "Distribution de dividendes aux associes")],
+        "caisse": [("530000", "Caisse", "Paiements et encaissements en especes")],
+        "espece": [("530000", "Caisse", "Mouvements de caisse en especes")],
+        "attente": [("471000", "Compte d'attente", "Ecriture temporaire en attente de justificatif ou d'affectation definitive")],
+        "provision": [("681000", "Dotations aux amortissements et provisions - Exploitation", "Constitution de provisions pour risques et charges")],
+    }
+
+    terme = (description or compte or "").lower().strip()
+
+    if terme:
+        # 1. Recherche dans le guide en langage naturel
+        guide_matches = []
+        for mot_cle, comptes_guide in _GUIDE_COMPTES.items():
+            if mot_cle in terme or terme in mot_cle:
+                for num, lib, explication in comptes_guide:
+                    if not any(s["numero"] == num for s in guide_matches):
+                        guide_matches.append({"numero": num, "libelle": lib, "explication": explication})
+
+        # 2. Recherche classique par numero ou libelle
         try:
-            resultats = pc.rechercher(compte)
+            resultats = pc.rechercher(terme)
             for r in resultats[:15]:
-                suggestions.append({"numero": r.numero, "libelle": r.libelle})
+                if not any(s["numero"] == r.numero for s in suggestions):
+                    suggestions.append({"numero": r.numero, "libelle": r.libelle, "explication": ""})
         except Exception:
             pass
 
         # Aussi chercher dans les sous-comptes manuels
         for sc in _sous_comptes:
-            if compte in sc["numero"] or compte.lower() in sc["libelle"].lower():
-                suggestions.append({"numero": sc["numero"], "libelle": sc["libelle"]})
+            if terme in sc["numero"] or terme in sc["libelle"].lower():
+                if not any(s["numero"] == sc["numero"] for s in suggestions):
+                    suggestions.append({"numero": sc["numero"], "libelle": sc["libelle"], "explication": ""})
+
+        # Mettre les resultats du guide en premier (plus pertinents pour les non-comptables)
+        suggestions = guide_matches + suggestions
+
+        # Si pas de resultat et le terme est un mot courant, suggerer le compte d'attente
+        if not suggestions:
+            suggestions.append({
+                "numero": "471000",
+                "libelle": "Compte d'attente",
+                "explication": "Utilisez ce compte temporaire si vous ne savez pas ou affecter l'ecriture. Vous pourrez reclasser plus tard."
+            })
 
         # Suggestions de contreparties coherentes
         contreparties_map = {
@@ -7464,7 +7729,7 @@ async def suggestions_comptes(compte: str = Query("")):
             "706": [("411", "Clients")],
             "707": [("411", "Clients")],
         }
-        prefix = compte[:3] if len(compte) >= 3 else compte
+        prefix = terme[:3] if len(terme) >= 3 else terme
         for p, cps in contreparties_map.items():
             if prefix.startswith(p) or p.startswith(prefix):
                 for num, lib in cps:
@@ -11410,9 +11675,11 @@ APP_HTML += """
 <div class="tc" id="ct-social"><div id="ct-social-c"></div></div>
 <div class="tc" id="ct-ecritures">
 <h2 style="margin-bottom:12px">Ecriture manuelle</h2>
+<div class="al info" style="margin-bottom:12px"><span class="ai">&#128161;</span><span><strong>Vous ne connaissez pas le plan comptable ?</strong> Decrivez la nature de la depense ou du revenu (ex: <em>loyer</em>, <em>achat fournitures</em>, <em>salaire</em>, <em>vente</em>) dans le champ ci-dessous et le systeme vous suggerera les bons comptes avec des explications.</span></div>
+<div style="margin-bottom:14px"><label>Rechercher un type d'operation</label><input id="em-search" placeholder="Ex: loyer, achat, salaire, vente, assurance, telephone..." oninput="suggestByDescription()"><div id="em-search-sug" class="sug-box"></div></div>
 <div class="g2">
-<div><label>Date</label><input type="date" id="em-date"><label>Libelle</label><input id="em-lib" placeholder="Description"></div>
-<div><label>Compte debit</label><input id="em-deb" placeholder="601000" oninput="suggestCompte('em-deb','em-deb-sug','em-cre')"><div id="em-deb-sug" class="sug-box"></div><label>Compte credit</label><input id="em-cre" placeholder="401000" oninput="suggestCompte('em-cre','em-cre-sug',null)"><div id="em-cre-sug" class="sug-box"></div></div>
+<div><label>Date</label><input type="date" id="em-date"><label>Libelle</label><input id="em-lib" placeholder="Description de l'ecriture"></div>
+<div><label>Compte debit</label><input id="em-deb" placeholder="601000 ou tapez un mot-cle" oninput="suggestCompte('em-deb','em-deb-sug','em-cre')"><div id="em-deb-sug" class="sug-box"></div><label>Compte credit</label><input id="em-cre" placeholder="401000 ou tapez un mot-cle" oninput="suggestCompte('em-cre','em-cre-sug',null)"><div id="em-cre-sug" class="sug-box"></div></div>
 </div>
 <div class="g3">
 <div><label>Montant</label><input type="number" step="0.01" id="em-mt" placeholder="0.00"></div>
@@ -11745,6 +12012,8 @@ APP_HTML += """
 <div class="tc active" id="rh-salaries">
 <h2>Liste des salaries</h2>
 <p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Les salaries sont detectes automatiquement lors de l analyse de documents (bulletins, DSN, contrats). Vous pouvez aussi les ajouter manuellement via l onglet Contrats.</p>
+<div class="btn-group" style="margin-bottom:12px"><button class="btn btn-s btn-sm" onclick="detecterDoublons()">&#128269; Detecter les doublons</button></div>
+<div id="rh-doublons-alert" style="display:none"></div>
 <div id="rh-sal-list"><p style="color:var(--tx2)">Aucun salarie.</p></div>
 </div>
 <div class="tc" id="rh-contrats">
@@ -11753,6 +12022,7 @@ APP_HTML += """
 <label>Type de contrat</label><select id="rh-type-ctr"><option value="CDI">CDI</option><option value="CDD">CDD</option><option value="CTT">CTT (Interim)</option><option value="Apprentissage">Apprentissage</option><option value="Professionnalisation">Professionnalisation</option><option value="Saisonnier">Saisonnier</option><option value="Intermittent">Intermittent</option></select>
 <label>Nom</label><input id="rh-ctr-nom" placeholder="NOM">
 <label>Prenom</label><input id="rh-ctr-prenom" placeholder="Prenom">
+<label>NIR (N de securite sociale)</label><input id="rh-ctr-nir" placeholder="1 85 05 78 006 084 36" maxlength="21">
 <label>Poste</label><input id="rh-ctr-poste" placeholder="Intitule du poste">
 <label>Date debut</label><input type="date" id="rh-ctr-debut">
 <label>Date fin (CDD)</label><input type="date" id="rh-ctr-fin">
@@ -12205,7 +12475,7 @@ if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
 if(typeof loadPayStatuses==="function"&&n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
 if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrouillons==="function")loadDSNBrouillons();}
 if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
-if(n==="analyse"&&typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}
+if(n==="analyse"){if(typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}else{fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);loadDash();}}).catch(function(){});}}
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
 if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
 if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
@@ -12233,7 +12503,9 @@ document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[
 var analysisData=null;
 try{var _saved=sessionStorage.getItem("nc_analysis");if(_saved){analysisData=JSON.parse(_saved);}}catch(e){}
 function saveDashServer(data){fetch("/api/dashboard/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),credentials:"same-origin"}).catch(function(){});}
-function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();}}).catch(function(){});}
+function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();var ra=document.getElementById("res-analyse");if(ra&&document.getElementById("s-analyse")&&document.getElementById("s-analyse").classList.contains("active")){ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}}}).catch(function(){});}
+/* Charger les donnees d'analyse depuis le serveur au demarrage si sessionStorage est vide */
+if(!analysisData){loadDashServer();}
 function loadDash(){
 try{
 if(!analysisData){loadDashServer();return;}
@@ -12686,10 +12958,17 @@ var _sugTimer=null;
 function suggestCompte(inputId,sugId,counterpartId){
 clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
 var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
-fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)).then(safeJson).then(function(d){
+fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)+"&description="+encodeURIComponent(v)).then(safeJson).then(function(d){
 var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
-var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";h+="<div class='sug-item' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>";}
+var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";var expl=items[i].explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:8px 10px' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><div><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>"+(expl?"<div style='font-size:.78em;color:var(--tx2);margin-top:2px;line-height:1.3'>"+expl+"</div>":"")+"</div>";}
 h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(){});},250);}
+var _sugSearchTimer=null;
+function suggestByDescription(){clearTimeout(_sugSearchTimer);_sugSearchTimer=setTimeout(function(){
+var v=document.getElementById("em-search").value;if(v.length<2){closeSugs("em-search-sug");return;}
+fetch("/api/comptabilite/suggestions?description="+encodeURIComponent(v)).then(safeJson).then(function(d){
+var box=document.getElementById("em-search-sug");var items=d.suggestions||[];if(!items.length){closeSugs("em-search-sug");return;}
+var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<10;i++){var item=items[i];var expl=item.explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:10px 12px;cursor:pointer' data-num='"+item.numero+"'><div style='display:flex;align-items:center;gap:8px'><span class='sug-num' style='font-size:.95em'>"+item.numero+"</span><span class='sug-lbl' style='font-weight:600;color:var(--tx)'>"+item.libelle+"</span></div>"+(expl?"<div style='font-size:.82em;color:var(--tx2);margin-top:3px;line-height:1.4'>&#128161; "+expl+"</div>":"")+"</div>";}
+h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){var num=el.getAttribute("data-num");document.getElementById("em-deb").value=num;closeSugs("em-search-sug");suggestCompte("em-deb","em-deb-sug","em-cre");});});}).catch(function(){});},300);}
 function pickSug(inputId,sugId,val,cpId,cpVal){document.getElementById(inputId).value=val;closeSugs(sugId);if(cpId&&cpVal){var cpInput=document.getElementById(cpId);if(cpInput&&!cpInput.value)cpInput.value=cpVal;}}
 function closeSugs(sugId){var b=document.getElementById(sugId);if(b)b.innerHTML="";}
 document.addEventListener("click",function(e){if(!e.target.closest(".sug-box")&&!e.target.closest("input")){document.querySelectorAll(".sug-list").forEach(function(s){s.classList.remove("show");});}});
@@ -13472,9 +13751,12 @@ if(n==="salaries")loadRHSalaries();if(n==="contrats"){loadRHContrats();loadRHAve
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(safeJson).then(function(d){return (d&&d.items&&typeof d.total==="number")?d.items:d;}).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
-function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
+function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);var nirEl=document.getElementById("rh-ctr-nir");if(nirEl)fd.append("nir",nirEl.value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
-var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
+var h="";
+if(d.doublons_detectes&&d.doublons_detectes.length>0){h+="<div class='al warn' style='margin-bottom:10px'><span class='ai'>&#9888;</span><span><strong>Doublon potentiel detecte !</strong> "+d.alerte_doublon+"</span></div>";h+="<div style='background:var(--ol);border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:12px'><strong>Fiche(s) existante(s) :</strong><table style='margin-top:6px'><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Motif</th><th>Action</th></tr>";
+for(var i=0;i<d.doublons_detectes.length;i++){var dup=d.doublons_detectes[i];var motifLabel=dup.motif==="nir_identique"?"<span class='badge badge-red'>NIR identique</span>":"<span class='badge badge-amber'>Nom/Prenom</span>";h+="<tr><td>"+dup.nom+"</td><td>"+dup.prenom+"</td><td>"+dup.poste+"</td><td>"+dup.type_contrat+"</td><td>"+dup.date_debut+"</td><td style='font-size:.8em'>"+(dup.nir||"-")+"</td><td>"+motifLabel+"</td><td><button class='btn btn-s btn-sm' onclick='fusionnerDoublon(\""+d.id+"\",\""+dup.id+"\")'>Fusionner</button></td></tr>";}h+="</table></div>";}
+h+="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
 h+="<button class='btn btn-s btn-sm' style='margin:8px 4px 0 0' onclick='voirContrat("+JSON.stringify(d.id)+")'>Visualiser le contrat</button>";
 var eff=d.cascading_effects;if(eff){h+="<div style='margin-top:12px;padding:10px;background:var(--pl);border-radius:8px'><strong>Effets en cascade :</strong><ul style='margin:6px 0 0 16px;font-size:.86em'>";
 if(eff.dpae)h+="<li>&#9888; Rappel : effectuez la DPAE sur net-entreprises.fr avant embauche (ref contrat: "+d.id+")</li>";
@@ -13482,7 +13764,10 @@ if(eff.visite_medicale)h+="<li>&#128197; Visite medicale programmee avant le "+e
 if(eff.planning_suggestion)h+="<li>&#128197; "+eff.planning_suggestion.message+"</li>";
 if(eff.ecriture_comptable)h+="<li>&#128181; Ecriture comptable provisionnee ("+eff.ecriture_comptable.libelle+")</li>";
 h+="</ul></div>";}
-document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});}
+document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});
+}
+function fusionnerDoublon(idGarder,idSupprimer){if(!confirm("Fusionner les deux fiches ? La fiche la plus ancienne sera completee puis le doublon supprime."))return;fetch("/api/rh/doublons/fusionner",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id_garder:idGarder,id_supprimer:idSupprimer}),credentials:"same-origin"}).then(safeJson).then(function(r){toast(r.message,"ok");loadRHSalaries();loadRHContrats();}).catch(function(e){toast(e.message||"Erreur fusion");});}
+function detecterDoublons(){fetch("/api/rh/doublons",{credentials:"same-origin"}).then(safeJson).then(function(r){var el=document.getElementById("rh-doublons-alert");if(!r.doublons||!r.doublons.length){el.innerHTML="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span>Aucun doublon detecte parmi les "+(_rh_contrats?_rh_contrats.length:"")+" salaries.</span></div>";el.style.display="block";return;}el.style.display="block";var h="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>"+r.nb_doublons+" doublon(s) potentiel(s) detecte(s) !</strong> Des salaries apparaissent dans plusieurs fiches. Verifiez et fusionnez si necessaire.</span></div>";for(var i=0;i<r.doublons.length;i++){var d=r.doublons[i];var typeLabel=d.type==="nir"?"<span class='badge badge-red'>Meme NIR : "+d.valeur+"</span>":"<span class='badge badge-amber'>Meme Nom/Prenom : "+d.valeur+"</span>";h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'><div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'><strong>"+d.nb_occurrences+" fiches</strong> "+typeLabel+"</div>";h+="<table><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Source</th><th>Brut</th><th>Action</th></tr>";for(var j=0;j<d.fiches.length;j++){var f=d.fiches[j];var nirAff=f.nir?(f.nir.length>8?f.nir.substring(0,8)+"...":f.nir):"-";h+="<tr><td>"+f.nom+"</td><td>"+f.prenom+"</td><td>"+f.poste+"</td><td>"+f.type_contrat+"</td><td>"+f.date_debut+"</td><td style='font-size:.8em'>"+nirAff+"</td><td style='font-size:.78em'>"+f.source+"</td><td class='num'>"+(parseFloat(f.salaire_brut)||0).toFixed(0)+" EUR</td>";if(j>0)h+="<td><button class='btn btn-s btn-sm' onclick='fusionnerDoublon(\""+d.fiches[0].id+"\",\""+f.id+"\")'>Fusionner dans 1ere</button></td>";else h+="<td><span class='badge badge-green'>Principale</span></td>";h+="</tr>";}h+="</table></div>";}el.innerHTML=h;}).catch(function(e){toast(e.message||"Erreur detection");});}}
 
 function loadRHSalaries(){
 rhGet("/api/rh/contrats",function(list){
@@ -13516,6 +13801,8 @@ h+="<td><button class='btn btn-s btn-sm' data-action='edit' data-id='"+c.id+"'>M
 h+="</tbody></table>";
 el.innerHTML=h;
 el.querySelectorAll("[data-action=edit]").forEach(function(b){b.onclick=function(){editSalarie(this.dataset.id);};});
+/* Auto-detection des doublons au chargement */
+if(list.length>1){fetch("/api/rh/doublons",{credentials:"same-origin"}).then(safeJson).then(function(r){var da=document.getElementById("rh-doublons-alert");if(r.doublons&&r.doublons.length>0){da.innerHTML="<div class='al warn' style='margin-bottom:8px;cursor:pointer' onclick='detecterDoublons()'><span class='ai'>&#9888;</span><span><strong>"+r.nb_doublons+" doublon(s) potentiel(s) detecte(s)</strong> parmi vos salaries (meme nom/prenom ou NIR). <u>Cliquez ici pour voir et fusionner.</u></span></div>";da.style.display="block";}else{da.style.display="none";}}).catch(function(){});}
 });
 }
 
