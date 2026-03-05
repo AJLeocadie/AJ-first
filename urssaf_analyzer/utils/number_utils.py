@@ -66,3 +66,46 @@ def formater_montant(montant: Decimal) -> str:
     entier_formate = " ".join(groupes)
 
     return f"{signe}{entier_formate}{decimales} EUR"
+
+
+def valider_siret(siret: str) -> bool:
+    """Valide un numero SIRET (14 chiffres) par l'algorithme de Luhn.
+
+    Le SIRET est compose du SIREN (9 chiffres) + NIC (5 chiffres).
+    La somme de controle Luhn sur les 14 chiffres doit etre divisible par 10.
+    Exception : La Poste (SIREN 356000000) utilise un algorithme adapte.
+    """
+    siret = siret.strip().replace(" ", "")
+    if len(siret) != 14 or not siret.isdigit():
+        return False
+
+    # Exception La Poste: somme simple des chiffres % 5 == 0
+    if siret[:9] == "356000000":
+        return sum(int(d) for d in siret) % 5 == 0
+
+    # Algorithme de Luhn standard
+    total = 0
+    for i, ch in enumerate(siret):
+        d = int(ch)
+        if i % 2 == 0:  # Position paire (0-indexed) : doubler
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def valider_siren(siren: str) -> bool:
+    """Valide un numero SIREN (9 chiffres) par l'algorithme de Luhn."""
+    siren = siren.strip().replace(" ", "")
+    if len(siren) != 9 or not siren.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(siren):
+        d = int(ch)
+        if i % 2 == 1:  # Position impaire (0-indexed) : doubler
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0

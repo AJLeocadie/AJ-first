@@ -21,7 +21,7 @@ from enum import Enum
 PASS_ANNUEL = Decimal("48060.00")
 PASS_MENSUEL = Decimal("4005.00")
 PASS_TRIMESTRIEL = Decimal("12015.00")
-PASS_JOURNALIER = Decimal("185.00")
+PASS_JOURNALIER = Decimal("220.00")
 PASS_HORAIRE = Decimal("27.00")
 
 # Plafonds specifiques
@@ -30,7 +30,7 @@ PLAFOND_8_PASS = PASS_ANNUEL * 8     # 384 480 EUR - retraite T2
 
 # ===================================================================
 # SMIC 2026
-# Ref: Decret n° 2025-xxx, CSS art. D241-7
+# Ref: Art. L3231-2 Code du travail, Decret n° 2025-xxx
 # ===================================================================
 
 SMIC_HORAIRE_BRUT = Decimal("12.02")
@@ -147,8 +147,8 @@ TAUX_COTISATIONS_2026 = {
     ContributionType.MALADIE: {
         "patronal": Decimal("0.13"),              # 13%
         "salarial": Decimal("0.0"),               # 0% (supprime depuis 01/2018)
-        "patronal_reduit": Decimal("0.07"),       # 7% si remuneration <= 2.5 SMIC
-        "seuil_reduction_smic": Decimal("2.5"),
+        "patronal_reduit": Decimal("0.07"),       # 7% si remuneration <= 2.25 SMIC
+        "seuil_reduction_smic": Decimal("2.25"),  # LFSS 2025 art. 17
         "assiette": "totalite",                   # Totalite du salaire brut
         "ref": "CSS art. L241-1, D242-3",
     },
@@ -169,15 +169,15 @@ TAUX_COTISATIONS_2026 = {
 
     ContributionType.VIEILLESSE_DEPLAFONNEE: {
         "patronal": Decimal("0.0211"),            # 2.11% (hausse 2026 vs 2.02%)
-        "salarial": Decimal("0.024"),             # 2.40%
+        "salarial": Decimal("0.004"),             # 0.40%
         "assiette": "totalite",
         "ref": "CSS art. L241-3, hausse LFSS 2026",
     },
 
     ContributionType.ALLOCATIONS_FAMILIALES: {
         "patronal": Decimal("0.0525"),            # 5.25%
-        "patronal_reduit": Decimal("0.0325"),     # 3.25% si <= 3.5 SMIC
-        "seuil_reduction_smic": Decimal("3.5"),
+        "patronal_reduit": Decimal("0.0325"),     # 3.25% si <= 3.3 SMIC
+        "seuil_reduction_smic": Decimal("3.3"),   # LFSS 2025 art. 17
         "assiette": "totalite",
         "ref": "CSS art. L241-6, D241-3-1",
     },
@@ -324,7 +324,7 @@ TAUX_COTISATIONS_2026 = {
     },
 
     ContributionType.RETRAITE_COMPLEMENTAIRE_T2: {
-        "patronal": Decimal("0.1229"),            # 12.29% (60% de 21.59%)
+        "patronal": Decimal("0.1295"),            # 12.95% (60% de 21.59%)
         "salarial": Decimal("0.0864"),            # 8.64% (40% de 21.59%)
         "total": Decimal("0.2159"),               # 21.59%
         "plancher": PASS_MENSUEL,
@@ -447,10 +447,17 @@ TOLERANCE_MONTANT = Decimal("0.01")       # 1 centime
 TOLERANCE_TAUX = Decimal("0.0001")        # 0.01%
 TOLERANCE_ARRONDI_PCT = Decimal("0.005")  # 0.5% d'ecart tolere
 
-# Seuils de detection de patterns
-SEUIL_NOMBRES_RONDS_PCT = Decimal("0.30")  # 30% de nombres ronds = suspect
+# Seuils de detection de patterns (indicateurs statistiques NON PROBANTS)
+# Ces seuils declenchent des constats de type PATTERN_SUSPECT qui sont des
+# indicateurs a croiser avec d'autres elements. Ils ne constituent pas
+# une preuve d'irregularite au sens juridique (art. L243-7 CSS).
+SEUIL_NOMBRES_RONDS_PCT = Decimal("0.30")  # 30% de nombres ronds = indicateur
 SEUIL_BENFORD_CHI2 = Decimal("15.51")      # Chi2 critique a 5% avec 8 ddl
+# NB: Benford s'applique aux donnees naturellement distribuees. Les cotisations
+# (salaire x taux reglementaire) ne suivent pas necessairement cette loi.
 SEUIL_OUTLIER_IQR = Decimal("1.5")         # Coefficient IQR standard
+# NB: Les ecarts de remuneration (dirigeant vs salaries) sont une cause
+# frequente de faux positif sur ce seuil.
 
 # Formats de fichiers supportes
 SUPPORTED_EXTENSIONS = {
@@ -473,4 +480,5 @@ SUPPORTED_EXTENSIONS = {
     ".txt": "texte",
     ".docx": "word",
     ".doc": "word",
+    ".fec": "fec",
 }

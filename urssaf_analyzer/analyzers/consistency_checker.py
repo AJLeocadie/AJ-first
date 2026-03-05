@@ -176,6 +176,16 @@ class ConsistencyChecker(BaseAnalyzer):
             findings.extend(self._comparer_cotisations_par_type(declarations))
             findings.extend(self._comparer_bases_par_employe(declarations))
             findings.extend(self._verifier_coherence_temporelle(declarations))
+            findings.extend(self._comparer_siret_inter_documents(declarations))
+            findings.extend(self._comparer_taux_at_inter_documents(declarations))
+            findings.extend(self._comparer_employe_details_inter_documents(declarations))
+            findings.extend(self._comparer_totaux_patronaux_inter_documents(declarations))
+            findings.extend(self._comparer_exonerations_inter_documents(declarations))
+            findings.extend(self._verifier_exonerations_temporelles(declarations))
+
+        # Coherence assiettes plafonnees/deplafonnees (intra-document)
+        for decl in declarations:
+            findings.extend(self._verifier_coherence_assiettes_plafonnees(decl))
 
         return findings
 
@@ -569,6 +579,38 @@ class ConsistencyChecker(BaseAnalyzer):
                         document=f"{label1} vs {label2}",
                         rubrique=ct.value,
                         extra={"nir": nir},
+                    ),
+                ))
+
+        # Comparer taux salarial
+        if c1.taux_salarial > 0 and c2.taux_salarial > 0:
+            ecart_taux_s = abs(c1.taux_salarial - c2.taux_salarial)
+            if ecart_taux_s > TOLERANCE_TAUX:
+                findings.append(Finding(
+                    categorie=FindingCategory.INCOHERENCE,
+                    severite=Severity.HAUTE,
+                    titre=f"Ecart taux salarial {ct.value} entre documents (NIR {nir[:5]}...)",
+                    description=(
+                        f"Taux salarial {ct.value} pour NIR {nir} : "
+                        f"{c1.taux_salarial} dans {label1} vs "
+                        f"{c2.taux_salarial} dans {label2}. "
+                        f"Ecart : {ecart_taux_s}."
+                    ),
+                    valeur_constatee=str(c1.taux_salarial),
+                    valeur_attendue=str(c2.taux_salarial),
+                    montant_impact=abs(c1.montant_salarial - c2.montant_salarial),
+                    score_risque=65,
+                    recommandation=(
+                        f"Identifier le taux salarial correct pour {ct.value} et "
+                        f"harmoniser entre les deux documents."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[d1.source_document_id, d2.source_document_id],
+                    details_technique=_details_technique(
+                        annee=annee, periode=per,
+                        document=f"{label1} vs {label2}",
+                        rubrique=ct.value,
+                        extra={"nir": nir, "type_taux": "salarial"},
                     ),
                 ))
 
@@ -1018,8 +1060,9 @@ class ConsistencyChecker(BaseAnalyzer):
         annee, per = _annee_periode(decl)
         doc_label = _doc_label(decl)
 
-        # -- SIRET coherence --
+        # -- SIRET coherence + Luhn --
         if decl.employeur and decl.employeur.siret:
+            from urssaf_analyzer.utils.number_utils import valider_siret
             siret = decl.employeur.siret.replace(" ", "")
             # SIRET = 14 digits
             if len(siret) != 14 or not siret.isdigit():
@@ -1042,6 +1085,32 @@ class ConsistencyChecker(BaseAnalyzer):
                     detecte_par=self.nom,
                     documents_concernes=[decl.source_document_id],
                     reference_legale="Art. R243-14 CSS",
+                    details_technique=_details_technique(
+                        annee=annee, periode=per, document=doc_label,
+                        rubrique="SIRET employeur",
+                    ),
+                ))
+            elif not valider_siret(siret):
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.HAUTE,
+                    titre=f"SIRET invalide (cle Luhn) : {siret}",
+                    description=(
+                        f"Le SIRET '{siret}' echoue a la validation Luhn. "
+                        f"La somme de controle est incorrecte, ce qui indique "
+                        f"une erreur de saisie."
+                    ),
+                    valeur_constatee=siret,
+                    valeur_attendue="SIRET avec cle Luhn valide",
+                    montant_impact=Decimal("0"),
+                    score_risque=80,
+                    recommandation=(
+                        "Verifier le SIRET sur societe.com ou annuaire-entreprises.data.gouv.fr. "
+                        "Un SIRET invalide entraine un rejet DSN."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[decl.source_document_id],
+                    reference_legale="Art. R243-14 CSS - Decret SIRET (INSEE)",
                     details_technique=_details_technique(
                         annee=annee, periode=per, document=doc_label,
                         rubrique="SIRET employeur",
@@ -1538,6 +1607,674 @@ class ConsistencyChecker(BaseAnalyzer):
         return findings
 
     # =================================================================
+    # 8. SIRET/SIREN cross-document
+    # =================================================================
+
+    def _comparer_siret_inter_documents(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Detecte les SIRET/SIREN differents entre documents de meme periode."""
+        findings: list[Finding] = []
+        par_periode = self._regrouper_par_periode(declarations)
+
+        for _, decls in par_periode.items():
+            if len(decls) < 2:
+                continue
+
+            sirets_vus: dict[str, Declaration] = {}
+            for decl in decls:
+                if not decl.employeur or not decl.employeur.siret:
+                    continue
+                siret = decl.employeur.siret.replace(" ", "")
+                if sirets_vus and siret not in sirets_vus:
+                    # SIRET different d'un document deja vu pour la meme periode
+                    premier_decl = next(iter(sirets_vus.values()))
+                    premier_siret = next(iter(sirets_vus.keys()))
+                    annee, per = _annee_periode(decl)
+                    findings.append(Finding(
+                        categorie=FindingCategory.INCOHERENCE,
+                        severite=Severity.HAUTE,
+                        titre="SIRET divergent entre documents de meme periode",
+                        description=(
+                            f"Le SIRET differe entre {_doc_label(premier_decl)} "
+                            f"({premier_siret}) et {_doc_label(decl)} ({siret}) "
+                            f"pour la meme periode ({per}). Les deux documents "
+                            f"devraient concerner le meme etablissement."
+                        ),
+                        valeur_constatee=siret,
+                        valeur_attendue=premier_siret,
+                        montant_impact=Decimal("0"),
+                        score_risque=80,
+                        recommandation=(
+                            "Verifier que les documents concernent le meme "
+                            "etablissement. Si multi-etablissement, separer les "
+                            "analyses par SIRET."
+                        ),
+                        detecte_par=self.nom,
+                        documents_concernes=[
+                            premier_decl.source_document_id,
+                            decl.source_document_id,
+                        ],
+                        reference_legale="Art. R243-14 CSS - Identification de l'etablissement",
+                        details_technique=_details_technique(
+                            annee=annee, periode=per,
+                            document=f"{_doc_label(premier_decl)} vs {_doc_label(decl)}",
+                            rubrique="SIRET employeur",
+                        ),
+                    ))
+                sirets_vus[siret] = decl
+
+        return findings
+
+    # =================================================================
+    # 9. Taux AT/MP cross-document
+    # =================================================================
+
+    def _comparer_taux_at_inter_documents(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Detecte un taux AT/MP different entre documents de meme periode."""
+        findings: list[Finding] = []
+        par_periode = self._regrouper_par_periode(declarations)
+
+        for _, decls in par_periode.items():
+            if len(decls) < 2:
+                continue
+
+            taux_at_vus: list[tuple[Decimal, Declaration]] = []
+            for decl in decls:
+                if decl.employeur and decl.employeur.taux_at > 0:
+                    taux_at_vus.append((decl.employeur.taux_at, decl))
+
+            if len(taux_at_vus) < 2:
+                continue
+
+            for i in range(len(taux_at_vus)):
+                for j in range(i + 1, len(taux_at_vus)):
+                    t1, d1 = taux_at_vus[i]
+                    t2, d2 = taux_at_vus[j]
+                    if abs(t1 - t2) > TOLERANCE_TAUX:
+                        annee, per = _annee_periode(d1)
+                        label1, label2 = _doc_label(d1), _doc_label(d2)
+                        findings.append(Finding(
+                            categorie=FindingCategory.INCOHERENCE,
+                            severite=Severity.HAUTE,
+                            titre=f"Taux AT/MP divergent entre documents ({t1} vs {t2})",
+                            description=(
+                                f"Le taux AT/MP differe entre {label1} "
+                                f"({float(t1)*100:.2f}%) et {label2} "
+                                f"({float(t2)*100:.2f}%) pour la meme periode. "
+                                f"Le taux AT/MP est fixe par la CARSAT pour "
+                                f"chaque etablissement et doit etre identique "
+                                f"sur tous les documents d'une meme periode."
+                            ),
+                            valeur_constatee=f"{float(t1)*100:.2f}%",
+                            valeur_attendue=f"{float(t2)*100:.2f}%",
+                            montant_impact=Decimal("0"),
+                            score_risque=70,
+                            recommandation=(
+                                "Verifier le taux AT/MP sur la notification "
+                                "annuelle de la CARSAT et harmoniser les documents."
+                            ),
+                            detecte_par=self.nom,
+                            documents_concernes=[
+                                d1.source_document_id, d2.source_document_id,
+                            ],
+                            reference_legale="CSS art. D242-6-1 - Taux AT/MP notifie",
+                            details_technique=_details_technique(
+                                annee=annee, periode=per,
+                                document=f"{label1} vs {label2}",
+                                rubrique="Taux AT/MP employeur",
+                            ),
+                        ))
+
+        return findings
+
+    # =================================================================
+    # 10. Employe details cross-document (temps travail, embauche, convention)
+    # =================================================================
+
+    def _comparer_employe_details_inter_documents(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Compare les donnees individuelles des employes entre documents."""
+        findings: list[Finding] = []
+        par_periode = self._regrouper_par_periode(declarations)
+
+        for _, decls in par_periode.items():
+            if len(decls) < 2:
+                continue
+
+            for i in range(len(decls)):
+                for j in range(i + 1, len(decls)):
+                    d1, d2 = decls[i], decls[j]
+                    if not d1.employes or not d2.employes:
+                        continue
+
+                    nir_d1 = _build_nir_index(d1)
+                    nir_d2 = _build_nir_index(d2)
+                    nirs_communs = set(nir_d1.keys()) & set(nir_d2.keys())
+                    annee, per = _annee_periode(d1)
+                    label1, label2 = _doc_label(d1), _doc_label(d2)
+
+                    for nir in nirs_communs:
+                        e1, e2 = nir_d1[nir], nir_d2[nir]
+                        nom_emp = f"{e1.prenom} {e1.nom}" if e1.nom else f"NIR {nir[:5]}..."
+
+                        # Temps de travail
+                        if (e1.temps_travail > 0 and e2.temps_travail > 0
+                                and abs(e1.temps_travail - e2.temps_travail) > Decimal("0.01")):
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.HAUTE,
+                                titre=f"Temps de travail divergent ({nom_emp})",
+                                description=(
+                                    f"Le temps de travail de {nom_emp} differe entre "
+                                    f"{label1} ({float(e1.temps_travail)*100:.0f}%) et "
+                                    f"{label2} ({float(e2.temps_travail)*100:.0f}%). "
+                                    f"Cette incoherence impacte le plafonnement PASS, "
+                                    f"la proratisation du SMIC, et le calcul des "
+                                    f"cotisations plafonnees."
+                                ),
+                                valeur_constatee=f"{float(e1.temps_travail)*100:.0f}%",
+                                valeur_attendue=f"{float(e2.temps_travail)*100:.0f}%",
+                                montant_impact=Decimal("0"),
+                                score_risque=70,
+                                recommandation=(
+                                    "Harmoniser le temps de travail entre les documents. "
+                                    "Ce parametre impacte le plafonnement PASS et le SMIC."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[
+                                    d1.source_document_id, d2.source_document_id,
+                                ],
+                                reference_legale="Art. L242-8 CSS - Proratisation du plafond",
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per,
+                                    document=f"{label1} vs {label2}",
+                                    rubrique=f"Temps travail {nom_emp}",
+                                    extra={"nir": nir},
+                                ),
+                            ))
+
+                        # Date d'embauche
+                        if (e1.date_embauche and e2.date_embauche
+                                and e1.date_embauche != e2.date_embauche):
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.MOYENNE,
+                                titre=f"Date embauche divergente ({nom_emp})",
+                                description=(
+                                    f"La date d'embauche de {nom_emp} differe : "
+                                    f"{e1.date_embauche} dans {label1} vs "
+                                    f"{e2.date_embauche} dans {label2}."
+                                ),
+                                valeur_constatee=str(e1.date_embauche),
+                                valeur_attendue=str(e2.date_embauche),
+                                montant_impact=Decimal("0"),
+                                score_risque=45,
+                                recommandation=(
+                                    "Harmoniser la date d'embauche. L'anciennete "
+                                    "impacte certains droits et exonerations."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[
+                                    d1.source_document_id, d2.source_document_id,
+                                ],
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per,
+                                    document=f"{label1} vs {label2}",
+                                    rubrique=f"Date embauche {nom_emp}",
+                                    extra={"nir": nir},
+                                ),
+                            ))
+
+                        # Convention collective
+                        if (e1.convention_collective and e2.convention_collective
+                                and e1.convention_collective.strip().upper()
+                                != e2.convention_collective.strip().upper()):
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.HAUTE,
+                                titre=f"Convention collective divergente ({nom_emp})",
+                                description=(
+                                    f"La convention collective de {nom_emp} differe : "
+                                    f"'{e1.convention_collective}' dans {label1} vs "
+                                    f"'{e2.convention_collective}' dans {label2}. "
+                                    f"La convention collective determine les minima salariaux, "
+                                    f"les taux de prevoyance, et d'autres obligations."
+                                ),
+                                valeur_constatee=e1.convention_collective,
+                                valeur_attendue=e2.convention_collective,
+                                montant_impact=Decimal("0"),
+                                score_risque=65,
+                                recommandation=(
+                                    "Harmoniser la convention collective entre les "
+                                    "documents. Verifier le code IDCC applicable."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[
+                                    d1.source_document_id, d2.source_document_id,
+                                ],
+                                reference_legale="Art. L2261-2 Code du travail - Convention collective applicable",
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per,
+                                    document=f"{label1} vs {label2}",
+                                    rubrique=f"Convention collective {nom_emp}",
+                                    extra={"nir": nir},
+                                ),
+                            ))
+
+                        # Statut (cadre/non-cadre)
+                        if (e1.statut and e2.statut
+                                and e1.statut.strip().lower() != e2.statut.strip().lower()):
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.HAUTE,
+                                titre=f"Statut divergent ({nom_emp})",
+                                description=(
+                                    f"Le statut de {nom_emp} differe : "
+                                    f"'{e1.statut}' dans {label1} vs "
+                                    f"'{e2.statut}' dans {label2}. "
+                                    f"Le statut cadre/non-cadre impacte les cotisations "
+                                    f"de prevoyance (ANI art. 7) et la retraite "
+                                    f"complementaire (T1/T2)."
+                                ),
+                                valeur_constatee=e1.statut,
+                                valeur_attendue=e2.statut,
+                                montant_impact=Decimal("0"),
+                                score_risque=70,
+                                recommandation=(
+                                    "Verifier le statut reel du salarie et harmoniser. "
+                                    "Le statut impacte prevoyance et retraite complementaire."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[
+                                    d1.source_document_id, d2.source_document_id,
+                                ],
+                                reference_legale="ANI du 17/11/2017 - Classification cadre/non-cadre",
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per,
+                                    document=f"{label1} vs {label2}",
+                                    rubrique=f"Statut {nom_emp}",
+                                    extra={"nir": nir},
+                                ),
+                            ))
+
+        return findings
+
+    # =================================================================
+    # 11. Totaux patronaux cross-document
+    # =================================================================
+
+    def _comparer_totaux_patronaux_inter_documents(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Compare le total des cotisations patronales entre documents."""
+        findings: list[Finding] = []
+        par_periode = self._regrouper_par_periode(declarations)
+
+        for _, decls in par_periode.items():
+            if len(decls) < 2:
+                continue
+
+            totaux = []
+            for d in decls:
+                total_pat = sum(
+                    c.montant_patronal for c in d.cotisations
+                    if c.montant_patronal > 0
+                )
+                if total_pat > 0:
+                    totaux.append((d, total_pat))
+
+            if len(totaux) < 2:
+                continue
+
+            for i in range(len(totaux)):
+                for j in range(i + 1, len(totaux)):
+                    d1, t1 = totaux[i]
+                    d2, t2 = totaux[j]
+                    ecart = abs(t1 - t2)
+                    if ecart > TOLERANCE_MONTANT:
+                        ecart_pct = ecart_relatif(t1, t2)
+                        if ecart_pct > TOLERANCE_ARRONDI_PCT:
+                            annee, per = _annee_periode(d1)
+                            label1, label2 = _doc_label(d1), _doc_label(d2)
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.HAUTE if ecart > Decimal("100") else Severity.MOYENNE,
+                                titre=f"Total patronal divergent entre documents",
+                                description=(
+                                    f"Le total des cotisations patronales differe : "
+                                    f"{formater_montant(t1)} dans {label1} vs "
+                                    f"{formater_montant(t2)} dans {label2}. "
+                                    f"Ecart : {formater_montant(ecart)} ({ecart_pct:.2%})."
+                                ),
+                                valeur_constatee=str(t1),
+                                valeur_attendue=str(t2),
+                                montant_impact=ecart,
+                                score_risque=70,
+                                recommandation=(
+                                    "Reconcilier le total des cotisations patronales "
+                                    "entre les documents. Verifier les lignes manquantes "
+                                    "ou en double."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[
+                                    d1.source_document_id, d2.source_document_id,
+                                ],
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per,
+                                    document=f"{label1} vs {label2}",
+                                    rubrique="Total cotisations patronales",
+                                ),
+                            ))
+
+        return findings
+
+    # =================================================================
+    # 12. Exonerations cross-document (RGDU, Fillon)
+    # =================================================================
+
+    def _comparer_exonerations_inter_documents(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Detecte les incoherences d'exonerations entre documents."""
+        findings: list[Finding] = []
+        par_periode = self._regrouper_par_periode(declarations)
+        exo_types = {ContributionType.RGDU, ContributionType.LOI_FILLON}
+
+        for _, decls in par_periode.items():
+            if len(decls) < 2:
+                continue
+
+            for i in range(len(decls)):
+                for j in range(i + 1, len(decls)):
+                    d1, d2 = decls[i], decls[j]
+                    nir_to_id_d1 = _nir_to_employe_id(d1)
+                    nir_to_id_d2 = _nir_to_employe_id(d2)
+                    cots_d1 = _cotisations_par_employe(d1)
+                    cots_d2 = _cotisations_par_employe(d2)
+
+                    nirs_communs = set(nir_to_id_d1.keys()) & set(nir_to_id_d2.keys())
+                    annee, per = _annee_periode(d1)
+                    label1, label2 = _doc_label(d1), _doc_label(d2)
+
+                    for nir in nirs_communs:
+                        eid1 = nir_to_id_d1[nir]
+                        eid2 = nir_to_id_d2[nir]
+                        cots1 = cots_d1.get(eid1, [])
+                        cots2 = cots_d2.get(eid2, [])
+
+                        has_exo_d1 = any(
+                            c.type_cotisation in exo_types
+                            and (abs(c.montant_patronal) + abs(c.montant_salarial)) > TOLERANCE_MONTANT
+                            for c in cots1
+                        )
+                        has_exo_d2 = any(
+                            c.type_cotisation in exo_types
+                            and (abs(c.montant_patronal) + abs(c.montant_salarial)) > TOLERANCE_MONTANT
+                            for c in cots2
+                        )
+
+                        if has_exo_d1 != has_exo_d2:
+                            doc_avec = label1 if has_exo_d1 else label2
+                            doc_sans = label2 if has_exo_d1 else label1
+                            # Trouver le montant de l'exoneration
+                            exo_cots = cots1 if has_exo_d1 else cots2
+                            montant_exo = sum(
+                                abs(c.montant_patronal) + abs(c.montant_salarial)
+                                for c in exo_cots
+                                if c.type_cotisation in exo_types
+                            )
+                            findings.append(Finding(
+                                categorie=FindingCategory.INCOHERENCE,
+                                severite=Severity.HAUTE,
+                                titre=f"Exoneration RGDU/Fillon presente dans un seul document (NIR {nir[:5]}...)",
+                                description=(
+                                    f"Pour le NIR {nir}, une exoneration RGDU/Fillon "
+                                    f"de {formater_montant(montant_exo)} est presente "
+                                    f"dans {doc_avec} mais absente de {doc_sans}. "
+                                    f"Cette incoherence impacte directement le montant "
+                                    f"des cotisations dues."
+                                ),
+                                montant_impact=montant_exo,
+                                score_risque=75,
+                                recommandation=(
+                                    "Verifier l'eligibilite a la RGDU pour ce salarie "
+                                    "et harmoniser les documents. L'exoneration doit "
+                                    "apparaitre dans tous les documents."
+                                ),
+                                detecte_par=self.nom,
+                                documents_concernes=[
+                                    d1.source_document_id, d2.source_document_id,
+                                ],
+                                reference_legale="CSS art. L241-13 - RGDU",
+                                details_technique=_details_technique(
+                                    annee=annee, periode=per,
+                                    document=f"{label1} vs {label2}",
+                                    rubrique="Exonerations RGDU/Fillon",
+                                    extra={"nir": nir},
+                                ),
+                            ))
+
+        return findings
+
+    # =================================================================
+    # Cour des Comptes : Controle exonerations ACRE temporellement bornees
+    # =================================================================
+
+    def _verifier_exonerations_temporelles(
+        self, declarations: list[Declaration],
+    ) -> list[Finding]:
+        """Cour des Comptes : verifie que les exonerations temporaires
+        (ACRE, ZRR, ZFU) ne depassent pas leur duree legale.
+
+        - ACRE : 12 mois max (CSS art. L131-6-4)
+        - ZRR : 12 mois taux plein + 12 mois degressif (CSS art. L131-4-2)
+        - ZFU : 5 ans + 3 a 9 ans degressif
+        """
+        findings: list[Finding] = []
+
+        exo_types_temporaires = {
+            ContributionType.ACRE,
+            ContributionType.EXONERATION_ZRR,
+            ContributionType.EXONERATION_ZFU,
+        }
+
+        # Pour chaque employe, trouver les periodes d'exoneration
+        employe_exo_periodes: dict[str, list[tuple]] = defaultdict(list)
+
+        for decl in declarations:
+            if not decl.periode:
+                continue
+            nir_map = _employe_id_to_nir(decl)
+            for c in decl.cotisations:
+                if c.type_cotisation in exo_types_temporaires:
+                    montant_exo = abs(c.montant_patronal) + abs(c.montant_salarial)
+                    if montant_exo > TOLERANCE_MONTANT:
+                        nir = nir_map.get(c.employe_id, c.employe_id)
+                        employe_exo_periodes[nir].append((
+                            decl.periode.debut,
+                            decl.periode.fin,
+                            c.type_cotisation,
+                            montant_exo,
+                            decl.source_document_id,
+                        ))
+
+        # Verifier la duree totale d'exoneration par employe
+        for nir, periodes in employe_exo_periodes.items():
+            if not periodes:
+                continue
+            # Trier par date de debut
+            periodes_triees = sorted(periodes, key=lambda p: p[0])
+            premiere_date = periodes_triees[0][0]
+            derniere_date = periodes_triees[-1][1]
+            duree_mois = (derniere_date.year - premiere_date.year) * 12 + (derniere_date.month - premiere_date.month)
+            type_exo = periodes_triees[0][2]
+            total_exo = sum(p[3] for p in periodes_triees)
+
+            # Duree max selon type
+            duree_max = 12  # ACRE par defaut
+            if type_exo == ContributionType.EXONERATION_ZRR:
+                duree_max = 24  # 12 plein + 12 degressif
+            elif type_exo == ContributionType.EXONERATION_ZFU:
+                duree_max = 60  # 5 ans
+
+            if duree_mois > duree_max:
+                doc_ids = list(set(p[4] for p in periodes_triees))
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.HAUTE,
+                    titre=f"Exoneration {type_exo.value} au-dela de la duree legale (NIR {nir[:5]}...)",
+                    description=(
+                        f"L'exoneration {type_exo.value} est appliquee depuis "
+                        f"{duree_mois} mois (du {premiere_date.isoformat()} au "
+                        f"{derniere_date.isoformat()}) pour le NIR {nir}. "
+                        f"La duree maximale legale est de {duree_max} mois.\\n\\n"
+                        f"Total exonere sur la periode : {formater_montant(total_exo)}.\\n\\n"
+                        f"Point Cour des Comptes : les exonerations temporaires doivent "
+                        f"etre arretees a l'echeance. Leur prolongation indue constitue "
+                        f"une perte de recettes pour les organismes sociaux.\\n"
+                        f"Point URSSAF : recuperation possible sur 3 ans avec majorations."
+                    ),
+                    montant_impact=total_exo,
+                    score_risque=85,
+                    recommandation=(
+                        f"Supprimer l'exoneration {type_exo.value} qui a depasse sa "
+                        f"duree legale de {duree_max} mois. Regulariser les cotisations "
+                        f"pour les periodes au-dela de la limite."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=doc_ids[:5],
+                    reference_legale=(
+                        "CSS art. L131-6-4 (ACRE 12 mois), "
+                        "CSS art. L131-4-2 (ZRR), "
+                        "CGI art. 44 octies (ZFU)"
+                    ),
+                ))
+
+        return findings
+
+    # =================================================================
+    # 13. Coherence assiettes plafonnees / deplafonnees (intra-doc)
+    # =================================================================
+
+    def _verifier_coherence_assiettes_plafonnees(
+        self, decl: Declaration,
+    ) -> list[Finding]:
+        """Verifie la coherence entre bases plafonnees et deplafonnees par employe."""
+        findings: list[Finding] = []
+        annee, per = _annee_periode(decl)
+        doc_label = _doc_label(decl)
+
+        for emp in decl.employes:
+            emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+            if not emp_cots:
+                continue
+
+            nom_emp = f"{emp.prenom} {emp.nom}" if emp.nom else f"NIR {emp.nir[:5]}..." if emp.nir else emp.id
+
+            # Trouver la base deplafonnee (vieillesse deplafonnee, maladie)
+            bases_deplafonnees = [
+                c.assiette for c in emp_cots
+                if c.type_cotisation in (
+                    ContributionType.VIEILLESSE_DEPLAFONNEE,
+                    ContributionType.MALADIE,
+                )
+                and c.assiette > 0
+            ]
+            # Trouver la base plafonnee (vieillesse plafonnee)
+            bases_plafonnees = [
+                c.assiette for c in emp_cots
+                if c.type_cotisation == ContributionType.VIEILLESSE_PLAFONNEE
+                and c.assiette > 0
+            ]
+
+            if not bases_deplafonnees or not bases_plafonnees:
+                continue
+
+            base_deplaf = max(bases_deplafonnees)
+            base_plaf = max(bases_plafonnees)
+
+            # La base plafonnee ne peut pas depasser la base deplafonnee
+            if base_plaf > base_deplaf + TOLERANCE_MONTANT:
+                ecart = base_plaf - base_deplaf
+                findings.append(Finding(
+                    categorie=FindingCategory.INCOHERENCE,
+                    severite=Severity.HAUTE,
+                    titre=f"Base plafonnee > base deplafonnee ({nom_emp})",
+                    description=(
+                        f"Pour {nom_emp}, la base plafonnee "
+                        f"({formater_montant(base_plaf)}) est superieure a la base "
+                        f"deplafonnee ({formater_montant(base_deplaf)}). "
+                        f"La base plafonnee = min(salaire, PASS), elle ne peut "
+                        f"pas depasser la base deplafonnee = salaire total."
+                    ),
+                    valeur_constatee=f"plafonnee={formater_montant(base_plaf)}",
+                    valeur_attendue=f"<= deplafonnee={formater_montant(base_deplaf)}",
+                    montant_impact=ecart,
+                    score_risque=75,
+                    recommandation=(
+                        "Corriger les assiettes de cotisations. La base plafonnee "
+                        "doit etre inferieure ou egale a la base deplafonnee."
+                    ),
+                    detecte_par=self.nom,
+                    documents_concernes=[decl.source_document_id],
+                    reference_legale="Art. L242-1 CSS, Art. L241-3 CSS - Plafonnement PASS",
+                    details_technique=_details_technique(
+                        annee=annee, periode=per, document=doc_label,
+                        rubrique=f"Assiettes plafonnees {nom_emp}",
+                    ),
+                ))
+
+            # La base plafonnee ne peut pas depasser le PASS
+            if base_plaf > PASS_MENSUEL + TOLERANCE_MONTANT:
+                # Deja detecte par AnomalyDetector, mais doublon voulu pour coherence
+                pass
+
+            # Si salaire > PASS, la base plafonnee devrait etre = PASS
+            if base_deplaf > PASS_MENSUEL + Decimal("10"):
+                ecart_vs_pass = abs(base_plaf - PASS_MENSUEL)
+                # Tolerance pour temps partiel (proratisation)
+                temps_travail = emp.temps_travail if emp.temps_travail > 0 else Decimal("1")
+                pass_proratise = PASS_MENSUEL * temps_travail
+                ecart_vs_pass_proratise = abs(base_plaf - pass_proratise)
+
+                if ecart_vs_pass > Decimal("10") and ecart_vs_pass_proratise > Decimal("10"):
+                    findings.append(Finding(
+                        categorie=FindingCategory.INCOHERENCE,
+                        severite=Severity.MOYENNE,
+                        titre=f"Base plafonnee != PASS pour salaire > PASS ({nom_emp})",
+                        description=(
+                            f"Le salaire de {nom_emp} ({formater_montant(base_deplaf)}) "
+                            f"depasse le PASS ({formater_montant(PASS_MENSUEL)}), "
+                            f"mais la base plafonnee ({formater_montant(base_plaf)}) "
+                            f"ne correspond ni au PASS ni au PASS proratise "
+                            f"({formater_montant(pass_proratise)})."
+                        ),
+                        valeur_constatee=formater_montant(base_plaf),
+                        valeur_attendue=formater_montant(pass_proratise),
+                        montant_impact=abs(base_plaf - pass_proratise),
+                        score_risque=60,
+                        recommandation=(
+                            "Verifier le plafonnement de la base de cotisation. "
+                            "Pour un salaire superieur au PASS, la base plafonnee "
+                            "devrait etre egale au PASS (ou au PASS proratise en "
+                            "cas de temps partiel)."
+                        ),
+                        detecte_par=self.nom,
+                        documents_concernes=[decl.source_document_id],
+                        reference_legale="Art. L241-3 CSS - Plafond de securite sociale",
+                        details_technique=_details_technique(
+                            annee=annee, periode=per, document=doc_label,
+                            rubrique=f"Plafonnement {nom_emp}",
+                        ),
+                    ))
+
+        return findings
+
+    # =================================================================
     # Utilitaires
     # =================================================================
 
@@ -1545,11 +2282,17 @@ class ConsistencyChecker(BaseAnalyzer):
     def _regrouper_par_periode(
         declarations: list[Declaration],
     ) -> dict[tuple, list[Declaration]]:
-        """Regroupe les declarations par (debut, fin) de periode."""
+        """Regroupe les declarations par periode compatible.
+
+        Deux declarations sont regroupees si elles couvrent le meme mois
+        (meme annee et meme mois de debut), meme si les bornes exactes
+        different legerement (ex: 01/01 - 31/01 vs 01/01 - 30/01).
+        """
         par_periode: dict[tuple, list[Declaration]] = {}
         for decl in declarations:
             if decl.periode:
-                key = (decl.periode.debut, decl.periode.fin)
+                # Cle = (annee, mois) du debut pour regroupement souple
+                key = (decl.periode.debut.year, decl.periode.debut.month)
                 if key not in par_periode:
                     par_periode[key] = []
                 par_periode[key].append(decl)

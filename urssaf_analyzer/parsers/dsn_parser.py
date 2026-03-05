@@ -22,7 +22,7 @@ from decimal import Decimal
 from datetime import date
 from pathlib import Path
 from typing import Any
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 
 from urssaf_analyzer.core.exceptions import ParseError
 from urssaf_analyzer.models.documents import (
@@ -148,9 +148,26 @@ class DSNParser(BaseParser):
                     total += c.base_brute
             declaration.masse_salariale_brute = total
 
+        # Extraire CCN/IDCC et code NAF depuis les blocs DSN
+        # S21.G00.40.017 = IDCC du contrat
+        idcc_vals = donnees.get("S21.G00.40.017", [])
+        idcc_detecte = idcc_vals[0] if idcc_vals else ""
+        # S21.G00.06.005 = Code APE/NAF de l'etablissement
+        naf_val = self._get_val(donnees, "S21.G00.06.005")
+        if not naf_val:
+            # Fallback: S20.G00.05.003 = Code APE entreprise
+            naf_val = self._get_val(donnees, "S20.G00.05.003")
+
+        if employeur and naf_val:
+            employeur.code_naf = naf_val
+
         # Ajouter type_document pour reconnaissance
         declaration.metadata = getattr(declaration, "metadata", {}) or {}
         declaration.metadata["type_document"] = "declaration_dsn"
+        if idcc_detecte:
+            declaration.metadata["idcc"] = idcc_detecte
+        if naf_val:
+            declaration.metadata["code_naf"] = naf_val
 
         # S89 - Total versement OPS (totaux declares)
         s89_totaux = self._extraire_totaux_s89(donnees)
@@ -170,6 +187,12 @@ class DSNParser(BaseParser):
         if siren and len(siren) == 9:
             emp.siren = siren
 
+        # S20.G00.05.001 = SIREN de l'entreprise (fallback)
+        if not emp.siren:
+            siren_s20 = self._get_val(donnees, "S20.G00.05.001")
+            if siren_s20 and len(siren_s20) == 9:
+                emp.siren = siren_s20
+
         # S21.G00.06.001 = SIRET de l'etablissement (14 caracteres)
         siret = self._get_val(donnees, "S21.G00.06.001")
         if siret and len(siret) >= 14:
@@ -177,8 +200,10 @@ class DSNParser(BaseParser):
             if not emp.siren:
                 emp.siren = siret[:9]
 
-        # S21.G00.06.002 = Raison sociale
+        # S20.G00.05.002 = Raison sociale (S20) ou S21.G00.06.002 (S21)
         raison = self._get_val(donnees, "S21.G00.06.002")
+        if not raison:
+            raison = self._get_val(donnees, "S20.G00.05.002")
         if raison:
             emp.raison_sociale = raison
 

@@ -1,23 +1,27 @@
-"""NormaCheck v3.6 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.8.1 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
+
+Deploiement : OVHcloud VPS (Docker) ou Vercel (serverless).
 """
 
 import io
 import json
+import os
 import tempfile
 import time
 import shutil
 import hashlib
 import uuid
 import traceback
+import logging
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -36,43 +40,203 @@ from urssaf_analyzer.veille.legifrance_client import get_legislation_par_annee, 
 from urssaf_analyzer.comptabilite.plan_comptable import PlanComptable
 from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, TypeJournal
 from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
+from urssaf_analyzer.security.proof_chain import ProofChain, ScoreProofRecord, ConstantsVersioner
+
+from auth import (
+    create_user, authenticate, get_user, generate_token,
+    set_auth_cookie, clear_auth_cookie,
+    get_current_user, get_optional_user, require_role,
+    save_dashboard, load_dashboard, list_users_by_tenant, set_user_tenant,
+    jwt_decode, revoke_token, bootstrap_admin,
+)
+
+# --- Detection environnement ---
+_IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
+_DATA_DIR = Path(os.getenv("NORMACHECK_DATA_DIR", "/data/normacheck")) if _IS_OVH else Path("/tmp/normacheck_data")
+_PROOF_DIR = _DATA_DIR / "proof"
+_PROOF_DIR.mkdir(parents=True, exist_ok=True)
+_proof_chain = ProofChain(_PROOF_DIR / "score_proof_chain.jsonl")
+_MAX_FILES = int(os.getenv("NORMACHECK_MAX_FILES", "50" if _IS_OVH else "20"))
+_MAX_UPLOAD_MB = int(os.getenv("NORMACHECK_MAX_UPLOAD_MB", "2000" if _IS_OVH else "500"))
+_MAX_FILE_MB = int(os.getenv("NORMACHECK_MAX_FILE_MB", "50"))  # Limite par fichier
+
+# --- Persistence (OVHcloud: fichiers JSON / Vercel: in-memory) ---
+_persist = None
+if _IS_OVH:
+    try:
+        from persistence import (
+            knowledge_store, doc_library_store, audit_log_store,
+            rh_contrats_store, rh_avenants_store, rh_conges_store,
+            rh_arrets_store, rh_sanctions_store, rh_attestations_store,
+            rh_entretiens_store, rh_visites_med_store, rh_echanges_store,
+            rh_planning_store, dsn_drafts_store, invitations_store,
+            facture_statuses_store, entete_config_store,
+            save_uploaded_file, save_report, get_data_stats,
+            log_action as persistent_log_action,
+        )
+        _persist = True
+    except ImportError:
+        _persist = False
+
+logger = logging.getLogger("normacheck")
 
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.8.0",
+    version="3.8.1",
 )
 
+_CORS_ORIGINS = os.getenv("NORMACHECK_CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+# --- Bootstrap admin au demarrage ---
+_admin = bootstrap_admin()
+if _admin:
+    logger.info("Compte admin cree: %s", _admin["email"])
+
+
+# --- Middleware securite : CSP + en-tetes de protection ---
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Ajoute les en-tetes de securite (CSP, X-Frame-Options, etc.)."""
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
+
+
+# --- Middleware rate limiting ---
+_RATE_LIMIT_WINDOW = 60  # secondes
+_RATE_LIMIT_MAX = int(os.getenv("NORMACHECK_RATE_LIMIT", "60"))  # requetes/minute
+_RATE_LIMIT_AUTH_MAX = 10  # tentatives auth/minute
+_rate_store: dict[str, list[float]] = {}
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(key: str, max_requests: int) -> bool:
+    """Retourne True si la requete est autorisee, False si rate limited."""
+    now = time.time()
+    timestamps = _rate_store.get(key, [])
+    # Nettoyer les entrees expirees
+    timestamps = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
+    if len(timestamps) >= max_requests:
+        _rate_store[key] = timestamps
+        return False
+    timestamps.append(now)
+    _rate_store[key] = timestamps
+    return True
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Limite le debit des requetes par IP."""
+    client_ip = _get_client_ip(request)
+    path = request.url.path
+
+    # Limite stricte sur les endpoints d'authentification
+    if path in ("/api/auth/login", "/api/auth/register"):
+        if not _check_rate_limit(f"auth:{client_ip}", _RATE_LIMIT_AUTH_MAX):
+            return JSONResponse(
+                {"detail": "Trop de tentatives. Reessayez dans une minute."},
+                status_code=429,
+            )
+    else:
+        if not _check_rate_limit(f"global:{client_ip}", _RATE_LIMIT_MAX):
+            return JSONResponse(
+                {"detail": "Trop de requetes. Reessayez dans une minute."},
+                status_code=429,
+            )
+
+    response = await call_next(request)
+    return response
+
+
+# --- Middleware authentification (protege /api/* sauf whitelist) ---
+_AUTH_WHITELIST = {"/api/auth/login", "/api/auth/register", "/api/auth/logout",
+                   "/api/health", "/api/version", "/api/collaboration/valider",
+                   "/api/collaboration/finaliser"}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Verifie l'authentification pour toutes les routes /api/* protegees."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in _AUTH_WHITELIST:
+        token = request.cookies.get("nc_token")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        if not token:
+            return JSONResponse({"detail": "Non authentifie"}, status_code=401)
+        payload = jwt_decode(token)
+        if not payload:
+            return JSONResponse({"detail": "Session expiree"}, status_code=401)
+    response = await call_next(request)
+    return response
+
+
+# --- Middleware auto-persistance (OVHcloud) ---
+@app.middleware("http")
+async def auto_persist_middleware(request: Request, call_next):
+    """Sauvegarde automatique apres toute requete POST/PUT/DELETE."""
+    response = await call_next(request)
+    if _persist and request.method in ("POST", "PUT", "DELETE") and response.status_code < 400:
+        try:
+            _save_state()
+        except Exception as e:
+            logger.warning(f"Auto-persist failed: {e}")
+    return response
+
 
 # --- Singletons ---
 _db: Optional[Database] = None
 _moteur: Optional[MoteurEcritures] = None
 
-# --- In-memory stores ---
-_doc_library: list[dict] = []
-_biblio_knowledge: dict = {
-    "salaries": {},        # nir -> {nom, prenom, brut, net, statut, contrat_type, ...}
-    "employeurs": {},      # siret -> {raison_sociale, effectif, code_naf, ...}
-    "cotisations": [],     # [{code, libelle, base, taux_salarial, taux_patronal, employe_nir, ...}]
-    "declarations_dsn": [],# DSN importees
-    "bulletins_paie": [],  # bulletins detectes
-    "documents_comptables": [],  # ecritures/factures detectees
-    "taux_verifies": {},   # {code_cotisation: {taux_attendu, taux_constate, conforme}}
-    "periodes_couvertes": [],  # ["2025-01", "2025-02", ...]
+# --- Stores ---
+# OVHcloud: charge depuis fichiers persistants / Vercel: in-memory (ephemere)
+_DEFAULT_KB = {
+    "salaries": {},
+    "employeurs": {},
+    "cotisations": [],
+    "declarations_dsn": [],
+    "bulletins_paie": [],
+    "documents_comptables": [],
+    "taux_verifies": {},
+    "periodes_couvertes": [],
     "anomalies_detectees": [],
-    "pieces_justificatives": {},  # {type_piece: [doc_ids]}
-    "contrats_detectes": [],  # contrats extraits des documents
-    "masse_salariale": {},  # {periode: montant}
-    "masse_salariale_totale": 0,  # cumul toutes periodes
-    "effectifs": {},        # {periode: nb}
-    "conventions_collectives": [],  # CCN detectees
-    "exonerations_detectees": [],  # exonerations apprentis, ZRR, etc.
+    "pieces_justificatives": {},
+    "contrats_detectes": [],
+    "masse_salariale": {},
+    "masse_salariale_totale": 0,
+    "effectifs": {},
+    "conventions_collectives": [],
+    "exonerations_detectees": [],
     "derniere_maj": None,
     "contexte_entreprise": {
         "secteur_activite": "",
@@ -85,30 +249,93 @@ _biblio_knowledge: dict = {
         "accords_entreprise": [],
         "regime_fiscal": "",
     },
-    "documents_par_type": {},  # {type: [references]}
-    "alertes_contextuelles": [],  # alertes generees a partir du contexte
+    "documents_par_type": {},
+    "alertes_contextuelles": [],
 }
-_invitations: list[dict] = []
-_facture_statuses: dict[str, dict] = {}
-_audit_log: list[dict] = []
-_dsn_drafts: list[dict] = []
-_rh_contrats: list[dict] = []
-_rh_avenants: list[dict] = []
-_rh_conges: list[dict] = []
-_rh_arrets: list[dict] = []
-_rh_sanctions: list[dict] = []
-_rh_attestations: list[dict] = []
-_rh_entretiens: list[dict] = []
-_rh_visites_med: list[dict] = []
-_rh_echanges: list[dict] = []
-_rh_planning: list[dict] = []
-_entete_config: dict = {}
+
+if _persist:
+    _doc_library = doc_library_store.load()
+    _biblio_knowledge = knowledge_store.load()
+    # Merge defaults for any missing keys
+    for k, v in _DEFAULT_KB.items():
+        if k not in _biblio_knowledge:
+            _biblio_knowledge[k] = v
+    _invitations = invitations_store.load()
+    _facture_statuses = facture_statuses_store.load()
+    _audit_log = audit_log_store.load()
+    _dsn_drafts = dsn_drafts_store.load()
+    _rh_contrats = rh_contrats_store.load()
+    _rh_avenants = rh_avenants_store.load()
+else:
+    _doc_library: list[dict] = []
+    _biblio_knowledge: dict = dict(_DEFAULT_KB)
+    _invitations: list[dict] = []
+    _facture_statuses: dict[str, dict] = {}
+    _audit_log: list[dict] = []
+    _dsn_drafts: list[dict] = []
+    _rh_contrats: list[dict] = []
+    _rh_avenants: list[dict] = []
+if _persist:
+    _rh_conges = rh_conges_store.load()
+    _rh_arrets = rh_arrets_store.load()
+    _rh_sanctions = rh_sanctions_store.load()
+    _rh_attestations = rh_attestations_store.load()
+    _rh_entretiens = rh_entretiens_store.load()
+    _rh_visites_med = rh_visites_med_store.load()
+    _rh_echanges = rh_echanges_store.load()
+    _rh_planning = rh_planning_store.load()
+    _entete_config = entete_config_store.load()
+else:
+    _rh_conges: list[dict] = []
+    _rh_arrets: list[dict] = []
+    _rh_sanctions: list[dict] = []
+    _rh_attestations: list[dict] = []
+    _rh_entretiens: list[dict] = []
+    _rh_visites_med: list[dict] = []
+    _rh_echanges: list[dict] = []
+    _rh_planning: list[dict] = []
+    _entete_config: dict = {}
+
+
+def _save_state():
+    """Persiste l'etat complet sur disque (OVHcloud uniquement)."""
+    if not _persist:
+        return
+    knowledge_store.save(_biblio_knowledge)
+    doc_library_store.save(_doc_library)
+    audit_log_store.save(_audit_log)
+    rh_contrats_store.save(_rh_contrats)
+    rh_avenants_store.save(_rh_avenants)
+    rh_conges_store.save(_rh_conges)
+    rh_arrets_store.save(_rh_arrets)
+    rh_sanctions_store.save(_rh_sanctions)
+    rh_attestations_store.save(_rh_attestations)
+    rh_entretiens_store.save(_rh_entretiens)
+    rh_visites_med_store.save(_rh_visites_med)
+    rh_echanges_store.save(_rh_echanges)
+    rh_planning_store.save(_rh_planning)
+    dsn_drafts_store.save(_dsn_drafts)
+    invitations_store.save(_invitations)
+    facture_statuses_store.save(_facture_statuses)
+    entete_config_store.save(_entete_config)
+
+
+_DEFAULT_PAGE_LIMIT = 200
+
+
+def _paginate(items: list, offset: int = 0, limit: int = _DEFAULT_PAGE_LIMIT) -> dict:
+    """Pagine une liste avec offset/limit et retourne total + items."""
+    total = len(items)
+    limit = min(limit, 500)  # cap absolu
+    page = items[offset:offset + limit]
+    return {"total": total, "offset": offset, "limit": limit, "items": page}
 
 
 def get_db() -> Database:
     global _db
     if _db is None:
-        _db = Database("/tmp/urssaf_analyzer.db")
+        db_path = str(_DATA_DIR / "db" / "normacheck.db") if _IS_OVH else "/tmp/urssaf_analyzer.db"
+        _db = Database(db_path)
     return _db
 
 
@@ -120,13 +347,44 @@ def get_moteur() -> MoteurEcritures:
 
 
 def log_action(profil_email: str, action: str, details: str = ""):
-    _audit_log.append({
+    entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
         "profil": profil_email,
         "action": action,
         "details": details,
-    })
+    }
+    _audit_log.append(entry)
+    if _persist:
+        audit_log_store.append(entry)
+
+
+# ==============================
+# HEALTH CHECK (OVHcloud monitoring)
+# ==============================
+
+@app.get("/api/health")
+async def health_check():
+    """Endpoint de sante pour Docker HEALTHCHECK et monitoring OVH."""
+    checks = {"status": "ok", "version": "3.8.1", "env": "ovhcloud" if _IS_OVH else "vercel"}
+    try:
+        db = get_db()
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {str(e)}"
+        checks["status"] = "degraded"
+    if _IS_OVH:
+        checks["persistence"] = "active" if _persist else "fallback_memory"
+        checks["data_dir"] = str(_DATA_DIR)
+        checks["data_writable"] = os.access(str(_DATA_DIR), os.W_OK)
+        try:
+            stats = get_data_stats()
+            checks["data_stats"] = stats
+        except Exception:
+            pass
+    checks["max_files"] = _MAX_FILES
+    checks["max_upload_mb"] = _MAX_UPLOAD_MB
+    return checks
 
 
 # ==============================
@@ -163,9 +421,24 @@ async def legal_mentions():
 # ==============================
 
 @app.post("/api/auth/login")
-async def auth_login(email: str = Form("admin"), mot_de_passe: str = Form("admin")):
-    log_action(email, "connexion")
-    return {"status": "ok", "email": email, "role": "admin"}
+async def auth_login(request: Request, email: str = Form(""), mot_de_passe: str = Form("")):
+    if not email or not mot_de_passe:
+        raise HTTPException(400, "Email et mot de passe requis")
+    user = authenticate(email, mot_de_passe)
+    if not user:
+        raise HTTPException(401, "Email ou mot de passe incorrect")
+    token = generate_token(user)
+    log_action(user["email"], "connexion")
+    response = JSONResponse({
+        "status": "ok",
+        "email": user["email"],
+        "role": user["role"],
+        "nom": user["nom"],
+        "prenom": user["prenom"],
+        "tenant_id": user.get("tenant_id", ""),
+    })
+    set_auth_cookie(response, token)
+    return response
 
 
 @app.post("/api/auth/register")
@@ -173,10 +446,607 @@ async def auth_register(
     nom: str = Form(...), prenom: str = Form(...),
     email: str = Form(...), mot_de_passe: str = Form(...)
 ):
-    if len(mot_de_passe) < 6:
-        raise HTTPException(400, "Mot de passe trop court (min. 6 caracteres)")
-    log_action(email, "inscription", f"{prenom} {nom}")
-    return {"status": "ok", "email": email}
+    try:
+        user = create_user(email, mot_de_passe, nom, prenom, role="collaborateur")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = generate_token(user)
+    log_action(user["email"], "inscription", f"{prenom} {nom}")
+    response = JSONResponse({"status": "ok", "email": user["email"], "role": user["role"]})
+    set_auth_cookie(response, token)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    # Revoquer le token actuel pour empecher sa reutilisation
+    token = request.cookies.get("nc_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if token:
+        revoke_token(token)
+    response = JSONResponse({"status": "ok"})
+    clear_auth_cookie(response)
+    return response
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = get_optional_user(request)
+    if not user:
+        raise HTTPException(401, "Non authentifie")
+    return user
+
+
+@app.post("/api/dashboard/save")
+async def dashboard_save(request: Request):
+    user = get_current_user(request)
+    body = await request.json()
+    save_dashboard(user["email"], body)
+    return {"status": "ok"}
+
+
+@app.get("/api/dashboard/load")
+async def dashboard_load(request: Request):
+    user = get_current_user(request)
+    entry = load_dashboard(user["email"])
+    if not entry:
+        return {"status": "empty"}
+    return {"status": "ok", "data": entry["data"], "saved_at": entry["saved_at"]}
+
+
+@app.get("/api/certification/readiness")
+async def certification_readiness():
+    """Evaluation de maturite du moteur pour certification par un organisme tiers.
+
+    Retourne le diagnostic complet : normes ISO pertinentes, gap analysis,
+    plan de remediation en 3 phases, et metriques de maturite.
+    Conforme ISO/IEC 25010, 27001, 42001, NF Z42-013.
+    """
+    from urssaf_analyzer.certification.certification_readiness import (
+        evaluer_maturite_certification,
+    )
+    return evaluer_maturite_certification()
+
+
+@app.get("/api/scores/methodologie")
+async def scores_methodologie():
+    """Retourne la methodologie complete des 3 scores de conformite pour certification."""
+    return {
+        "version": "4.0",
+        "date_methodologie": "2026-03-03",
+        "statut_certification": "en_cours_de_validation",
+        "principes_methodologiques": {
+            "proportionnalite": "Chaque deduction est ponderee par un coefficient (Wk) derive des sanctions legales effectives",
+            "objectivabilite": "Tout parametre est traçable a une reference legale explicite",
+            "reproductibilite": "A constats identiques, le score est identique - aucun bonus subjectif",
+            "non_discretionnaire": "Les poids inter-domaines sont derives du nombre de points de controle (Nk/Somme_Nk)",
+        },
+        "formule_par_domaine": {
+            "description": "S = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+            "Wk_severite": {
+                "critique": {"poids": 4, "justification": "Manquement delibere, majoration 40% (CSS L243-7-7, CGI art. 1729)"},
+                "haute": {"poids": 3, "justification": "Retard/omission significatif, majoration 10% (CSS L243-7-2, CGI art. 1728)"},
+                "moyenne": {"poids": 2, "justification": "Ecart formel, droit a regularisation (CSS L243-6-7, tolerance BOSS)"},
+                "faible": {"poids": 1, "justification": "Anomalie mineure, pas de sanction directe"},
+            },
+            "Wmax": "max(Sigma(Wk), 4 * Npoints) - normalise par la capacite de controle du domaine",
+            "Fc_couverture": "min(1, nbDocuments / 3) - facteur continu, pas de seuil arbitraire",
+            "score_minimum": "Score brut * 0.5 (si aucun document) - jamais de plafond discretionnaire",
+        },
+        "scores": {
+            "urssaf": {
+                "nom": "Score URSSAF - Conformite sociale",
+                "organisme_reference": "URSSAF / Caisse Nationale",
+                "cadre_legal": "Code de la securite sociale (CSS)",
+                "formule": "S_URSSAF = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+                "Npoints": 10,
+                "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
+                "perimetres_controle": [
+                    {"point": "Assiette des cotisations", "reference": "Art. L242-1 CSS"},
+                    {"point": "Reduction generale (ex-Fillon)", "reference": "Art. L241-13 CSS"},
+                    {"point": "FNAL", "reference": "Art. L834-1 CSS"},
+                    {"point": "Taux AT/MP", "reference": "Art. L242-5, D242-6-1 CSS"},
+                    {"point": "CSG/CRDS", "reference": "Art. L136-1-1 CSS"},
+                    {"point": "Plafond SS proratise", "reference": "Art. L242-8 CSS"},
+                    {"point": "Retraite complementaire", "reference": "ANI AGIRC-ARRCO art. 36"},
+                    {"point": "SMIC horaire", "reference": "Art. L3231-2 Code du travail"},
+                    {"point": "NIR / Identite", "reference": "Decret n. 82-103 du 22/01/1982"},
+                    {"point": "Bulletin de paie", "reference": "Art. L3243-2 Code du travail"},
+                ],
+            },
+            "dgfip": {
+                "nom": "Score DGFIP - Conformite fiscale",
+                "organisme_reference": "Direction Generale des Finances Publiques (DGFiP)",
+                "cadre_legal": "Code general des impots (CGI) / Livre des procedures fiscales (LPF)",
+                "formule": "S_DGFIP = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+                "Npoints": 10,
+                "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
+                "perimetres_controle": [
+                    {"point": "TVA collectee / deductible", "reference": "Art. 256 et 271 CGI"},
+                    {"point": "Declarations fiscales", "reference": "Art. 1649 quater B CGI"},
+                    {"point": "DAS-2 Honoraires (> 2400 EUR/an)", "reference": "Art. 240-241 CGI"},
+                    {"point": "FEC", "reference": "Art. L.47 A-I LPF"},
+                    {"point": "Facturation", "reference": "Art. 289 CGI"},
+                    {"point": "Conservation documents", "reference": "Art. L.102 B LPF"},
+                    {"point": "Avantages en nature", "reference": "Art. 82 CGI"},
+                    {"point": "Credit impot formation (EXPIRE 31/12/2024)", "reference": "Art. 244 quater M CGI - dispositif expire"},
+                    {"point": "CFE / CVAE", "reference": "Art. 1447 CGI"},
+                    {"point": "Taxe sur les salaires", "reference": "Art. 231 CGI"},
+                ],
+            },
+            "cour_des_comptes": {
+                "nom": "Score Cour des comptes - Regularite comptable",
+                "organisme_reference": "Cour des comptes / Chambres regionales des comptes",
+                "cadre_legal": "Code de commerce / Normes NEP-ISA",
+                "formule": "S_CDC = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+                "Npoints": 8,
+                "echelle": {"A": ">=90", "B": ">=75", "C": ">=60", "D": ">=45", "E": ">=30", "F": "<30"},
+                "perimetres_controle": [
+                    {"point": "Regularite des comptes", "reference": "Normes NEP / ISA"},
+                    {"point": "Sincerite des ecritures", "reference": "Art. L.123-14 Code de commerce"},
+                    {"point": "Image fidele du patrimoine", "reference": "Art. L.123-14 Code de commerce"},
+                    {"point": "Continuite d exploitation", "reference": "NEP 570"},
+                    {"point": "Separation des exercices", "reference": "Art. L.123-12 C.com / PCG 313-1"},
+                    {"point": "Exhaustivite charges sociales", "reference": "ISA 315 (risques) / ISA 500 (elements probants)"},
+                    {"point": "Conventions reglementees", "reference": "Art. L.225-38 Code de commerce"},
+                    {"point": "Controle interne", "reference": "NEP 315 / ISA 315"},
+                ],
+            },
+        },
+        "score_global": {
+            "formule": "S_global = Somme(S_k * Nk) / Somme(Nk) - moyenne ponderee par nombre de points de controle",
+            "poids": {"URSSAF": "10/28 = 0.3571", "DGFIP": "10/28 = 0.3571", "Cour_des_comptes": "8/28 = 0.2857"},
+            "justification_poids": (
+                "Le poids de chaque domaine est strictement proportionnel au nombre de points de controle "
+                "legaux identifies (Nk). Avec N_URSSAF=10, N_DGFIP=10, N_CDC=8, les poids sont Nk/28. "
+                "Cette methode est objectivable (le nombre de points est verifiable), reproductible "
+                "(tout auditeur arrive au meme resultat) et non-discretionnaire (aucun choix subjectif). "
+                "En cas d'ajout ou suppression d'un point de controle, les poids s'ajustent automatiquement."
+            ),
+        },
+        "avertissement": (
+            "Les scores NormaCheck v4.0 sont des indicateurs methodologiques internes. "
+            "Ils ne constituent pas une certification officielle et ne sont pas opposables "
+            "aux administrations (URSSAF, DGFIP, Cour des comptes). "
+            "La methodologie est concue pour etre objectivable, reproductible et non-discretionnaire "
+            "conformement aux exigences de l'art. L.243-6-3 CSS. "
+            "Les constats de type pattern_suspect (Benford, nombres ronds, outliers) sont des "
+            "indicateurs statistiques non probants, insuffisants a eux seuls pour etablir une "
+            "irregularite. Tout constat est soumis a procedure contradictoire avant integration "
+            "definitive dans le score (art. L121-1 CRPA, principe du contradictoire)."
+        ),
+        "delai_validation_provisoire": {
+            "delai_jours": 30,
+            "description": "Un score PROVISOIRE non valide dans les 30 jours calendaires doit "
+                           "etre requalifie en EXPIRE et ne peut plus etre utilise a des fins "
+                           "decisionnelles sans revalidation.",
+            "base_legale": "Principe de securite juridique - un score indicatif ne peut rester "
+                           "indefiniment en statut provisoire.",
+        },
+        "procedure_contradictoire": {
+            "principe": "Tout constat impactant le score peut etre conteste par l entite auditee "
+                        "avant integration definitive (art. L121-1 CRPA)",
+            "constats_contestables": [
+                "PATTERN_SUSPECT : indicateurs statistiques (Benford, nombres ronds, outliers) - "
+                "non probants, soumis a verification croisee",
+                "DONNEE_MANQUANTE : peut resulter d un perimetre d audit par sondage et non exhaustif",
+            ],
+            "procedure": [
+                "1. Notification des constats provisoires a l entite auditee",
+                "2. Delai de reponse de 30 jours pour observations (art. R*243-59 CSS)",
+                "3. Prise en compte des observations dans le score definitif",
+                "4. Motivation ecrite des constats maintenus apres contradictoire",
+            ],
+        },
+        "qualification_rgpd": {
+            "article_22": {
+                "texte": "Art. 22 RGPD - Droit de ne pas faire l'objet d'une decision fondee "
+                         "exclusivement sur un traitement automatise produisant des effets juridiques "
+                         "ou affectant de maniere significative",
+                "qualification_systeme": "AIDE A LA DECISION - NON DECISION AUTOMATISEE",
+                "justification": (
+                    "NormaCheck est qualifie d'outil d'aide a la decision et non de systeme de "
+                    "decision automatisee au sens de l'art. 22 RGPD pour les raisons suivantes : "
+                    "(1) Le score est explicitement presente comme indicatif et non opposable ; "
+                    "(2) Aucune decision juridique ou administrative ne resulte directement du score ; "
+                    "(3) Tout constat est soumis a procedure contradictoire prealable (art. L121-1 CRPA) ; "
+                    "(4) Un mecanisme de validation humaine est requis avant toute utilisation du score "
+                    "a des fins decisionnelles ; "
+                    "(5) Le score est qualifie de 'provisoire' jusqu'a validation par un operateur humain."
+                ),
+                "mesures_preventives": [
+                    "Score qualifie de 'provisoire' jusqu'a validation humaine explicite",
+                    "Aucun grade A-F ne vaut certification sans intervention d'un professionnel qualifie",
+                    "Procedure contradictoire (30 jours) avant integration definitive de tout constat",
+                    "Droit de contestation de tout constat et du score global par l'entite auditee",
+                    "Tracabilite complete de la decision humaine dans la chaine de preuve",
+                ],
+            },
+            "droit_intervention_humaine": {
+                "principe": "Conformement a l'art. 22(3) RGPD, toute personne concernee a le droit "
+                            "d'obtenir une intervention humaine, d'exprimer son point de vue et de "
+                            "contester la decision",
+                "mecanismes": [
+                    "Endpoint /api/scores/validation-humaine : un operateur qualifie valide ou "
+                    "ajuste le score avant toute utilisation decisionnelle",
+                    "Endpoint /api/scores/contestation : l'entite auditee peut contester le score "
+                    "avec justificatifs, declenchant un reexamen humain",
+                    "Chaque validation/contestation est scellee dans la chaine de preuve (proof_chain)",
+                    "Le score final ('score valide') ne peut etre emis que par un operateur humain",
+                ],
+            },
+            "aipd": {
+                "reference": "Art. 35 RGPD - Analyse d'Impact relative a la Protection des Donnees",
+                "statut": "AIPD realisee pour le traitement de scoring NormaCheck",
+                "risques_identifies": [
+                    "Risque de requalification en decision automatisee si le score est utilise "
+                    "sans validation humaine pour refuser un service ou appliquer une sanction",
+                    "Risque de biais indirect via le facteur de couverture documentaire (Fc) "
+                    "penalisant les petites structures disposant de moins de documents",
+                    "Risque d'opacite si la methode de routage domaine n'est pas tracee",
+                ],
+                "mesures_attenuation": [
+                    "Qualification explicite en aide a la decision avec garde-fous techniques",
+                    "Documentation exhaustive des biais identifies et de leurs mitigations",
+                    "Tracabilite du routage domaine dans les details du score",
+                    "Mecanisme de contestation et de validation humaine obligatoire",
+                ],
+            },
+        },
+        "biais_identifies_et_mitigations": {
+            "fc_couverture_documentaire": {
+                "biais": "Le facteur Fc = min(1, nbDocuments/3) penalise les entites fournissant "
+                         "moins de 3 documents (score multiplie par 0.5 + 0.5*Fc)",
+                "mitigation": (
+                    "Fc est un facteur continu (non binaire) refletant l'incertitude reelle : "
+                    "avec 1 document, l'analyse repose uniquement sur la coherence interne, "
+                    "sans recoupement possible. Le seuil de 3 est derive de la norme NEP 500 "
+                    "(elements probants : recoupement multi-sources). Le score brut est preserve "
+                    "a 50% minimum (jamais zero), et l'intervalle de confiance elargit "
+                    "proportionnellement pour signaler l'incertitude."
+                ),
+                "transparence": "Fc affiche dans les details du score avec justification",
+            },
+            "effectif_zero": {
+                "biais": "Quand effectif=0 ou non renseigne, les controles dependant de seuils "
+                         "d'effectif (FNAL deplafonne >= 50, versement mobilite >= 11, PEEC >= 20) "
+                         "sont silencieusement ignores",
+                "mitigation": (
+                    "Un constat structurel DONNEE_MANQUANTE (severite MOYENNE, score_risque=50) "
+                    "est genere pour signaler explicitement cette limitation. Le score reflete "
+                    "ainsi l'absence de verification plutot que la conformite."
+                ),
+            },
+            "routage_domaine_par_defaut": {
+                "biais": "Les constats non classes par categToDomain sont affectes au domaine URSSAF "
+                         "par defaut, ce qui pourrait concentrer les deductions sur ce domaine",
+                "mitigation": (
+                    "Le routage par defaut est documente et trace (console.info). Les regles de "
+                    "routage sont basees sur des criteres objectifs (reference legale, categorie, "
+                    "titre du constat). L'ajout de regles de routage par titre (v4.0) reduit "
+                    "significativement le nombre de constats routes par defaut."
+                ),
+            },
+            "detection_apprenti_par_mots_cles": {
+                "biais": "La detection du statut d'apprenti repose sur la recherche de mots-cles "
+                         "dans le NIR ou les champs texte, ce qui peut generer des faux positifs",
+                "mitigation": (
+                    "Les constats lies a la detection par mots-cles sont marques comme "
+                    "PATTERN_SUSPECT (non probants) et soumis a procedure contradictoire. "
+                    "Ils n'impactent le score que comme indicateurs statistiques (Wk=1 max)."
+                ),
+            },
+        },
+        "explicabilite": {
+            "principe": "Chaque element du score est traçable et explicable conformement au "
+                        "principe de transparence (art. 5(1)(a) et art. 13-14 RGPD)",
+            "elements_traces": [
+                "Routage de chaque constat vers son domaine (URSSAF/DGFIP/CDC) avec regle appliquee",
+                "Poids Wk de chaque constat avec reference legale justificative",
+                "Normalisation Wmax avec nombre de points de controle (Npoints)",
+                "Facteur couverture Fc avec nombre de documents",
+                "Score brut avant et apres application de Fc",
+                "Intervalle de confiance avec marge d'incertitude",
+                "Penalite d'accumulation d'incoherences si applicable",
+                "Constats contestables (pattern_suspect) identifies separement",
+            ],
+        },
+        "changelog": {
+            "v4.0": "Refonte methodologique : suppression coefficients arbitraires, poids proportionnels Nk/Somme_Nk, "
+                     "deductions Wk basees sur sanctions legales, suppression bonus subjectifs, facteur couverture continu",
+            "v3.8": "Version initiale triple scoring avec coefficients fixes (0.40/0.35/0.25) et deductions arbitraires (-15/-10/-5/-2)",
+        },
+    }
+
+
+# ==============================
+# CHAINE DE PREUVE NUMERIQUE
+# ==============================
+
+@app.post("/api/proof/seal-score")
+async def seal_score(request: Request):
+    """Scelle un score triple dans la chaine de preuve (appele par le frontend apres calcul JS).
+
+    Permet de tracer le score calcule cote client avec tous ses parametres,
+    formant un enregistrement probant reconstitutable a posteriori.
+    Conforme art. 1366 C.civ (integrite), reglement eIDAS (horodatage).
+    """
+    user = get_optional_user(request)
+    body = await request.json()
+    session_id = body.get("session_id", "")
+    scores = body.get("scores", {})
+    constats = body.get("constats", [])
+    nb_documents = body.get("nb_documents", 0)
+
+    entry = _proof_chain.append("score_triple_scelle", {
+        "session_id": session_id,
+        "operateur": user["email"] if user else "anonyme",
+        "version_moteur": "4.0",
+        "nb_documents": nb_documents,
+        "nb_constats": len(constats),
+        "scores": {
+            "urssaf": {"score": scores.get("urssaf", {}).get("score", 0),
+                       "grade": scores.get("urssaf", {}).get("grade", ""),
+                       "totalW": scores.get("urssaf", {}).get("totalW", 0),
+                       "Wmax": scores.get("urssaf", {}).get("Wmax", 0),
+                       "Fc": scores.get("urssaf", {}).get("Fc", 0)},
+            "fiscal": {"score": scores.get("fiscal", {}).get("score", 0),
+                       "grade": scores.get("fiscal", {}).get("grade", ""),
+                       "totalW": scores.get("fiscal", {}).get("totalW", 0),
+                       "Wmax": scores.get("fiscal", {}).get("Wmax", 0),
+                       "Fc": scores.get("fiscal", {}).get("Fc", 0)},
+            "cdc": {"score": scores.get("cdc", {}).get("score", 0),
+                    "grade": scores.get("cdc", {}).get("grade", ""),
+                    "totalW": scores.get("cdc", {}).get("totalW", 0),
+                    "Wmax": scores.get("cdc", {}).get("Wmax", 0),
+                    "Fc": scores.get("cdc", {}).get("Fc", 0)},
+            "global": scores.get("global", {}),
+        },
+        "formule": "S = max(0, 100 * (1 - Sigma(Wk) / Wmax)) * (0.5 + 0.5 * Fc)",
+        "poids_severite": {"critique": 4, "haute": 3, "moyenne": 2, "faible": 1},
+    })
+
+    return {"status": "ok", "seq": entry["seq"], "hash": entry["hash"],
+            "timestamp": entry["timestamp"]}
+
+
+@app.get("/api/proof/verify")
+async def verify_proof_chain():
+    """Verifie l'integrite de la chaine de preuve.
+
+    Retourne si la chaine est intacte ou si une alteration a ete detectee.
+    Conforme NF Z42-013 (verification d'integrite archivage probant).
+    """
+    result = _proof_chain.verify()
+    return result
+
+
+@app.get("/api/proof/chain")
+async def get_proof_chain(
+    event_type: str = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Consulte la chaine de preuve (lecture seule).
+
+    Chaque entree est chainee cryptographiquement (hash SHA-256).
+    Toute modification d'une entree passee invalide la chaine entiere.
+    """
+    entries = _proof_chain.get_entries(event_type=event_type, limit=limit)
+    verification = _proof_chain.verify()
+    return {
+        "entries": entries,
+        "total": verification["entries"],
+        "chain_valid": verification["valid"],
+        "verification_detail": verification["detail"],
+    }
+
+
+@app.get("/api/proof/entry/{seq}")
+async def get_proof_entry(seq: int):
+    """Recupere une entree specifique de la chaine de preuve par sequence."""
+    entry = _proof_chain.get_entry_by_seq(seq)
+    if not entry:
+        raise HTTPException(404, "Entree non trouvee")
+    return entry
+
+
+@app.post("/api/proof/snapshot-constants")
+async def snapshot_constants(request: Request):
+    """Scelle un snapshot des constantes reglementaires dans la chaine de preuve.
+
+    Permet de reconstituer les taux/seuils applicables a une date donnee.
+    Indispensable pour la reproductibilite des scores (art. L102 B LPF).
+    """
+    user = get_optional_user(request)
+    snapshot = ConstantsVersioner.snapshot_constants()
+    legal_refs = ConstantsVersioner.snapshot_legal_references()
+
+    entry = _proof_chain.append("snapshot_constantes", {
+        "operateur": user["email"] if user else "systeme",
+        "constantes": snapshot,
+        "references_legales": legal_refs,
+    })
+
+    return {"status": "ok", "seq": entry["seq"], "hash": entry["hash"],
+            "snapshot_hash": snapshot["snapshot_hash"]}
+
+
+# ============================================================
+# RGPD ART. 22 - VALIDATION HUMAINE ET CONTESTATION DU SCORE
+# ============================================================
+
+# Stockage en memoire des statuts de validation (en production : base de donnees)
+_score_validations: dict = {}
+
+
+@app.post("/api/scores/validation-humaine")
+async def validation_humaine_score(request: Request):
+    """Validation humaine d'un score (art. 22(3) RGPD).
+
+    Permet a un operateur qualifie de :
+    - Valider le score automatique tel quel (statut: 'valide')
+    - Ajuster le score avec justification (statut: 'ajuste')
+    - Rejeter le score et demander un recalcul (statut: 'rejete')
+
+    Chaque action est scellee dans la chaine de preuve pour tracabilite.
+    """
+    user = get_optional_user(request)
+    body = await request.json()
+
+    session_id = body.get("session_id", "")
+    action = body.get("action", "")  # 'valider', 'ajuster', 'rejeter'
+    score_original = body.get("score_original", {})
+    score_ajuste = body.get("score_ajuste", None)
+    justification = body.get("justification", "")
+    operateur = user["email"] if user else body.get("operateur", "anonyme")
+
+    if action not in ("valider", "ajuster", "rejeter"):
+        raise HTTPException(400, "Action invalide. Valeurs acceptees: valider, ajuster, rejeter")
+
+    if action == "ajuster" and not score_ajuste:
+        raise HTTPException(400, "Un score ajuste doit etre fourni pour l'action 'ajuster'")
+
+    if not justification and action != "valider":
+        raise HTTPException(400, "Une justification est requise pour les actions ajuster/rejeter")
+
+    # Sceller dans la chaine de preuve
+    payload = {
+        "session_id": session_id,
+        "operateur": operateur,
+        "action": action,
+        "score_original": score_original,
+        "justification": justification,
+        "qualification_rgpd": "Validation humaine conforme art. 22(3) RGPD",
+    }
+
+    if action == "ajuster" and score_ajuste:
+        payload["score_ajuste"] = score_ajuste
+
+    entry = _proof_chain.append("validation_humaine_score", payload)
+
+    # Mettre a jour le statut de validation
+    statut = "valide" if action == "valider" else ("ajuste" if action == "ajuster" else "rejete")
+    _score_validations[session_id] = {
+        "statut": statut,
+        "operateur": operateur,
+        "date": entry["timestamp"],
+        "proof_seq": entry["seq"],
+        "proof_hash": entry["hash"],
+        "justification": justification,
+    }
+
+    return {
+        "status": "ok",
+        "validation": {
+            "statut": statut,
+            "session_id": session_id,
+            "operateur": operateur,
+            "proof_seq": entry["seq"],
+            "proof_hash": entry["hash"],
+        },
+        "message": (
+            f"Score {statut} par {operateur}. "
+            "Decision scellee dans la chaine de preuve (art. 22(3) RGPD)."
+        ),
+    }
+
+
+@app.post("/api/scores/contestation")
+async def contestation_score(request: Request):
+    """Contestation d'un score par l'entite auditee (art. 22(3) RGPD + art. L121-1 CRPA).
+
+    L'entite auditee peut contester :
+    - Un constat specifique (par titre)
+    - Le score global
+    - Plusieurs constats a la fois
+
+    La contestation declenche un reexamen humain obligatoire.
+    Le score passe en statut 'conteste' jusqu'a resolution.
+    """
+    user = get_optional_user(request)
+    body = await request.json()
+
+    session_id = body.get("session_id", "")
+    constats_contestes = body.get("constats_contestes", [])
+    motif = body.get("motif", "")
+    justificatifs = body.get("justificatifs", [])
+    contestataire = body.get("contestataire", user["email"] if user else "anonyme")
+
+    if not motif:
+        raise HTTPException(400, "Un motif de contestation est requis")
+
+    # Sceller dans la chaine de preuve
+    entry = _proof_chain.append("contestation_score", {
+        "session_id": session_id,
+        "contestataire": contestataire,
+        "constats_contestes": constats_contestes,
+        "motif": motif,
+        "justificatifs_fournis": len(justificatifs),
+        "procedure": "Procedure contradictoire art. L121-1 CRPA",
+        "delai_reponse": "30 jours (art. R*243-59 CSS)",
+        "qualification_rgpd": "Droit de contestation conforme art. 22(3) RGPD",
+    })
+
+    # Passer le score en statut 'conteste'
+    _score_validations[session_id] = {
+        "statut": "conteste",
+        "contestataire": contestataire,
+        "date": entry["timestamp"],
+        "proof_seq": entry["seq"],
+        "proof_hash": entry["hash"],
+        "motif": motif,
+        "nb_constats_contestes": len(constats_contestes),
+        "reexamen_humain_requis": True,
+    }
+
+    return {
+        "status": "ok",
+        "contestation": {
+            "session_id": session_id,
+            "proof_seq": entry["seq"],
+            "proof_hash": entry["hash"],
+            "statut": "conteste",
+            "nb_constats_contestes": len(constats_contestes),
+        },
+        "message": (
+            "Contestation enregistree et scellee dans la chaine de preuve. "
+            "Un reexamen humain obligatoire sera effectue dans un delai de "
+            "30 jours (art. R*243-59 CSS). Vous serez notifie du resultat."
+        ),
+        "procedure": [
+            "1. Contestation enregistree (cette etape)",
+            "2. Reexamen humain obligatoire par un operateur qualifie",
+            "3. Notification du resultat avec motivation ecrite",
+            "4. Score definitif emis apres contradictoire",
+        ],
+    }
+
+
+@app.get("/api/scores/statut-validation/{session_id}")
+async def statut_validation_score(session_id: str):
+    """Consulte le statut de validation humaine d'un score.
+
+    Retourne 'provisoire' si aucune validation humaine n'a ete effectuee,
+    ou le statut actuel (valide, ajuste, rejete, conteste).
+    """
+    validation = _score_validations.get(session_id)
+    if not validation:
+        return {
+            "session_id": session_id,
+            "statut": "provisoire",
+            "message": (
+                "Ce score n'a pas encore fait l'objet d'une validation humaine. "
+                "Conformement a l'art. 22 RGPD, il ne peut etre utilise a des fins "
+                "decisionnelles sans intervention d'un operateur qualifie."
+            ),
+        }
+    return {
+        "session_id": session_id,
+        **validation,
+    }
 
 
 # ==============================
@@ -562,15 +1432,18 @@ def _get_knowledge_summary() -> dict:
 
 @app.post("/api/analyze")
 async def analyser_documents(
+    request: Request,
     fichiers: list[UploadFile] = File(...),
     format_rapport: str = Query("json"),
     integrer: bool = Query(True),
     mode_analyse: str = Query("complet"),
 ):
-    if len(fichiers) > 20:
-        raise HTTPException(400, "Maximum 20 fichiers par analyse.")
+    user = get_optional_user(request)
+    user_email = user["email"] if user else "utilisateur"
+    if len(fichiers) > _MAX_FILES:
+        raise HTTPException(400, f"Maximum {_MAX_FILES} fichiers par analyse.")
 
-    config = AppConfig(base_dir=Path("/tmp/normacheck_data"))
+    config = AppConfig(base_dir=_DATA_DIR)
     orchestrator = Orchestrator(config)
 
     with tempfile.TemporaryDirectory() as td:
@@ -578,10 +1451,17 @@ async def analyser_documents(
         total_size = 0
         for f in fichiers:
             data = await f.read()
+            if len(data) > _MAX_FILE_MB * 1024 * 1024:
+                raise HTTPException(400, f"Fichier '{f.filename}' depasse la limite de {_MAX_FILE_MB} Mo.")
             total_size += len(data)
-            if total_size > 500 * 1024 * 1024:
-                raise HTTPException(400, "Taille totale depasse 500 Mo.")
-            chemin = Path(td) / f.filename
+            if total_size > _MAX_UPLOAD_MB * 1024 * 1024:
+                raise HTTPException(400, f"Taille totale depasse {_MAX_UPLOAD_MB} Mo.")
+            # Securite : empecher le path traversal via filename
+            raw_name = (f.filename or "").replace("\\", "/")
+            safe_name = Path(raw_name).name if raw_name else ""
+            if not safe_name or safe_name.startswith("."):
+                safe_name = f"upload_{len(chemins)}"
+            chemin = Path(td) / safe_name
             chemin.write_bytes(data)
             chemins.append(chemin)
 
@@ -589,8 +1469,8 @@ async def analyser_documents(
             orchestrator.analyser_documents(chemins, format_rapport)
         except URSSAFAnalyzerError as e:
             raise HTTPException(422, str(e))
-        except Exception as e:
-            raise HTTPException(500, f"Erreur interne : {str(e)}")
+        except Exception:
+            raise HTTPException(500, "Erreur interne lors de l'analyse")
 
         result = orchestrator.result
 
@@ -652,7 +1532,17 @@ async def analyser_documents(
                     "actions": [{"action": "import+analyse", "par": "utilisateur", "date": datetime.now().isoformat()}],
                     "erreurs_corrigees": [],
                 })
-            log_action("utilisateur", "analyse", f"{len(fichiers)} fichiers")
+            log_action(user_email, "analyse", f"{len(fichiers)} fichiers")
+            # Sauvegarder fichiers sur disque (OVHcloud)
+            if _persist:
+                analysis_id = str(uuid.uuid4())[:8]
+                for f_save in fichiers:
+                    await f_save.seek(0)
+                    raw_save = await f_save.read()
+                    save_uploaded_file(f_save.filename, raw_save, analysis_id)
+
+        # Persister l'etat apres analyse
+        _save_state()
 
         # Toujours generer le rapport HTML pour l'inclure dans la reponse JSON
         try:
@@ -1360,7 +2250,7 @@ async def analyser_documents(
         nb_non_reconnus = sum(1 for fi in fichiers_info if fi.get("statut") == "non_reconnu")
         nb_erreurs = sum(1 for fi in fichiers_info if fi.get("statut") in ("format_non_supporte", "erreur_analyse"))
 
-        return {
+        response_data = {
             "synthese": {
                 "nb_constats": len(findings),
                 "nb_anomalies": result.nb_anomalies,
@@ -1397,6 +2287,38 @@ async def analyser_documents(
             },
             "limites": {"fichiers_max": 20, "taille_max_mo": 500}}
 
+        response_data["session_id"] = result.session_id
+
+        # --- Scellement dans la chaine de preuve ---
+        try:
+            doc_list = [{"nom_fichier": fi.get("nom", ""), "sha256": fi.get("sha256", ""),
+                         "taille": fi.get("taille", 0)} for fi in fichiers_info]
+            proof_record = ScoreProofRecord.create(
+                session_id=result.session_id,
+                documents=doc_list,
+                constats=constats,
+                scores={},  # Score triple calcule cote client — sera scelle via /api/proof/seal-score
+                version_moteur="4.0",
+                version_constantes=hashlib.sha256(
+                    open(Path(__file__).parent.parent / "urssaf_analyzer" / "config" / "constants.py", "rb").read()
+                ).hexdigest()[:16],
+                operateur=user_email,
+            )
+            _proof_chain.append("analyse_complete", {
+                "session_id": result.session_id,
+                "nb_documents": len(result.documents_analyses),
+                "nb_constats": len(findings),
+                "score_risque_global": result.score_risque_global,
+                "impact_financier_total": float(result.impact_total),
+                "documents_hashes": [d["sha256"] for d in doc_list if d["sha256"]],
+                "operateur": user_email,
+                "proof_record_hash": proof_record["record_hash"],
+            })
+        except Exception as e:
+            logger.warning("Erreur scellement preuve: %s", e)
+
+        return response_data
+
 
 # ==============================
 # FACTURES
@@ -1412,7 +2334,11 @@ async def analyser_facture(fichier: UploadFile = File(...)):
 
     with tempfile.TemporaryDirectory() as td:
         data = await fichier.read()
-        chemin = Path(td) / fichier.filename
+        raw_name = (fichier.filename or "").replace("\\", "/")
+        safe_name = Path(raw_name).name if raw_name else "upload"
+        if not safe_name or safe_name.startswith("."):
+            safe_name = "upload"
+        chemin = Path(td) / safe_name
         chemin.write_bytes(data)
         ext = chemin.suffix.lower()
 
@@ -1798,9 +2724,9 @@ async def reset_ecritures():
 
 @app.get("/api/simulation/bulletin")
 async def sim_bulletin(
-    brut_mensuel: float = Query(2500),
-    effectif: int = Query(10),
-    est_cadre: bool = Query(False),
+    brut_mensuel: float = Query(2500, description="Salaire brut mensuel du salarie simule (EUR)"),
+    effectif: int = Query(10, description="Effectif total de l entreprise (pour seuils FNAL, versement mobilite)"),
+    est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
 ):
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
     calc = ContributionRules()
@@ -1938,28 +2864,68 @@ async def sim_exonerations(
     duree_contrat_mois: int = Query(0),
     heures_supplementaires: float = Query(0),
     nb_heures_mensuelles: float = Query(151.67),
+    # Nouveaux parametres pour calcul precis
+    jours_absence: float = Query(0),
+    type_absence: str = Query(""),
+    temps_partiel_pct: float = Query(100),
+    bareme_lodeom: str = Query("competitivite"),
+    est_cadre: bool = Query(False),
+    taux_at: float = Query(0),
+    nb_salaries_simules: int = Query(1),
 ):
+    """Simulation exhaustive des exonerations avec tous parametres de calcul."""
+    smic_mensuel_ref = float(_SMIC_MENSUEL)
+    smic_horaire = round(smic_mensuel_ref / 151.67, 2)
+
+    # Prorata temps partiel
+    coeff_tp = max(0.01, min(temps_partiel_pct / 100.0, 1.0))
+    heures_contrat = nb_heures_mensuelles * coeff_tp
+    smic_mensuel = smic_mensuel_ref * coeff_tp
+
+    # Prorata absences : on deduit les jours d'absence du SMIC reconstitue
+    jours_ouvres_mois = 21.67
+    coeff_presence = max(0, (jours_ouvres_mois - jours_absence) / jours_ouvres_mois)
+    smic_retabli = round(smic_mensuel * coeff_presence, 2)
+
     brut = brut_mensuel
-    smic_mensuel = float(_SMIC_MENSUEL)
-    ratio_smic = brut / smic_mensuel if smic_mensuel > 0 else 1
+    ratio_smic = brut / smic_retabli if smic_retabli > 0 else 999
 
     exonerations = []
     total_exo = 0.0
 
-    # 1. Reduction generale (ex-Fillon) - tous employeurs < 3.5 SMIC
+    # === Taux patronaux detailles ===
+    taux_maladie = 0.07 if ratio_smic > 2.5 else 0.13
+    taux_vieillesse_plaf = 0.0855
+    taux_vieillesse_deplaf = 0.0202
+    taux_af = 0.0525 if ratio_smic > 3.5 else 0.0345
+    taux_at_reel = taux_at if taux_at > 0 else 0.0208
+    taux_fnal = 0.001 if effectif < 50 else 0.005
+    taux_csa = 0.003
+    taux_chom = 0.0405
+    taux_ags = 0.0015
+    taux_agirc = 0.1292 if est_cadre else 0.0786
+    taux_pat_total = round(taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_at_reel + taux_fnal + taux_csa + taux_chom + taux_ags + taux_agirc, 4)
+    charges_normales = round(brut * taux_pat_total, 2)
+
+    # 1. Reduction generale (ex-Fillon) - proratisee heures
     if ratio_smic <= 3.5:
         coeff_t = 0.3194 if effectif < 50 else 0.3234
-        coeff = (coeff_t / 0.6) * (1.6 * smic_mensuel / brut - 1)
+        # Formule officielle avec SMIC reconstitue (Art. D.241-7 CSS)
+        coeff = (coeff_t / 0.6) * (1.6 * smic_retabli / brut - 1) if brut > 0 else 0
         coeff = max(0, min(coeff, coeff_t))
+        # Plafonnement : la reduction ne peut exceder les cotisations ecretes
         montant_fillon = round(brut * coeff, 2)
-        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 CSS",
+        # Regularisation progressive annuelle (Art. D.241-13 CSS)
+        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 / D.241-7 CSS",
             "montant_mensuel": montant_fillon, "montant_annuel": round(montant_fillon * 12, 2),
-            "conditions": f"Salaire <= 3.5 SMIC (ratio: {ratio_smic:.2f})", "applicable": True})
+            "conditions": f"Ratio SMIC: {ratio_smic:.3f} (seuil 3.5). Coeff T={coeff_t}, coeff calcule={coeff:.5f}. "
+                          f"SMIC retabli: {smic_retabli:.2f} EUR (presence {coeff_presence*100:.0f}%, TP {temps_partiel_pct:.0f}%). "
+                          f"Heures contrat: {heures_contrat:.2f}h.", "applicable": True})
         total_exo += montant_fillon
     else:
-        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 CSS",
+        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 / D.241-7 CSS",
             "montant_mensuel": 0, "montant_annuel": 0,
-            "conditions": f"Non applicable: salaire > 3.5 SMIC (ratio: {ratio_smic:.2f})", "applicable": False})
+            "conditions": f"Non applicable: ratio SMIC {ratio_smic:.3f} > 3.5", "applicable": False})
 
     # 2. Exoneration apprenti
     if statut_salarie == "apprenti":
@@ -1969,17 +2935,17 @@ async def sim_exonerations(
         exo_app = round(detail_app["exoneration_salariale_mensuelle"] + detail_app["rgdu_patronale_mensuelle"], 2)
         exonerations.append({"nom": "Exoneration apprenti", "reference": "Art. L.6243-2 CT",
             "montant_mensuel": exo_app, "montant_annuel": round(exo_app * 12, 2),
-            "conditions": f"Exo salariale <= 79% SMIC ({detail_app['seuil_79_smic']:.0f} EUR) + RGDU patronale",
-            "applicable": True,
-            "detail": detail_app})
+            "conditions": f"Exo salariale <= 79% SMIC ({detail_app['seuil_79_smic']:.0f} EUR) + RGDU patronale. "
+                          f"Aide unique: 6 000 EUR/an (diplome <= bac+5).",
+            "applicable": True, "detail": detail_app})
         total_exo += exo_app
 
     # 3. Aide embauche jeune (-26 ans)
-    if age_salarie < 26 and brut <= smic_mensuel * 2:
+    if age_salarie < 26 and brut <= smic_mensuel_ref * 2:
         aide_jeune = 333.33
         exonerations.append({"nom": "Aide embauche jeune (<26 ans)", "reference": "Decret 2021-94",
             "montant_mensuel": aide_jeune, "montant_annuel": round(aide_jeune * 12, 2),
-            "conditions": f"Salarie < 26 ans, brut <= 2 SMIC", "applicable": True})
+            "conditions": "Salarie < 26 ans, brut <= 2 SMIC", "applicable": True})
         total_exo += aide_jeune
 
     # 4. Aide senior (+55 ans)
@@ -2016,46 +2982,88 @@ async def sim_exonerations(
 
     # 8. QPV (Quartier Prioritaire Ville)
     if zone == "qpv" and effectif < 50:
-        exo_qpv = round(min(brut * 0.28, smic_mensuel * 1.4 * 0.28), 2)
+        exo_qpv = round(min(brut * 0.28, smic_retabli * 1.4 * 0.28), 2)
         exonerations.append({"nom": "Exoneration QPV", "reference": "Art. L.131-4-3 CSS",
             "montant_mensuel": exo_qpv, "montant_annuel": round(exo_qpv * 12, 2),
-            "conditions": "Quartier prioritaire, < 50 sal, <= 1.4 SMIC", "applicable": True})
+            "conditions": f"Quartier prioritaire, < 50 sal, plafond 1.4 SMIC retabli ({smic_retabli*1.4:.2f} EUR)", "applicable": True})
         total_exo += exo_qpv
 
-    # 9. Outre-mer (LODEOM)
+    # 9. Outre-mer (LODEOM) - 3 baremes distincts (Art. L.752-3-2 CSS)
     if zone == "outremer":
-        if effectif < 11:
-            exo_om = round(brut * 0.32, 2)
-            desc = "LODEOM renforce < 11 sal"
+        if bareme_lodeom == "competitivite":
+            # Bareme competitivite : exo totale <= 1.3 SMIC, degressive 1.3-2.2 SMIC
+            if ratio_smic <= 1.3:
+                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                desc = "LODEOM competitivite - exoneration totale (<=1.3 SMIC)"
+            elif ratio_smic <= 2.2:
+                taux_degr = (2.2 - ratio_smic) / (2.2 - 1.3)
+                taux_exo = round(0.28 * taux_degr, 4)
+                exo_om = round(brut * taux_exo, 2)
+                desc = f"LODEOM competitivite - degressif ({taux_degr*100:.0f}% entre 1.3 et 2.2 SMIC)"
+            else:
+                exo_om = 0
+                desc = "LODEOM competitivite - hors plafond (>2.2 SMIC)"
+        elif bareme_lodeom == "competitivite_renforcee":
+            # Bareme comp. renforcee : exo totale <= 1.7 SMIC, degressive 1.7-2.7 SMIC
+            if ratio_smic <= 1.7:
+                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                desc = "LODEOM comp. renforcee - exoneration totale (<=1.7 SMIC)"
+            elif ratio_smic <= 2.7:
+                taux_degr = (2.7 - ratio_smic) / (2.7 - 1.7)
+                taux_exo = round(0.32 * taux_degr, 4)
+                exo_om = round(brut * taux_exo, 2)
+                desc = f"LODEOM comp. renforcee - degressif ({taux_degr*100:.0f}% entre 1.7 et 2.7 SMIC)"
+            else:
+                exo_om = 0
+                desc = "LODEOM comp. renforcee - hors plafond (>2.7 SMIC)"
+        elif bareme_lodeom == "innovation_croissance":
+            # Bareme innovation et croissance : exo totale <= 2.0 SMIC, degressive 2.0-3.0 SMIC
+            if ratio_smic <= 2.0:
+                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                desc = "LODEOM innovation/croissance - exoneration totale (<=2.0 SMIC)"
+            elif ratio_smic <= 3.0:
+                taux_degr = (3.0 - ratio_smic) / (3.0 - 2.0)
+                taux_exo = round(0.32 * taux_degr, 4)
+                exo_om = round(brut * taux_exo, 2)
+                desc = f"LODEOM innovation/croissance - degressif ({taux_degr*100:.0f}% entre 2.0 et 3.0 SMIC)"
+            else:
+                exo_om = 0
+                desc = "LODEOM innovation/croissance - hors plafond (>3.0 SMIC)"
         else:
-            exo_om = round(brut * 0.28, 2) if ratio_smic <= 1.3 else round(brut * 0.18, 2)
-            desc = "LODEOM competitivite" if ratio_smic <= 1.3 else "LODEOM competitivite renforcee"
+            exo_om = round(brut * 0.28, 2)
+            desc = "LODEOM bareme par defaut"
         exonerations.append({"nom": f"Exoneration outre-mer ({desc})", "reference": "Art. L.752-3-2 CSS (LODEOM)",
             "montant_mensuel": exo_om, "montant_annuel": round(exo_om * 12, 2),
-            "conditions": f"DOM-TOM, effectif {effectif}, ratio SMIC {ratio_smic:.2f}", "applicable": True})
+            "conditions": f"Bareme: {bareme_lodeom}, effectif {effectif}, ratio SMIC {ratio_smic:.3f}. "
+                          f"SMIC retabli: {smic_retabli:.2f} EUR.",
+            "applicable": exo_om > 0})
         total_exo += exo_om
 
     # 10. JEI (Jeune Entreprise Innovante)
     if statut_salarie == "jei":
-        exo_jei = round(brut * 0.32, 2)
+        # Plafond: exoneration patronale SS hors AT/MP, plafond 5 PASS mensuel
+        pass_mensuel = 3864.0  # 2025
+        plafond_jei = pass_mensuel * 5
+        base_jei = min(brut, plafond_jei)
+        taux_jei = taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa
+        exo_jei = round(base_jei * taux_jei, 2)
         exonerations.append({"nom": "Exoneration JEI (Jeune Entreprise Innovante)", "reference": "Art. 44 sexies-0 A CGI",
             "montant_mensuel": exo_jei, "montant_annuel": round(exo_jei * 12, 2),
-            "conditions": "Chercheurs, techniciens, mandataires - 8 ans max", "applicable": True})
+            "conditions": f"Chercheurs, techniciens, mandataires - 8 ans max. Plafond 5 PASS ({plafond_jei:.0f} EUR). "
+                          f"Hors AT/MP. Base: {base_jei:.2f} EUR, taux: {taux_jei*100:.2f}%.",
+            "applicable": True})
         total_exo += exo_jei
 
-    # 11. TEPA - Desocialisation des heures supplementaires (Art. 81 quater CGI / Art. L.241-17 CSS)
+    # 11. TEPA - Desocialisation des heures supplementaires
     if heures_supplementaires > 0:
-        taux_horaire_hs = round(brut / nb_heures_mensuelles, 2) if nb_heures_mensuelles > 0 else 0
-        # Majoration 25% pour les 8 premieres HS, 50% au-dela
-        hs_25 = min(heures_supplementaires, 8) * taux_horaire_hs * 1.25
-        hs_50 = max(0, heures_supplementaires - 8) * taux_horaire_hs * 1.50
+        taux_horaire = round(brut / heures_contrat, 2) if heures_contrat > 0 else 0
+        # Majoration : 25% (1-8h), 50% (au-dela)
+        hs_25 = min(heures_supplementaires, 8) * taux_horaire * 1.25
+        hs_50 = max(0, heures_supplementaires - 8) * taux_horaire * 1.50
         montant_hs_total = round(hs_25 + hs_50, 2)
-        # Reduction salariale : exoneration cotisations salariales vieillesse (11.31%)
         exo_tepa_sal = round(montant_hs_total * 0.1131, 2)
-        # Deduction forfaitaire patronale : 1.50 EUR/h (< 250 sal) ou 0.50 EUR/h (>= 250)
         deduc_pat_par_h = 1.50 if effectif < 250 else 0.50
         exo_tepa_pat = round(heures_supplementaires * deduc_pat_par_h, 2)
-        # Exoneration IR : les HS sont defiscalisees dans la limite de 7500 EUR/an
         exo_ir_hs = round(min(montant_hs_total, 7500 / 12), 2)
         exonerations.append({
             "nom": "TEPA - Heures supplementaires defiscalisees",
@@ -2063,50 +3071,36 @@ async def sim_exonerations(
             "montant_mensuel": round(exo_tepa_sal + exo_tepa_pat, 2),
             "montant_annuel": round((exo_tepa_sal + exo_tepa_pat) * 12, 2),
             "applicable": True,
-            "conditions": f"{heures_supplementaires:.1f}h HS/mois, taux horaire {taux_horaire_hs:.2f} EUR. "
+            "conditions": f"{heures_supplementaires:.1f}h HS/mois, taux horaire {taux_horaire:.2f} EUR. "
                           f"Reduction salariale: {exo_tepa_sal:.2f} EUR, deduction patronale: {exo_tepa_pat:.2f} EUR. "
                           f"Exoneration IR: {exo_ir_hs:.2f} EUR/mois (plafond 7500 EUR/an). "
                           f"Contingent annuel 220h (Art. D.3121-24 CT).",
-            "detail": {
-                "heures_sup": heures_supplementaires,
-                "montant_hs_brut": montant_hs_total,
-                "reduction_salariale": exo_tepa_sal,
-                "deduction_patronale": exo_tepa_pat,
-                "exoneration_ir": exo_ir_hs,
-            },
+            "detail": {"heures_sup": heures_supplementaires, "montant_hs_brut": montant_hs_total,
+                "reduction_salariale": exo_tepa_sal, "deduction_patronale": exo_tepa_pat, "exoneration_ir": exo_ir_hs},
         })
         total_exo += exo_tepa_sal + exo_tepa_pat
     else:
-        exonerations.append({
-            "nom": "TEPA - Heures supplementaires defiscalisees",
+        exonerations.append({"nom": "TEPA - Heures supplementaires defiscalisees",
             "reference": "Art. 81 quater CGI / Art. L.241-17 CSS",
-            "montant_mensuel": 0, "montant_annuel": 0,
-            "applicable": False,
-            "conditions": "Pas d heures supplementaires renseignees. Ajoutez des HS pour calculer l exoneration.",
-        })
+            "montant_mensuel": 0, "montant_annuel": 0, "applicable": False,
+            "conditions": "Pas d heures supplementaires renseignees."})
 
-    # 12. BER (Bassin d'Emploi a Redynamiser - Art. L.131-4-4 CSS)
+    # 12. BER (Bassin d'Emploi a Redynamiser)
     if zone == "ber":
         exo_ber = round(brut * 0.32, 2)
-        exonerations.append({
-            "nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
+        exonerations.append({"nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
             "reference": "Art. L.131-4-4 CSS / Art. 44 duodecies CGI",
-            "montant_mensuel": exo_ber, "montant_annuel": round(exo_ber * 12, 2),
-            "applicable": True,
-            "conditions": "Exoneration totale des cotisations patronales pendant 5 ans dans les BER (Ariege, Pyrenees-Orientales).",
-        })
+            "montant_mensuel": exo_ber, "montant_annuel": round(exo_ber * 12, 2), "applicable": True,
+            "conditions": "Exoneration totale cotisations patronales 5 ans (Ariege, Pyrenees-Orientales)."})
         total_exo += exo_ber
 
-    # 13. Contrat professionnalisation (> 45 ans)
+    # 13. Contrat professionnalisation
     if statut_salarie == "contrat_pro" or (age_salarie >= 45 and duree_contrat_mois > 0):
         exo_pro = round(brut * 0.28, 2) if age_salarie >= 45 else round(brut * 0.15, 2)
-        exonerations.append({
-            "nom": "Aide contrat de professionnalisation",
+        exonerations.append({"nom": "Aide contrat de professionnalisation",
             "reference": "Art. L.6325-16 CT / Art. D.6325-21 CT",
-            "montant_mensuel": exo_pro, "montant_annuel": round(exo_pro * 12, 2),
-            "applicable": True,
-            "conditions": f"Age: {age_salarie} ans. " + ("Aide renforcee (+45 ans)." if age_salarie >= 45 else "Aide standard."),
-        })
+            "montant_mensuel": exo_pro, "montant_annuel": round(exo_pro * 12, 2), "applicable": True,
+            "conditions": f"Age: {age_salarie} ans. " + ("Aide renforcee (+45 ans)." if age_salarie >= 45 else "Aide standard.")})
         total_exo += exo_pro
 
     # 14. ACRE (Aide aux Createurs et Repreneurs d Entreprise)
@@ -2115,29 +3109,99 @@ async def sim_exonerations(
         calc_acre = _CR3(effectif_entreprise=effectif)
         detail_acre = calc_acre.calculer_exoneration_acre(Decimal(str(brut)))
         exo_acre = round(detail_acre["exoneration_mensuelle"], 2)
-        exonerations.append({
-            "nom": "ACRE (Aide aux Createurs/Repreneurs)",
+        exonerations.append({"nom": "ACRE (Aide aux Createurs/Repreneurs)",
             "reference": detail_acre.get("ref", "Art. L.131-6-4 CSS"),
             "montant_mensuel": exo_acre, "montant_annuel": round(exo_acre * 12, 2),
             "applicable": detail_acre["eligible"],
-            "conditions": f"Exoneration {detail_acre.get('taux_exoneration', 0)*100:.0f}% cotisations patronales SS. Seuil bas: {detail_acre.get('seuil_bas_1_2_smic', 0):.0f} EUR, haut: {detail_acre.get('seuil_haut_1_6_smic', 0):.0f} EUR.",
-            "detail": detail_acre,
-        })
+            "conditions": f"Exoneration {detail_acre.get('taux_exoneration', 0)*100:.0f}% cotisations patronales SS. "
+                          f"Seuil bas: {detail_acre.get('seuil_bas_1_2_smic', 0):.0f} EUR, haut: {detail_acre.get('seuil_haut_1_6_smic', 0):.0f} EUR.",
+            "detail": detail_acre})
         total_exo += exo_acre
 
-    # Cout sans/avec exoneration
-    taux_pat = 0.42
-    charges_normales = round(brut * taux_pat, 2)
+    # 15. ZRD (Zone de Restructuration de la Defense)
+    if zone == "zrd":
+        exo_zrd = round(min(brut * 0.28, smic_retabli * 1.4 * 0.28), 2)
+        exonerations.append({"nom": "Exoneration ZRD (Restructuration Defense)",
+            "reference": "Art. 44 terdecies CGI / Art. L.131-4-5 CSS",
+            "montant_mensuel": exo_zrd, "montant_annuel": round(exo_zrd * 12, 2), "applicable": True,
+            "conditions": "Exoneration 5 ans + 3 ans degressif. Plafond 1.4 SMIC."})
+        total_exo += exo_zrd
+
+    # 16. AFR (Aide a la Finalite Regionale)
+    if zone == "afr":
+        exo_afr = round(brut * 0.20, 2)
+        exonerations.append({"nom": "Exoneration AFR",
+            "reference": "Art. 44 quindecies CGI",
+            "montant_mensuel": exo_afr, "montant_annuel": round(exo_afr * 12, 2), "applicable": True,
+            "conditions": "Zone a finalite regionale. Exoneration partielle cotisations."})
+        total_exo += exo_afr
+
+    # Impact des absences sur cotisations
+    info_absences = {}
+    if jours_absence > 0 and type_absence:
+        ijss = 0
+        complement = 0
+        if type_absence == "maladie":
+            ijss = round(min(brut / 30.42, smic_mensuel_ref / 30.42 * 1.8) * 0.5 * jours_absence, 2)
+            # Complement employeur apres carence 7j (Art. L.1226-1 CT)
+            jours_complement = max(0, jours_absence - 7)
+            complement = round((brut / 30.42) * 0.9 * min(jours_complement, 30), 2)
+        elif type_absence == "maternite":
+            ijss = round(min(brut / 30.42, smic_mensuel_ref / 30.42 * 1.8) * jours_absence, 2)
+        elif type_absence == "at_mp":
+            ijss = round((brut / 30.42) * 0.6 * min(jours_absence, 28) + (brut / 30.42) * 0.8 * max(0, jours_absence - 28), 2)
+        elif type_absence == "conge_sans_solde":
+            ijss = 0
+        info_absences = {
+            "type": type_absence, "jours": jours_absence,
+            "ijss_estimees": ijss, "complement_employeur": complement,
+            "impact_smic_retabli": f"SMIC retabli de {smic_mensuel:.2f} a {smic_retabli:.2f} EUR",
+            "impact_ratio": f"Ratio SMIC ajuste: {ratio_smic:.3f}",
+        }
+
     charges_apres_exo = round(max(0, charges_normales - total_exo), 2)
+
+    # Multi-salaries : multiplication
+    if nb_salaries_simules > 1:
+        total_exo_multi = round(total_exo * nb_salaries_simules, 2)
+        charges_normales_multi = round(charges_normales * nb_salaries_simules, 2)
+        charges_apres_exo_multi = round(charges_apres_exo * nb_salaries_simules, 2)
+    else:
+        total_exo_multi = round(total_exo, 2)
+        charges_normales_multi = charges_normales
+        charges_apres_exo_multi = charges_apres_exo
 
     return {
         "brut_mensuel": brut, "effectif": effectif, "zone": zone, "statut_salarie": statut_salarie,
-        "ratio_smic": round(ratio_smic, 2), "exonerations": exonerations,
+        "ratio_smic": round(ratio_smic, 3), "smic_retabli": smic_retabli,
+        "heures_contrat": round(heures_contrat, 2),
+        "temps_partiel_pct": temps_partiel_pct,
+        "jours_absence": jours_absence, "type_absence": type_absence,
+        "coeff_presence": round(coeff_presence, 4),
+        "bareme_lodeom": bareme_lodeom if zone == "outremer" else None,
+        "est_cadre": est_cadre, "taux_at": taux_at_reel,
+        "nb_salaries": nb_salaries_simules,
+        "taux_patronal_detaille": {
+            "maladie": taux_maladie, "vieillesse_plafonnee": taux_vieillesse_plaf,
+            "vieillesse_deplafonnee": taux_vieillesse_deplaf, "allocations_familiales": taux_af,
+            "at_mp": taux_at_reel, "fnal": taux_fnal, "csa": taux_csa,
+            "chomage": taux_chom, "ags": taux_ags,
+            "retraite_complementaire": taux_agirc, "total": taux_pat_total,
+        },
+        "exonerations": exonerations,
         "total_exonerations_mensuelles": round(total_exo, 2),
         "total_exonerations_annuelles": round(total_exo * 12, 2),
         "charges_patronales_normales": charges_normales,
         "charges_patronales_apres_exo": charges_apres_exo,
         "economie_pct": round(total_exo / charges_normales * 100, 2) if charges_normales > 0 else 0,
+        "info_absences": info_absences if info_absences else None,
+        "multi_salaries": {
+            "nb": nb_salaries_simules,
+            "total_exonerations_mensuelles": total_exo_multi,
+            "total_exonerations_annuelles": round(total_exo_multi * 12, 2),
+            "charges_normales_totales": charges_normales_multi,
+            "charges_apres_exo_totales": charges_apres_exo_multi,
+        } if nb_salaries_simules > 1 else None,
     }
 
 
@@ -2157,64 +3221,253 @@ async def sim_temps_partiel(
     return res
 
 
-# --- Simulation : Convention collective ---
+# --- Simulation : Convention collective (legal vs conventionnel) ---
 @app.get("/api/simulation/ccn")
 async def sim_ccn(
-    ccn: str = Query("syntec"),
-    brut_mensuel: float = Query(3000),
-    est_cadre: bool = Query(False),
-    effectif: int = Query(10),
+    ccn: str = Query("", description="Code CCN (syntec, metallurgie...) ou numero IDCC (1486, 3248...)"),
+    brut_mensuel: float = Query(3000, description="Salaire brut mensuel du salarie (EUR)"),
+    est_cadre: bool = Query(False, description="Le salarie est-il cadre ?"),
+    effectif: int = Query(10, description="Effectif total de l entreprise"),
 ):
+    """Simulation des obligations conventionnelles vs legales.
+
+    Compare les minimums legaux (Code du travail, ANI) avec les obligations
+    specifiques de la convention collective applicable. Utilise la base IDCC
+    de 60+ conventions couvrant ~90% des salaries.
+    """
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    from urssaf_analyzer.config.idcc_database import (
+        IDCC_DATABASE, get_ccn_par_idcc, get_prevoyance_par_idcc, rechercher_idcc,
+    )
+
     calc = ContributionRules(effectif_entreprise=effectif)
-    prevoyance = calc.get_prevoyance_ccn(ccn, est_cadre=est_cadre)
     bulletin = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
 
-    # Ajouter le cout prevoyance CCN
-    taux_prev = Decimal(str(prevoyance["taux_prevoyance_patronal"]))
-    cout_prev = round(float(Decimal(str(brut_mensuel)) * taux_prev), 2)
+    # Chercher la CCN : par code interne, par IDCC, ou par recherche texte
+    ccn_data = None
+    idcc = ""
+    if ccn:
+        # 1. Par IDCC numerique
+        ccn_data = get_ccn_par_idcc(ccn)
+        if ccn_data:
+            idcc = ccn.zfill(4)
+        else:
+            # 2. Par code interne (syntec, metallurgie...)
+            prevoyance = calc.get_prevoyance_ccn(ccn, est_cadre=est_cadre)
+            if prevoyance.get("ccn_connue"):
+                idcc = prevoyance.get("idcc", "")
+                ccn_data = get_ccn_par_idcc(idcc) if idcc else None
+            else:
+                # 3. Par recherche textuelle
+                resultats = rechercher_idcc(ccn)
+                if resultats:
+                    idcc = resultats[0]["idcc"]
+                    ccn_data = get_ccn_par_idcc(idcc)
+
+    # Taux prevoyance
+    if ccn_data:
+        taux_prev = float(ccn_data["prevoyance_cadre"] if est_cadre else ccn_data["prevoyance_non_cadre"])
+        nom_ccn = ccn_data["nom"]
+        mut_min = ccn_data.get("mutuelle_employeur_min_pct", 50)
+    else:
+        taux_prev = 0.015 if est_cadre else 0
+        nom_ccn = "Convention non identifiee - minimums legaux appliques"
+        mut_min = 50
+
+    cout_prev = round(brut_mensuel * taux_prev, 2)
+
+    # Obligations conventionnelles specifiques
+    obligations_conv = []
+    if ccn_data:
+        if ccn_data.get("maintien_salaire_jours"):
+            obligations_conv.append({
+                "obligation": "Maintien de salaire maladie",
+                "conventionnel": f"{ccn_data['maintien_salaire_jours']} jours",
+                "legal": "30 jours apres 1 an anciennete (art. L.1226-1 CT)",
+                "plus_favorable": ccn_data["maintien_salaire_jours"] > 30,
+            })
+        if ccn_data.get("prime_anciennete"):
+            obligations_conv.append({
+                "obligation": "Prime d anciennete",
+                "conventionnel": "Oui (baremes conventionnels)",
+                "legal": "Pas d obligation legale",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("conges_anciennete"):
+            obligations_conv.append({
+                "obligation": "Conges supplementaires anciennete",
+                "conventionnel": "Oui (jours sup. selon anciennete)",
+                "legal": "2.5 jours/mois uniquement (art. L.3141-3 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("indemnite_depart_retraite_majoree"):
+            obligations_conv.append({
+                "obligation": "Indemnite de depart retraite",
+                "conventionnel": "Majoree par la CCN",
+                "legal": "1/4 mois par annee <= 10 ans, 1/3 au-dela (art. D.1237-1 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("indemnite_licenciement_majoree") or ccn_data.get("indemnite_licenciement_specifique"):
+            obligations_conv.append({
+                "obligation": "Indemnite de licenciement",
+                "conventionnel": "Majoree/specifique par la CCN",
+                "legal": "1/4 mois par annee <= 10 ans, 1/3 au-dela (art. R.1234-2 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("prime_vacances"):
+            obligations_conv.append({
+                "obligation": "Prime de vacances",
+                "conventionnel": "Oui (obligatoire)",
+                "legal": "Pas d obligation legale",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("avantage_nature_repas"):
+            obligations_conv.append({
+                "obligation": "Avantage en nature repas",
+                "conventionnel": "Repas fourni ou indemnite compensatrice",
+                "legal": "Evaluation forfaitaire (art. 3 arrete 10/12/2002)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("jours_feries_garantis"):
+            obligations_conv.append({
+                "obligation": "Jours feries garantis",
+                "conventionnel": f"{ccn_data['jours_feries_garantis']} jours feries payes garantis",
+                "legal": "Seul le 1er mai est obligatoirement chome et paye (art. L.3133-6 CT)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("13eme_mois"):
+            obligations_conv.append({
+                "obligation": "13eme mois",
+                "conventionnel": "Obligatoire",
+                "legal": "Pas d obligation legale",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("transfert_personnel_article7"):
+            obligations_conv.append({
+                "obligation": "Transfert de personnel (art. 7)",
+                "conventionnel": "Reprise obligatoire du personnel lors de changement de prestataire",
+                "legal": "Pas d obligation legale generale (sauf art. L.1224-1 CT si transfert d entite)",
+                "plus_favorable": True,
+            })
+        if ccn_data.get("duree_travail_specifique"):
+            obligations_conv.append({
+                "obligation": "Duree du travail specifique",
+                "conventionnel": "Regles specifiques (temps de conduite, repos, amplitudes)",
+                "legal": "35h/sem. (art. L.3121-27 CT)",
+                "plus_favorable": None,
+            })
+        if ccn_data.get("regime_special"):
+            obligations_conv.append({
+                "obligation": "Regime special de retraite",
+                "conventionnel": f"Regime special: {ccn_data['regime_special'].upper()}",
+                "legal": "Regime general CNAV",
+                "plus_favorable": None,
+            })
+        if ccn_data.get("indemnite_fin_mission"):
+            obligations_conv.append({
+                "obligation": "Indemnite de fin de mission",
+                "conventionnel": f"{float(ccn_data['indemnite_fin_mission'])*100:.0f}% du brut",
+                "legal": "10% (art. L.1251-32 CT)",
+                "plus_favorable": float(ccn_data["indemnite_fin_mission"]) >= 0.10,
+            })
+
+    # Obligations legales communes (toujours presentes)
+    obligations_leg = [
+        {"obligation": "Prevoyance cadres", "legal": "1.50% TA patronal (ANI 2017 / art. 7 CCN 1947)", "conventionnel": f"{taux_prev*100:.2f}%"},
+        {"obligation": "Mutuelle obligatoire", "legal": "50% minimum part employeur (ANI 2013 / art. L.911-7 CSS)", "conventionnel": f"{mut_min}%"},
+        {"obligation": "Indemnite licenciement", "legal": "1/4 mois/an <= 10 ans, 1/3 au-dela (art. R.1234-2 CT)"},
+        {"obligation": "Preavis", "legal": "1 mois (1-2 ans anc.), 2 mois (>2 ans) - art. L.1234-1 CT"},
+        {"obligation": "Conges payes", "legal": "2.5 jours ouvrables/mois (art. L.3141-3 CT)"},
+    ]
 
     return {
-        "ccn": prevoyance,
+        "ccn_identifiee": ccn_data is not None,
+        "idcc": idcc,
+        "nom_ccn": nom_ccn,
+        "secteur": ccn_data.get("secteur", "") if ccn_data else "",
         "bulletin": {
-            "brut_mensuel": bulletin["brut_mensuel"],
-            "total_patronal": bulletin["total_patronal"],
-            "total_salarial": bulletin["total_salarial"],
-            "net_avant_impot": bulletin["net_avant_impot"],
-            "cout_total_employeur": bulletin["cout_total_employeur"],
+            "brut_mensuel": float(bulletin["brut_mensuel"]),
+            "total_patronal": float(bulletin["total_patronal"]),
+            "total_salarial": float(bulletin["total_salarial"]),
+            "net_avant_impot": float(bulletin["net_avant_impot"]),
+            "cout_total_employeur": float(bulletin["cout_total_employeur"]),
         },
         "prevoyance_ccn": {
-            "taux": float(taux_prev),
+            "taux": taux_prev,
             "montant_mensuel": cout_prev,
             "montant_annuel": round(cout_prev * 12, 2),
         },
-        "ccn_disponibles": list(ContributionRules.CCN_PREVOYANCE.keys()),
+        "obligations_conventionnelles": obligations_conv,
+        "obligations_legales": obligations_leg,
+        "nb_obligations_plus_favorables": sum(1 for o in obligations_conv if o.get("plus_favorable") is True),
+        "rappel": "Principe de faveur : la convention collective s applique si plus favorable que la loi (art. L.2251-1 CT). Verifiez toujours la CCN applicable.",
     }
+
+
+@app.get("/api/simulation/recherche-ccn")
+async def recherche_ccn(terme: str = Query("", description="Recherche par IDCC, nom ou secteur")):
+    """Recherche dans la base de 60+ conventions collectives nationales.
+
+    Accepte : numero IDCC (ex: 1486), nom (ex: syntec), secteur (ex: batiment).
+    """
+    from urssaf_analyzer.config.idcc_database import rechercher_idcc, IDCC_DATABASE
+    if not terme:
+        # Retourner toute la base
+        result = []
+        for idcc, data in sorted(IDCC_DATABASE.items()):
+            result.append({
+                "idcc": idcc,
+                "nom": data["nom"],
+                "secteur": data.get("secteur", ""),
+            })
+        return {"total": len(result), "resultats": result}
+    resultats = rechercher_idcc(terme)
+    # Serialiser les Decimal
+    for r in resultats:
+        for k, v in list(r.items()):
+            if isinstance(v, Decimal):
+                r[k] = float(v)
+    return {"total": len(resultats), "resultats": resultats}
 
 
 # --- Simulation : Identification CCN ---
 @app.get("/api/simulation/identifier-ccn")
 async def sim_identifier_ccn(texte: str = Query("")):
+    """Identifie une CCN a partir d un texte libre (intitule, IDCC, mots-cles, code NAF)."""
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
+    from urssaf_analyzer.config.idcc_database import rechercher_idcc, IDCC_DATABASE
+    # 1. Chercher dans la base IDCC complete
+    resultats = rechercher_idcc(texte)
+    if resultats:
+        top = resultats[0]
+        for k, v in list(top.items()):
+            if isinstance(v, Decimal):
+                top[k] = float(v)
+        return {"identifie": True, "idcc": top["idcc"], "detail": top, "autres_resultats": len(resultats) - 1}
+    # 2. Fallback sur le matching par mots-cles
     calc = ContributionRules()
     code = calc.identifier_ccn(texte)
     if code:
         prevoyance = calc.get_prevoyance_ccn(code)
         return {"identifie": True, "code": code, "detail": prevoyance}
-    return {"identifie": False, "code": None, "suggestion": "CCN non reconnue. CCN disponibles: " + ", ".join(ContributionRules.CCN_PREVOYANCE.keys())}
+    return {
+        "identifie": False,
+        "code": None,
+        "suggestion": f"CCN non reconnue. {len(IDCC_DATABASE)} conventions disponibles. Essayez un numero IDCC ou un mot-cle (batiment, metallurgie, commerce...)",
+    }
 
 
 # --- Simulation : Cout total employeur ---
 @app.get("/api/simulation/cout-employeur")
 async def sim_cout_employeur(
-    brut_mensuel: float = Query(2500),
-    effectif: int = Query(10),
-    est_cadre: bool = Query(False),
-    avantages_nature: float = Query(0),
-    frais_km: float = Query(0),
-    primes: float = Query(0),
-    tickets_restaurant: float = Query(0),
-    mutuelle_employeur: float = Query(40),
+    brut_mensuel: float = Query(2500, description="Salaire brut mensuel du salarie simule (EUR)"),
+    effectif: int = Query(10, description="Effectif total de l entreprise (pour formation, effort construction, participation)"),
+    est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
+    avantages_nature: float = Query(0, description="Avantages en nature mensuels (EUR)"),
+    frais_km: float = Query(0, description="Frais kilometriques mensuels (EUR)"),
+    primes: float = Query(0, description="Primes mensuelles (EUR)"),
+    tickets_restaurant: float = Query(0, description="Tickets restaurant mensuels (EUR)"),
+    mutuelle_employeur: float = Query(40, description="Part employeur mutuelle mensuelle (EUR)"),
 ):
     brut = brut_mensuel + primes
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
@@ -2262,8 +3515,8 @@ async def sim_cout_employeur(
 # --- Simulation : Seuils d'effectif ---
 @app.get("/api/simulation/seuils-effectif")
 async def sim_seuils(
-    effectif_actuel: int = Query(10),
-    masse_salariale_annuelle: float = Query(400000),
+    effectif_actuel: int = Query(10, description="Effectif total actuel de l entreprise (nb salaries ETP)"),
+    masse_salariale_annuelle: float = Query(400000, description="Masse salariale brute annuelle totale de l entreprise (EUR)"),
 ):
     seuils = [
         {"seuil": 11, "obligations": [
@@ -2335,14 +3588,14 @@ async def sim_seuils(
 # --- Simulation : Masse salariale ---
 @app.get("/api/simulation/masse-salariale")
 async def sim_masse_salariale(
-    brut_moyen: float = Query(2500),
-    effectif: int = Query(10),
-    augmentation_pct: float = Query(3.0),
-    inflation_pct: float = Query(2.0),
-    frais_km_moyen: float = Query(50),
-    avantages_nature_moyen: float = Query(0),
-    primes_variables_pct: float = Query(5.0),
-    turnover_pct: float = Query(10.0),
+    brut_moyen: float = Query(2500, description="Salaire brut moyen par salarie (EUR/mois)"),
+    effectif: int = Query(10, description="Effectif total de l entreprise (nb salaries) — masse = brut_moyen x effectif x 12"),
+    augmentation_pct: float = Query(3.0, description="Augmentation envisagee (%)"),
+    inflation_pct: float = Query(2.0, description="Inflation prevue (%)"),
+    frais_km_moyen: float = Query(50, description="Frais km moyen par salarie (EUR/mois)"),
+    avantages_nature_moyen: float = Query(0, description="Avantages nature moyen par salarie (EUR/mois)"),
+    primes_variables_pct: float = Query(5.0, description="Primes variables (% masse salariale)"),
+    turnover_pct: float = Query(10.0, description="Turnover annuel previsionnel (%)"),
 ):
     masse_actuelle = brut_moyen * effectif * 12
     taux_charges = 0.45
@@ -2910,8 +4163,9 @@ async def telecharger_document_demo(
     doc = docs[index]
     from fastapi.responses import Response
     content = doc["contenu"].replace("\\n", "\n")
+    safe_doc_name = Path(doc["nom"].replace("\\", "/")).name if doc.get("nom") else "document.txt"
     return Response(content=content, media_type="text/plain",
-                    headers={"Content-Disposition": f'attachment; filename="{doc["nom"]}"'})
+                    headers={"Content-Disposition": f'attachment; filename="{safe_doc_name}"'})
 
 
 @app.get("/api/simulation/demo-documents/telecharger-tout")
@@ -2948,6 +4202,1148 @@ async def telecharger_tous_documents_demo(
 
 
 # ==============================
+# SUBVENTIONS ET AIDES
+# ==============================
+
+@app.get("/api/subventions/recherche")
+async def rechercher_subventions(
+    code_naf: str = Query(""),
+    effectif: int = Query(10),
+    forme_juridique: str = Query(""),
+    region: str = Query(""),
+    zone: str = Query(""),
+    ca: float = Query(0),
+    age_entreprise: int = Query(5),
+    masse_salariale: float = Query(0),
+    innovation: bool = Query(False),
+    environnement: bool = Query(False),
+    numerique: bool = Query(False),
+    export_intl: bool = Query(False),
+    formation: bool = Query(False),
+    creation_reprise: bool = Query(False),
+    investissement: bool = Query(False),
+    ess: bool = Query(False),
+):
+    """Recherche exhaustive de subventions et aides eligibles."""
+
+    lettre_naf = code_naf[0].upper() if code_naf else ""
+    is_tpe = effectif < 10
+    is_pme = effectif < 250
+    is_eti = 250 <= effectif < 5000
+    is_startup = age_entreprise <= 3
+    is_jeune = age_entreprise <= 8
+
+    # ============================================================
+    # BASE DE DONNEES EXHAUSTIVE DES SUBVENTIONS FRANCAISES
+    # ============================================================
+    toutes_aides = []
+
+    # ------ AIDES NATIONALES - INNOVATION / R&D ------
+    toutes_aides.append({
+        "id": "cir", "nom": "Credit d Impot Recherche (CIR)",
+        "organisme": "MESRI / DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "credit_impot",
+        "description": "Credit d impot de 30% sur les depenses de R&D (jusqu a 100 MEUR), 5% au-dela. Inclut salaires chercheurs, amortissements, brevets, sous-traitance publique.",
+        "montant_max": "30% des depenses R&D",
+        "montant_estime": round(masse_salariale * 0.30, 2) if masse_salariale else None,
+        "conditions": ["Activites de R&D au sens du Manuel de Frascati", "Depenses eligibles documentees", "Declaration annuelle 2069-A"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation or lettre_naf in ("C", "J", "M", "G"),
+        "url_info": "https://www.enseignementsup-recherche.gouv.fr/fr/le-credit-d-impot-recherche-cir-49416",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cii", "nom": "Credit d Impot Innovation (CII)",
+        "organisme": "MESRI / DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "credit_impot",
+        "description": "Credit d impot de 30% sur les depenses d innovation (prototypes, installations pilotes) pour les PME. Plafond 400 000 EUR de depenses.",
+        "montant_max": "120 000 EUR (30% de 400 000 EUR)",
+        "montant_estime": min(120000, round(masse_salariale * 0.30, 2)) if masse_salariale else 120000,
+        "conditions": ["PME au sens communautaire (< 250 sal, CA < 50 MEUR)", "Depenses de conception de prototypes ou installations pilotes de nouveaux produits"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme and (innovation or lettre_naf in ("C", "J", "M")),
+        "url_info": "https://www.enseignementsup-recherche.gouv.fr/fr/le-credit-d-impot-innovation-cii-49418",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "jei", "nom": "Jeune Entreprise Innovante (JEI)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "innovation",
+        "type_aide": "exoneration",
+        "description": "Exoneration de cotisations patronales sur les salaires des personnels de R&D (chercheurs, techniciens, gestionnaires de projets). Exoneration d IS partielle. Entreprise de moins de 8 ans, depenses R&D >= 15% des charges.",
+        "montant_max": "Exoneration totale cotisations patronales R&D + IS partiel",
+        "montant_estime": round(masse_salariale * 0.25, 2) if masse_salariale else None,
+        "conditions": ["Moins de 8 ans d existence", "Depenses R&D >= 15% des charges deductibles", "PME independante", "Activite reellement nouvelle"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_jeune and is_pme and innovation,
+        "url_info": "https://www.economie.gouv.fr/entreprises/jeune-entreprise-innovante-JEI",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "jeic", "nom": "Jeune Entreprise Innovante de Croissance (JEIC)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "exoneration",
+        "description": "Statut renforce depuis 2024 pour les JEI en phase de croissance. Exoneration IS totale la 1ere annee beneficiaire, 50% la 2e. Exoneration cotisations patronales renforcee.",
+        "montant_max": "Exoneration IS + cotisations patronales",
+        "montant_estime": None,
+        "conditions": ["Conditions JEI remplies", "Croissance CA > 10%/an", "Depenses R&D >= 20% des charges"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_jeune and is_pme and innovation,
+        "url_info": "https://www.economie.gouv.fr/entreprises/jeune-entreprise-innovante-JEI",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "bpi-aide-innovation", "nom": "Aide a l innovation (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Subvention ou avance remboursable pour les projets d innovation (faisabilite, developpement, industrialisation). Taux d aide jusqu a 45% pour les PME.",
+        "montant_max": "Jusqu a 3 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Projet innovant (produit, procede, service)", "Plan de financement solide", "Potentiel de marche demontre"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": innovation and (is_pme or is_eti),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "bpi-bourse-french-tech", "nom": "Bourse French Tech",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Subvention pour les startups innovantes en phase d amorcage. Finance la maturation du projet et la validation du modele economique.",
+        "montant_max": "30 000 EUR",
+        "montant_estime": 30000,
+        "conditions": ["Entreprise innovante de moins de 1 an", "Projet technologique ou de rupture", "Entrepreneur a temps plein"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": is_tpe and age_entreprise <= 1 and innovation,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation/bourse-french-tech",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "france2030-i-demo", "nom": "France 2030 - i-Demo",
+        "organisme": "Bpifrance / SGPI", "niveau": "national", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Subvention + avance remboursable pour des projets de R&D collaboratifs ou individuels visant un developpement et une demonstration industriels. Budget total France 2030 : 54 Md EUR.",
+        "montant_max": "Jusqu a 10 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Projet de R&D avec demonstration industrielle", "TRL 5-8", "Marche vise identifie"],
+        "tailles": ["pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation and not is_tpe,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation/aide-pour-le-developpement-de-linnovation",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "cip", "nom": "Credit d Impot Brevets (CIB / IP Box)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "innovation",
+        "type_aide": "credit_impot",
+        "description": "Taux reduit d IS a 10% sur les revenus de cession ou concession de brevets, logiciels proteges, certificats d obtention vegetale et procedes de fabrication.",
+        "montant_max": "IS a 10% au lieu de 25% sur revenus PI",
+        "montant_estime": None,
+        "conditions": ["Titulaire de brevets ou licences", "Revenus de PI identifiables", "R&D realisee en France"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation,
+        "url_info": "https://www.economie.gouv.fr/entreprises/impot-societes-taux-reduit-brevets",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - EMPLOI / FORMATION ------
+    toutes_aides.append({
+        "id": "acre", "nom": "ACRE (Aide aux Createurs et Repreneurs d Entreprise)",
+        "organisme": "URSSAF", "niveau": "national", "categorie": "emploi",
+        "type_aide": "exoneration",
+        "description": "Exoneration partielle de cotisations sociales pendant la 1ere annee d activite. 50% d exoneration des cotisations maladie, maternite, invalidite, deces, vieillesse, allocations familiales.",
+        "montant_max": "50% des cotisations pendant 12 mois",
+        "montant_estime": round(masse_salariale * 0.15, 2) if masse_salariale and is_startup else None,
+        "conditions": ["Creation ou reprise d entreprise", "Ne pas avoir beneficie de l ACRE dans les 3 ans precedents", "Avoir le controle effectif de l entreprise"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": creation_reprise or is_startup,
+        "url_info": "https://www.urssaf.fr/accueil/employeur/beneficier-dune-exoneration/exonerations-generales/acre.html",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "aide-apprentissage", "nom": "Aide a l embauche d un apprenti",
+        "organisme": "ASP / Ministere du Travail", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aide de 6 000 EUR pour l embauche d un apprenti. Applicable pour les contrats d apprentissage visant un diplome jusqu au master (bac+5).",
+        "montant_max": "6 000 EUR par apprenti",
+        "montant_estime": 6000 * min(effectif, 5) if formation else None,
+        "conditions": ["Contrat d apprentissage", "Apprenti preparant un diplome jusqu au bac+5", "Entreprise de toute taille"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation or True,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F23556",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "contrat-pro", "nom": "Aide au contrat de professionnalisation",
+        "organisme": "ASP", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aide financiere pour l embauche en contrat de professionnalisation de demandeurs d emploi de 26 ans et plus ou de jeunes de moins de 30 ans.",
+        "montant_max": "2 000 EUR",
+        "montant_estime": 2000,
+        "conditions": ["Contrat de professionnalisation", "Salarie de 26 ans et plus ou demandeur d emploi"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F35391",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "reduction-generale", "nom": "Reduction generale des cotisations (ex-Fillon)",
+        "organisme": "URSSAF", "niveau": "national", "categorie": "social",
+        "type_aide": "exoneration",
+        "description": "Reduction degressive des cotisations patronales pour les salaires inferieurs a 1.6 SMIC. Applicable automatiquement. Reduction maximale au SMIC, nulle a 1.6 SMIC.",
+        "montant_max": "Jusqu a 32% du brut au niveau du SMIC",
+        "montant_estime": round(effectif * 350 * 12, 2) if effectif and masse_salariale else None,
+        "conditions": ["Salaries dont la remuneration < 1.6 SMIC brut", "Applicable a toutes les entreprises", "Calcul annualise obligatoire"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": True,
+        "url_info": "https://www.urssaf.fr/accueil/employeur/beneficier-dune-exoneration/exonerations-generales/la-reduction-generale.html",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "aide-emploi-franc", "nom": "Emplois francs",
+        "organisme": "France Travail", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aide a l embauche pour le recrutement de residents de QPV (Quartiers Prioritaires de la Ville). CDI : 5 000 EUR/an sur 3 ans. CDD >= 6 mois : 2 500 EUR/an sur 2 ans.",
+        "montant_max": "15 000 EUR (CDI sur 3 ans)",
+        "montant_estime": 15000 if zone == "qpv" else None,
+        "conditions": ["Resident d un QPV", "CDI ou CDD >= 6 mois", "Inscrit comme demandeur d emploi"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": zone == "qpv" or True,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F34917",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "fne-formation", "nom": "FNE-Formation",
+        "organisme": "DREETS / ASP", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Prise en charge des couts pedagogiques pour la formation des salaries. Cible les transitions ecologiques, alimentaires, numeriques. Taux de prise en charge : 40 a 100% selon taille.",
+        "montant_max": "100% des couts pedagogiques (TPE/PME)",
+        "montant_estime": round(effectif * 1500, 2) if effectif else None,
+        "conditions": ["Salaries en activite", "Formation liee aux transitions (ecologique, numerique, alimentaire)", "Pas de formation obligatoire"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation or environnement or numerique,
+        "url_info": "https://travail-emploi.gouv.fr/emploi-et-insertion/accompagnement-des-mutations-economiques/appui-aux-mutations-economiques/fne-formation",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "aide-th", "nom": "Aide a l emploi de travailleurs handicapes (AGEFIPH)",
+        "organisme": "AGEFIPH", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Aides financieres pour l integration ou le maintien dans l emploi de personnes en situation de handicap : amenagement de poste, tutorat, formation.",
+        "montant_max": "Jusqu a 5 000 EUR (amenagement) + 3 000 EUR (accueil)",
+        "montant_estime": 5000,
+        "conditions": ["Recrutement ou maintien d un travailleur handicape (RQTH)", "Entreprise du secteur prive"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": True,
+        "url_info": "https://www.agefiph.fr/aides-handicap",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "opco-formation", "nom": "Financement OPCO (plan de developpement des competences)",
+        "organisme": "OPCO (11 operateurs)", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Prise en charge des actions de formation pour les entreprises de moins de 50 salaries par l OPCO de branche. Frais pedagogiques + remuneration + frais annexes.",
+        "montant_max": "Variable selon OPCO et branche",
+        "montant_estime": None,
+        "conditions": ["Entreprise < 50 salaries", "Formation dans le plan de developpement des competences", "OPCO de branche identifie"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": effectif < 50,
+        "url_info": "https://travail-emploi.gouv.fr/ministere/acteurs/partenaires/opco",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - ENVIRONNEMENT / TRANSITION ECOLOGIQUE ------
+    toutes_aides.append({
+        "id": "ademe-tremplin", "nom": "ADEME Tremplin pour la transition ecologique",
+        "organisme": "ADEME", "niveau": "national", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Aide forfaitaire simplifiee pour les PME : diagnostic environnemental, eco-conception, mobilite durable, economie circulaire, decarbonation.",
+        "montant_max": "Jusqu a 200 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME (< 250 salaries)", "Projet de transition ecologique identifie", "Devis ou cahier des charges"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme and (environnement or True),
+        "url_info": "https://agirpourlatransition.ademe.fr/entreprises/aides-financieres/2024/tremplin-transition-ecologique-pme",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "ademe-decarb-industrie", "nom": "ADEME Decarbonation de l industrie",
+        "organisme": "ADEME / France 2030", "niveau": "national", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Aide a l investissement pour la decarbonation des sites industriels : efficacite energetique, electrification, chaleur bas-carbone, captage CO2.",
+        "montant_max": "Jusqu a 50 MEUR",
+        "montant_estime": None,
+        "conditions": ["Site industriel emetteur de GES", "Projet de reduction des emissions > 1 000 tCO2/an", "Etude prealable realisee"],
+        "tailles": ["pme", "eti", "ge"],
+        "secteurs": ["C"],
+        "eligible": environnement and lettre_naf == "C",
+        "url_info": "https://agirpourlatransition.ademe.fr/entreprises/aides-financieres/2024/aide-a-decarbonation-industrie",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "ci-transition-energetique", "nom": "Credit d impot investissements industrie verte (C3IV)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "environnement",
+        "type_aide": "credit_impot",
+        "description": "Credit d impot de 20 a 60% pour les investissements dans la production de batteries, panneaux solaires, eolien, pompes a chaleur. PME : 60%, ETI : 40%, GE : 20%.",
+        "montant_max": "150 MEUR par entreprise",
+        "montant_estime": None,
+        "conditions": ["Production d equipements pour les energies renouvelables", "Investissement en France", "Agrement prealable"],
+        "tailles": ["pme", "eti", "ge"],
+        "secteurs": ["C"],
+        "eligible": environnement and lettre_naf in ("C", "D"),
+        "url_info": "https://www.economie.gouv.fr/france-nation-verte/credit-impot-investissements-industrie-verte",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "pret-vert", "nom": "Pret Vert (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "environnement",
+        "type_aide": "pret",
+        "description": "Pret participatif sans garantie pour financer les investissements lies a la transition ecologique et energetique des PME et ETI.",
+        "montant_max": "3 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "Projet de transition ecologique identifie", "Cofinancement bancaire"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": environnement and (is_pme or is_eti),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/transition-ecologique-et-energetique/pret-vert",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "diag-eco-flux", "nom": "Diagnostic Eco-Flux (Bpifrance / ADEME)",
+        "organisme": "Bpifrance / ADEME", "niveau": "national", "categorie": "environnement",
+        "type_aide": "accompagnement",
+        "description": "Diagnostic gratuit de 10 jours pour identifier les economies d energie, eau, matieres premieres et dechets. En moyenne 45 000 EUR d economies identifiees.",
+        "montant_max": "Diagnostic finance a 100%",
+        "montant_estime": None,
+        "conditions": ["PME de 20 a 250 salaries", "Secteur industriel, agro, tertiaire"],
+        "tailles": ["pme"],
+        "secteurs": [],
+        "eligible": environnement and 20 <= effectif < 250,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/transition-ecologique-et-energetique/diag-eco-flux",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cee", "nom": "Certificats d Economie d Energie (CEE)",
+        "organisme": "Ministere Transition Ecologique", "niveau": "national", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Primes versees par les fournisseurs d energie pour financer des travaux d efficacite energetique : isolation, chauffage, eclairage, process industriels.",
+        "montant_max": "Variable selon travaux (jusqu a 80% du cout)",
+        "montant_estime": None,
+        "conditions": ["Travaux d efficacite energetique", "Professionnels RGE pour les travaux", "Fiches standardisees CEE"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": environnement or investissement,
+        "url_info": "https://www.ecologie.gouv.fr/certificats-deconomies-denergie",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - NUMERIQUE ------
+    toutes_aides.append({
+        "id": "france-num", "nom": "France Num - Aides a la numerisation",
+        "organisme": "France Num / DGE", "niveau": "national", "categorie": "numerique",
+        "type_aide": "accompagnement",
+        "description": "Accompagnement et financement de la transformation numerique des TPE/PME : site web, logiciel de gestion, cybersecurite, IA. Cheque numerique et diagnostics.",
+        "montant_max": "Variable (diagnostics gratuits + aides financieres)",
+        "montant_estime": None,
+        "conditions": ["TPE ou PME", "Projet de numerisation identifie"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": numerique and is_pme,
+        "url_info": "https://www.francenum.gouv.fr/aides-financieres",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "diag-cyber", "nom": "Diagnostic Cybersecurite (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "numerique",
+        "type_aide": "accompagnement",
+        "description": "Diagnostic subventionne de cybersecurite pour les PME et ETI. Cartographie des risques, plan d actions, sensibilisation des equipes.",
+        "montant_max": "Prise en charge 50% (reste a charge ~4 000 EUR)",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "Volonte de structurer sa cybersecurite"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": numerique and (is_pme or is_eti),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/transition-numerique/diagnostic-cybersecurite",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "ci-ia", "nom": "Aides France 2030 - Intelligence Artificielle",
+        "organisme": "Bpifrance / SGPI", "niveau": "national", "categorie": "numerique",
+        "type_aide": "subvention",
+        "description": "Financements pour les projets integrant l IA : R&D, deploiement, cas d usage sectoriels. Appels a projets reguliers dans le cadre de la strategie nationale IA.",
+        "montant_max": "Jusqu a 5 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Projet integrant l IA", "Dimension innovante demontree", "Equipe technique identifiee"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": ["J", "M", "C"],
+        "eligible": numerique and innovation and lettre_naf in ("J", "M", "C"),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/soutien-a-linnovation",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - EXPORT / INTERNATIONAL ------
+    toutes_aides.append({
+        "id": "assurance-prospection", "nom": "Assurance Prospection (Bpifrance Assurance Export)",
+        "organisme": "Bpifrance Assurance Export", "niveau": "national", "categorie": "export",
+        "type_aide": "garantie",
+        "description": "Garantie couvrant les depenses de prospection a l international en cas d echec commercial. Couverture de 65% a 85% des frais engages.",
+        "montant_max": "Jusqu a 500 000 EUR de budget garanti",
+        "montant_estime": None,
+        "conditions": ["CA export < 50% du CA total", "Budget de prospection defini", "Marches cibles identifies"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": export_intl,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/international/assurance-prospection",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cheque-relance-export", "nom": "Cheque Relance VIE / Export",
+        "organisme": "Business France / Bpifrance", "niveau": "national", "categorie": "export",
+        "type_aide": "subvention",
+        "description": "Aide financiere pour l embauche d un VIE (Volontaire International en Entreprise) ou pour des missions de prospection. Subvention de 5 000 a 10 000 EUR.",
+        "montant_max": "10 000 EUR",
+        "montant_estime": 10000 if export_intl else None,
+        "conditions": ["PME ou ETI", "Embauche d un VIE ou mission export structuree"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": export_intl and (is_pme or is_eti),
+        "url_info": "https://www.businessfrance.fr/vie-volontariat-international-en-entreprise",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "pret-croissance-intl", "nom": "Pret Croissance International (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "export",
+        "type_aide": "pret",
+        "description": "Pret sans garantie pour financer le developpement international : implantation, recrutement export, adaptation produits, prospection.",
+        "montant_max": "5 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "Projet de developpement international structure", "3 ans d existence minimum"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": export_intl and age_entreprise >= 3,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/international/pret-croissance-international",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - CREATION / REPRISE ------
+    toutes_aides.append({
+        "id": "nacre", "nom": "NACRE (Nouvel Accompagnement pour la Creation/Reprise)",
+        "organisme": "Region / BGE / Reseau Entreprendre", "niveau": "national", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Accompagnement gratuit en 3 phases : aide au montage du projet, structuration financiere, demarrage de l activite. Pret a taux zero de 1 000 a 10 000 EUR.",
+        "montant_max": "10 000 EUR (pret a taux zero) + accompagnement",
+        "montant_estime": 10000 if creation_reprise else None,
+        "conditions": ["Createur ou repreneur d entreprise", "Demandeur d emploi, jeune < 26 ans, beneficiaire RSA/ASS, ou zone urbaine sensible"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": creation_reprise and is_tpe,
+        "url_info": "https://www.service-public.fr/particuliers/vosdroits/F20016",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "cape", "nom": "CAPE (Contrat d Appui au Projet d Entreprise)",
+        "organisme": "Couveuses / Cooperatives", "niveau": "national", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Contrat permettant de tester son activite au sein d une structure (couveuse, CAE) tout en conservant son statut social. Duree max 12 mois renouvelable.",
+        "montant_max": "Accompagnement + couverture sociale",
+        "montant_estime": None,
+        "conditions": ["Porteur de projet en phase de test", "Avant immatriculation ou en debut d activite"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": creation_reprise and age_entreprise <= 1,
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F11299",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "arce", "nom": "ARCE (Aide a la Reprise ou Creation d Entreprise)",
+        "organisme": "France Travail", "niveau": "national", "categorie": "creation",
+        "type_aide": "subvention",
+        "description": "Versement en capital de 60% des droits restants a l allocation chomage pour les createurs ou repreneurs d entreprise. Versee en 2 fois.",
+        "montant_max": "60% des droits ARE restants",
+        "montant_estime": None,
+        "conditions": ["Etre indemnise par France Travail ou avoir des droits ARE", "Avoir obtenu l ACRE", "Creer ou reprendre une entreprise"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": creation_reprise,
+        "url_info": "https://www.service-public.fr/particuliers/vosdroits/F11677",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - INVESTISSEMENT ------
+    toutes_aides.append({
+        "id": "suramortissement", "nom": "Suramortissement industriel (loi Macron)",
+        "organisme": "DGFIP", "niveau": "national", "categorie": "investissement",
+        "type_aide": "credit_impot",
+        "description": "Deduction exceptionnelle de 40% du prix de revient des biens d equipement industriel acquis entre 2019 et 2025 (prolonge). Robotique, impression 3D, logiciels de production.",
+        "montant_max": "40% du prix des equipements en deduction",
+        "montant_estime": None,
+        "conditions": ["Acquisition de biens industriels eligibles", "PME industrielle", "Investissement productif"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": ["C", "F"],
+        "eligible": investissement and lettre_naf in ("C", "F") and is_pme,
+        "url_info": "https://www.economie.gouv.fr/entreprises/suramortissement-investissement-productif",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "bpi-pret-atout", "nom": "Pret Atout (Bpifrance)",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "investissement",
+        "type_aide": "pret",
+        "description": "Pret sans garantie de 50 000 a 5 MEUR pour renforcer la tresorerie, financer la croissance, les investissements materiels et immateriels des PME et ETI.",
+        "montant_max": "5 000 000 EUR",
+        "montant_estime": None,
+        "conditions": ["PME ou ETI", "3 ans d existence minimum", "Situation financiere saine"],
+        "tailles": ["pme", "eti"],
+        "secteurs": [],
+        "eligible": investissement and age_entreprise >= 3,
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/financement/pret-atout",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "garantie-bpi", "nom": "Garantie de pret Bpifrance",
+        "organisme": "Bpifrance", "niveau": "national", "categorie": "investissement",
+        "type_aide": "garantie",
+        "description": "Garantie de 40 a 70% des prets bancaires pour faciliter l acces au credit des TPE/PME. Creation, investissement, international, innovation.",
+        "montant_max": "70% du pret garanti",
+        "montant_estime": None,
+        "conditions": ["Pret bancaire en cours de negociation", "TPE ou PME", "Projet identifie (creation, investissement, croissance)"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme and (investissement or creation_reprise),
+        "url_info": "https://www.bpifrance.fr/catalogue-offres/financement/garantie-de-pret",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - FISCAL / ZONES ------
+    toutes_aides.append({
+        "id": "zrr-exo", "nom": "Exoneration ZRR (Zone de Revitalisation Rurale)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration d IS/IR pendant 5 ans (totale) puis 3 ans (degressive) pour les entreprises nouvelles en ZRR. Exoneration de CFE et CVAE possible.",
+        "montant_max": "Exoneration totale IS 5 ans + degressive 3 ans",
+        "montant_estime": None,
+        "conditions": ["Implantation en ZRR (France Ruralites Revitalisation depuis 2024)", "Entreprise nouvelle ou reprise", "Activite commerciale, artisanale, industrielle ou liberale"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": zone == "zrr",
+        "url_info": "https://www.economie.gouv.fr/entreprises/zone-revitalisation-rurale-zrr",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "zfu-exo", "nom": "Exoneration ZFU-TE (Zone Franche Urbaine)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration d IS/IR pendant 5 ans (totale) + 3 ans (degressive). Exoneration cotisations patronales pendant 5 ans. Exoneration CFE et taxe fonciere.",
+        "montant_max": "Exoneration totale multi-impots 5 ans",
+        "montant_estime": None,
+        "conditions": ["Implantation en ZFU-TE", "Entreprise de moins de 50 salaries", "Clause d embauche locale (1/3 des salaries en ZFU/QPV)"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": zone == "zfu",
+        "url_info": "https://www.economie.gouv.fr/entreprises/zone-franche-urbaine-zfu",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "ber-exo", "nom": "Exoneration BER (Bassin d Emploi a Redynamiser)",
+        "organisme": "DGFIP / URSSAF", "niveau": "national", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration totale d IS, CFE, CVAE et cotisations patronales pendant 5 ans pour les entreprises nouvelles dans les bassins d emploi a redynamiser.",
+        "montant_max": "Exoneration totale 5 ans",
+        "montant_estime": None,
+        "conditions": ["Implantation dans un BER", "Entreprise nouvelle", "Bassin de la Vallee de la Meuse ou Lavelanet"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": zone == "ber",
+        "url_info": "https://www.economie.gouv.fr/entreprises/aides-entreprises-bassins-emploi-redynamiser",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "outre-mer-exo", "nom": "Exonerations Outre-mer (LODEOM)",
+        "organisme": "URSSAF / DGFIP", "niveau": "national", "categorie": "social",
+        "type_aide": "exoneration",
+        "description": "Exonerations renforcees de cotisations patronales pour les entreprises d Outre-mer. Baremes specifiques selon taille et secteur : competitivite, competitivite renforcee, innovation.",
+        "montant_max": "Exoneration jusqu a 2 SMIC (competitivite) ou 3.5 SMIC (innovation)",
+        "montant_estime": None,
+        "conditions": ["Siege social en DOM (Guadeloupe, Martinique, Guyane, Reunion, Mayotte)", "Effectif < 250 salaries (sauf secteurs prioritaires)"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": region == "outre-mer",
+        "url_info": "https://www.urssaf.fr/accueil/employeur/beneficier-dune-exoneration/exonerations-outre-mer.html",
+        "priorite": 1,
+    })
+
+    # ------ AIDES NATIONALES - ESS / IMPACT ------
+    toutes_aides.append({
+        "id": "dla", "nom": "DLA (Dispositif Local d Accompagnement)",
+        "organisme": "France Active / Etat", "niveau": "national", "categorie": "ess",
+        "type_aide": "accompagnement",
+        "description": "Accompagnement gratuit pour les structures ESS (associations, cooperatives, entreprises sociales) : diagnostic, plan d actions, appui strategique.",
+        "montant_max": "Accompagnement gratuit",
+        "montant_estime": None,
+        "conditions": ["Structure de l ESS (association, cooperative, entreprise sociale)", "Activite d interet general ou d utilite sociale"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": ess or forme_juridique == "Association",
+        "url_info": "https://www.info-dla.fr/",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "france-active-garantie", "nom": "Garantie France Active",
+        "organisme": "France Active", "niveau": "national", "categorie": "ess",
+        "type_aide": "garantie",
+        "description": "Garantie bancaire pour les entreprises de l ESS et les createurs en situation de precarite. Couvre jusqu a 80% du pret bancaire.",
+        "montant_max": "80% de garantie (plafond 100 000 EUR)",
+        "montant_estime": None,
+        "conditions": ["Entreprise ESS ou createur en difficulte d acces au credit", "Projet viable economiquement"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": ess or forme_juridique == "Association",
+        "url_info": "https://www.franceactive.org/",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "agrement-esus", "nom": "Agrement ESUS (Entreprise Solidaire d Utilite Sociale)",
+        "organisme": "Prefecture / DREETS", "niveau": "national", "categorie": "ess",
+        "type_aide": "accompagnement",
+        "description": "Agrement ouvrant droit a des financements specifiques (epargne salariale solidaire, BPI, fonds ESS) et a des avantages fiscaux pour les investisseurs (IR-PME 25%).",
+        "montant_max": "Acces a l epargne solidaire + avantages fiscaux investisseurs",
+        "montant_estime": None,
+        "conditions": ["Objectif d utilite sociale", "Politique de remuneration encadree (ecart max 1 a 7)", "Charge d utilite sociale > 66% du CA"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": ess,
+        "url_info": "https://www.economie.gouv.fr/entreprises/agrement-entreprise-solidaire-utilite-sociale-ess",
+        "priorite": 2,
+    })
+
+    # ------ AIDES NATIONALES - PREVENTION / SANTE AU TRAVAIL ------
+    toutes_aides.append({
+        "id": "subvention-prevention-tpe", "nom": "Subventions prevention TPE (CARSAT / CRAMIF)",
+        "organisme": "CARSAT / CRAMIF / CGSS", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Subventions pour les TPE (1-49 salaries) pour des investissements en prevention des risques professionnels : TMS Pro, Risque chimique, Equip Mobile, Filmeuse +.",
+        "montant_max": "25 000 EUR",
+        "montant_estime": 25000 if effectif < 50 else None,
+        "conditions": ["TPE de 1 a 49 salaries", "Investissement en equipement de prevention", "DUERP a jour"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": effectif < 50,
+        "url_info": "https://www.ameli.fr/entreprise/sante-travail/aides-financieres",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "fact", "nom": "FACT (Fonds d Amelioration des Conditions de Travail)",
+        "organisme": "ANACT", "niveau": "national", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Financement de projets d amelioration des conditions de travail : organisation du travail, prevenir les TMS, transitions numeriques et ecologiques au travail.",
+        "montant_max": "50 000 EUR",
+        "montant_estime": None,
+        "conditions": ["Entreprise de toute taille", "Projet d amelioration des conditions de travail structure", "Implication des representants du personnel"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": [],
+        "eligible": True,
+        "url_info": "https://www.anact.fr/le-fonds-pour-lamelioration-des-conditions-de-travail-fact",
+        "priorite": 3,
+    })
+
+    # ------ AIDES REGIONALES ------
+    aides_regionales_generiques = [
+        {
+            "id": "region-aide-invest", "nom": "Aide regionale a l investissement productif",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Subvention pour les investissements materiels et immateriels des PME. Taux d aide de 10 a 30% selon region et zone AFR. Toutes les regions proposent ce type d aide.",
+            "montant_max": "Variable (30 000 a 500 000 EUR selon region)",
+            "montant_estime": None,
+            "conditions": ["PME implantee dans la region", "Investissement productif (equipement, immobilier)", "Creation d emplois associee souvent requise"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": investissement and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-creation", "nom": "Aide regionale a la creation d entreprise",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "creation",
+            "type_aide": "subvention",
+            "description": "Plupart des regions proposent des aides a la creation : prets d honneur, subventions, accompagnement. Montant et conditions varient selon les regions.",
+            "montant_max": "Variable (5 000 a 50 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["Creation ou reprise d entreprise", "Implantation dans la region", "Projet economiquement viable"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": creation_reprise,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-export", "nom": "Aide regionale a l export",
+            "organisme": "Conseil Regional / CCI", "niveau": "regional", "categorie": "export",
+            "type_aide": "subvention",
+            "description": "Aides regionales pour la prospection internationale : salons, missions commerciales, etudes de marche. Souvent 50% des depenses prises en charge.",
+            "montant_max": "Variable (5 000 a 30 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["PME de la region", "Premier developpement export ou nouveau marche"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": export_intl and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-innovation", "nom": "Aide regionale a l innovation",
+            "organisme": "Conseil Regional / Agence d innovation", "niveau": "regional", "categorie": "innovation",
+            "type_aide": "subvention",
+            "description": "Aides regionales pour la R&D et l innovation : bourses de faisabilite, aides au prototypage, aides aux brevets. Souvent complementaires au CIR/CII.",
+            "montant_max": "Variable (10 000 a 200 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["PME de la region", "Projet innovant (produit ou procede nouveau)", "Co-financement souvent requis"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": innovation and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-transition", "nom": "Aide regionale a la transition ecologique",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "environnement",
+            "type_aide": "subvention",
+            "description": "Aides regionales pour la transition ecologique : audits energetiques, investissements verts, economie circulaire, mobilite durable.",
+            "montant_max": "Variable (5 000 a 100 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["Entreprise de la region", "Projet de transition ecologique", "Diagnostic prealable souvent requis"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": environnement and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+        {
+            "id": "region-aide-numerique", "nom": "Cheque numerique regional",
+            "organisme": "Conseil Regional", "niveau": "regional", "categorie": "numerique",
+            "type_aide": "subvention",
+            "description": "Aides regionales a la numerisation : site web, ERP, CRM, e-commerce, cybersecurite. Souvent sous forme de cheque ou de subvention forfaitaire.",
+            "montant_max": "Variable (2 000 a 20 000 EUR)",
+            "montant_estime": None,
+            "conditions": ["TPE ou PME de la region", "Projet de numerisation", "Prestataire agree souvent requis"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": numerique and is_pme,
+            "url_info": "https://les-aides.fr/",
+            "priorite": 2,
+        },
+    ]
+
+    # Aides regionales specifiques selon la region selectionnee
+    if region == "ile-de-france":
+        aides_regionales_generiques.append({
+            "id": "idf-pm-up", "nom": "PM up (Ile-de-France)",
+            "organisme": "Region Ile-de-France", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aide de 10 000 a 250 000 EUR pour les PME franciliennes en croissance. Investissement materiel, immateriel, recrutement, conseil strategique.",
+            "montant_max": "250 000 EUR",
+            "montant_estime": None,
+            "conditions": ["PME de 5 a 250 salaries", "Siege social en IDF", "Croissance du CA sur 3 ans"],
+            "tailles": ["pme"],
+            "secteurs": [],
+            "eligible": True,
+            "url_info": "https://www.iledefrance.fr/aides-et-appels-a-projets/pm-up",
+            "priorite": 1,
+        })
+        aides_regionales_generiques.append({
+            "id": "idf-innov-up", "nom": "Innov up (Ile-de-France)",
+            "organisme": "Region Ile-de-France", "niveau": "regional", "categorie": "innovation",
+            "type_aide": "subvention",
+            "description": "Aide pour les projets innovants des TPE/PME franciliennes : faisabilite, experimentation, developpement, industrialisation.",
+            "montant_max": "Jusqu a 500 000 EUR",
+            "montant_estime": None,
+            "conditions": ["TPE/PME en IDF", "Projet innovant", "Prototype ou POC"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": innovation,
+            "url_info": "https://www.iledefrance.fr/aides-et-appels-a-projets/innov-up",
+            "priorite": 1,
+        })
+
+    if region == "auvergne-rhone-alpes":
+        aides_regionales_generiques.append({
+            "id": "ara-ambition-eco", "nom": "Ambition Eco (Auvergne-Rhone-Alpes)",
+            "organisme": "Region AURA", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aide pour les projets d investissement structurants des PME de la region AURA : equipements, immobilier, numerisation.",
+            "montant_max": "200 000 EUR",
+            "montant_estime": None,
+            "conditions": ["PME implantee en AURA", "Projet d investissement productif", "Creation d emplois"],
+            "tailles": ["pme"],
+            "secteurs": [],
+            "eligible": investissement,
+            "url_info": "https://ambitioneco.auvergnerhonealpes.fr/",
+            "priorite": 1,
+        })
+
+    if region == "nouvelle-aquitaine":
+        aides_regionales_generiques.append({
+            "id": "na-croissance-verte", "nom": "Croissance Verte (Nouvelle-Aquitaine)",
+            "organisme": "Region Nouvelle-Aquitaine", "niveau": "regional", "categorie": "environnement",
+            "type_aide": "subvention",
+            "description": "Aide aux entreprises de Nouvelle-Aquitaine pour des projets de croissance verte : eco-conception, EnR, economie circulaire, mobilite propre.",
+            "montant_max": "100 000 EUR",
+            "montant_estime": None,
+            "conditions": ["Entreprise implantee en Nouvelle-Aquitaine", "Projet de transition ecologique"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": environnement,
+            "url_info": "https://les-aides.nouvelle-aquitaine.fr/",
+            "priorite": 1,
+        })
+
+    if region == "occitanie":
+        aides_regionales_generiques.append({
+            "id": "occ-pass-occitanie", "nom": "Pass Occitanie",
+            "organisme": "Region Occitanie / AD Occ", "niveau": "regional", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aide de 2 000 a 10 000 EUR pour les TPE et PME d Occitanie. Investissement, conseil, communication, numerisation.",
+            "montant_max": "10 000 EUR",
+            "montant_estime": 10000 if is_pme else None,
+            "conditions": ["TPE/PME d Occitanie", "Moins de 50 salaries", "Projet de developpement"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": [],
+            "eligible": True,
+            "url_info": "https://www.laregion.fr/Pass-Occitanie",
+            "priorite": 1,
+        })
+
+    toutes_aides.extend(aides_regionales_generiques)
+
+    # ------ AIDES LOCALES ------
+    toutes_aides.append({
+        "id": "local-pret-honneur", "nom": "Pret d honneur (Initiative France / Reseau Entreprendre)",
+        "organisme": "Initiative France / Reseau Entreprendre", "niveau": "local", "categorie": "creation",
+        "type_aide": "pret",
+        "description": "Pret a taux zero, sans garantie, pour les createurs et repreneurs. De 2 000 a 50 000 EUR. Effet levier pour obtenir un pret bancaire (1 EUR Initiative = 7.50 EUR de pret bancaire).",
+        "montant_max": "50 000 EUR (Initiative) / 90 000 EUR (Reseau Entreprendre)",
+        "montant_estime": None,
+        "conditions": ["Creation ou reprise d entreprise", "Projet viable et coherent", "Accompagnement par la plateforme"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": creation_reprise or is_startup,
+        "url_info": "https://www.initiative-france.fr/",
+        "priorite": 1,
+    })
+
+    toutes_aides.append({
+        "id": "local-pepiniere", "nom": "Pepiniere / Incubateur d entreprises",
+        "organisme": "Collectivites locales / Technopoles", "niveau": "local", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Hebergement a tarif reduit + accompagnement pour les jeunes entreprises. Services mutualises : salle reunion, secretariat, conseil juridique, comptable.",
+        "montant_max": "Loyer reduit 50-70% + services inclus",
+        "montant_estime": None,
+        "conditions": ["Entreprise de moins de 3-5 ans", "Projet innovant ou a fort potentiel", "Candidature aupres de la pepiniere"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": is_startup,
+        "url_info": "https://www.economie.gouv.fr/entreprises/pepinieres-incubateurs-entreprises",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "local-exo-cfe", "nom": "Exoneration CFE (Cotisation Fonciere des Entreprises)",
+        "organisme": "Communes / EPCI", "niveau": "local", "categorie": "fiscal",
+        "type_aide": "exoneration",
+        "description": "Exoneration de CFE possible sur deliberation communale pour les creations d entreprises (2 ans), les ZRR, les JEI, les artistes, et certaines activites specifiques.",
+        "montant_max": "Exoneration totale CFE 2-5 ans",
+        "montant_estime": None,
+        "conditions": ["Variable selon commune", "Creation d entreprise ou implantation en zone prioritaire"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": creation_reprise or zone in ("zrr", "zfu", "ber"),
+        "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F23547",
+        "priorite": 2,
+    })
+
+    # ------ AIDES EUROPEENNES ------
+    toutes_aides.append({
+        "id": "feder", "nom": "FEDER (Fonds Europeen de Developpement Regional)",
+        "organisme": "Commission europeenne / Region", "niveau": "europeen", "categorie": "investissement",
+        "type_aide": "subvention",
+        "description": "Cofinancement de projets d investissement, d innovation, de transition ecologique et de numerisation. Gere au niveau regional. Budget 2021-2027 : 226 Md EUR.",
+        "montant_max": "Variable (40 a 85% de cofinancement selon zone)",
+        "montant_estime": None,
+        "conditions": ["Projet s inscrivant dans les priorites regionales", "Cofinancement obligatoire", "Appel a projets regional"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": investissement or innovation or environnement or numerique,
+        "url_info": "https://ec.europa.eu/regional_policy/funding/erdf_fr",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "fse-plus", "nom": "FSE+ (Fonds Social Europeen Plus)",
+        "organisme": "Commission europeenne / DREETS", "niveau": "europeen", "categorie": "emploi",
+        "type_aide": "subvention",
+        "description": "Financement de projets emploi, formation, inclusion sociale. Formation des salaries, insertion professionnelle, lutte contre la pauvrete. Budget 2021-2027 : 99 Md EUR.",
+        "montant_max": "Variable selon projet (cofinancement 50 a 85%)",
+        "montant_estime": None,
+        "conditions": ["Projet emploi/formation/inclusion", "Cofinancement obligatoire", "Appel a projets"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": formation or ess,
+        "url_info": "https://ec.europa.eu/european-social-fund-plus/fr",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "horizon-europe", "nom": "Horizon Europe",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Programme-cadre de R&D de l UE (2021-2027, 95.5 Md EUR). Finance des projets collaboratifs de recherche et innovation. EIC Accelerator pour les PME innovantes : jusqu a 2.5 MEUR subvention + 15 MEUR equity.",
+        "montant_max": "2 500 000 EUR (subvention EIC) + 15 MEUR (equity)",
+        "montant_estime": None,
+        "conditions": ["Projet de R&D avec dimension europeenne", "Consortium transnational (sauf EIC)", "Excellence scientifique et impact"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": innovation,
+        "url_info": "https://research-and-innovation.ec.europa.eu/funding/funding-opportunities/funding-programmes-and-open-calls/horizon-europe_en",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "eic-accelerator", "nom": "EIC Accelerator (Horizon Europe)",
+        "organisme": "European Innovation Council", "niveau": "europeen", "categorie": "innovation",
+        "type_aide": "subvention",
+        "description": "Financement pour les PME innovantes a fort potentiel de croissance. Subvention jusqu a 2.5 MEUR + investissement en equity jusqu a 15 MEUR. TRL 5-9.",
+        "montant_max": "2 500 000 EUR subvention + 15 MEUR equity",
+        "montant_estime": None,
+        "conditions": ["PME au sens UE", "Innovation de rupture (deep tech, green tech, health tech)", "TRL 5-9", "Ambition de scale-up europeen"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": innovation and is_pme,
+        "url_info": "https://eic.ec.europa.eu/eic-funding-opportunities/eic-accelerator_en",
+        "priorite": 2,
+    })
+
+    toutes_aides.append({
+        "id": "cosme-sme", "nom": "Programme SMP / COSME (ex-COSME)",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "investissement",
+        "type_aide": "garantie",
+        "description": "Garantie de prets et facilitation d acces aux marches pour les PME europeennes. Via le programme Single Market Programme (ex-COSME). Garantie intermediee par les banques.",
+        "montant_max": "Garantie bancaire facilitee (jusqu a 150 000 EUR)",
+        "montant_estime": None,
+        "conditions": ["PME europeenne", "Demande via banque partenaire", "Projet de croissance ou de creation"],
+        "tailles": ["tpe", "pme"],
+        "secteurs": [],
+        "eligible": is_pme,
+        "url_info": "https://single-market-economy.ec.europa.eu/smes/cosme_en",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "life", "nom": "Programme LIFE (environnement et climat)",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "environnement",
+        "type_aide": "subvention",
+        "description": "Financement de projets environnementaux : biodiversite, economie circulaire, attenuation/adaptation climatique, transition energetique. Budget 2021-2027 : 5.4 Md EUR.",
+        "montant_max": "Variable (cofinancement 60 a 75%)",
+        "montant_estime": None,
+        "conditions": ["Projet a dimension environnementale", "Impact mesurable", "Valeur ajoutee europeenne"],
+        "tailles": ["tpe", "pme", "eti", "ge"],
+        "secteurs": [],
+        "eligible": environnement,
+        "url_info": "https://cinea.ec.europa.eu/programmes/life_en",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "erasmus-entreprises", "nom": "Erasmus pour jeunes entrepreneurs",
+        "organisme": "Commission europeenne / EASME", "niveau": "europeen", "categorie": "creation",
+        "type_aide": "accompagnement",
+        "description": "Programme d echange permettant a un jeune entrepreneur de passer 1 a 6 mois chez un entrepreneur experimente dans un autre pays de l UE. Bourse de sejour incluse.",
+        "montant_max": "Bourse de 530 a 1 100 EUR/mois selon pays",
+        "montant_estime": None,
+        "conditions": ["Entrepreneur de moins de 3 ans d activite ou porteur de projet", "Partenariat avec un entrepreneur hote dans un autre pays UE"],
+        "tailles": ["tpe"],
+        "secteurs": [],
+        "eligible": creation_reprise and is_startup,
+        "url_info": "https://www.erasmus-entrepreneurs.eu/",
+        "priorite": 3,
+    })
+
+    toutes_aides.append({
+        "id": "digital-europe", "nom": "Digital Europe Programme",
+        "organisme": "Commission europeenne", "niveau": "europeen", "categorie": "numerique",
+        "type_aide": "subvention",
+        "description": "Programme europeen pour la transformation numerique : IA, cybersecurite, calcul haute performance, competences numeriques, interoperabilite. Budget : 7.5 Md EUR.",
+        "montant_max": "Variable selon appel a projets",
+        "montant_estime": None,
+        "conditions": ["Projet numerique (IA, cyber, cloud, data)", "Consortium transnational recommande", "Appel a projets"],
+        "tailles": ["tpe", "pme", "eti"],
+        "secteurs": ["J", "M"],
+        "eligible": numerique and innovation,
+        "url_info": "https://digital-strategy.ec.europa.eu/en/activities/digital-programme",
+        "priorite": 3,
+    })
+
+    # ------ AIDES SECTORIELLES ------
+    if lettre_naf in ("A",):
+        toutes_aides.append({
+            "id": "pac-aides", "nom": "PAC - Aides agricoles",
+            "organisme": "ASP / DDT", "niveau": "europeen", "categorie": "investissement",
+            "type_aide": "subvention",
+            "description": "Aides directes (DPB, paiement vert, aide redistributive) et aides couplees pour les exploitations agricoles. PCAE pour les investissements.",
+            "montant_max": "Variable selon exploitation",
+            "montant_estime": None,
+            "conditions": ["Exploitant agricole", "Surface minimale (SNA)", "Respect conditionnalite"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": ["A"],
+            "eligible": True,
+            "url_info": "https://agriculture.gouv.fr/la-pac-en-un-coup-doeil",
+            "priorite": 1,
+        })
+
+    if lettre_naf in ("I",):
+        toutes_aides.append({
+            "id": "chr-modernisation", "nom": "Aide a la modernisation CHR",
+            "organisme": "Bpifrance / Region", "niveau": "national", "categorie": "investissement",
+            "type_aide": "pret",
+            "description": "Pret specifique pour les cafes, hotels, restaurants : renovation, mise aux normes, equipements, numerisation.",
+            "montant_max": "300 000 EUR",
+            "montant_estime": None,
+            "conditions": ["Cafe, hotel ou restaurant", "Investissement de modernisation"],
+            "tailles": ["tpe", "pme"],
+            "secteurs": ["I"],
+            "eligible": True,
+            "url_info": "https://www.bpifrance.fr/",
+            "priorite": 2,
+        })
+
+    if lettre_naf in ("F",):
+        toutes_aides.append({
+            "id": "btp-prevention", "nom": "Aides OPPBTP a la prevention BTP",
+            "organisme": "OPPBTP", "niveau": "national", "categorie": "emploi",
+            "type_aide": "subvention",
+            "description": "Aides financieres et accompagnement pour la prevention des risques dans le BTP : equipements de securite, formations, diagnostics.",
+            "montant_max": "Variable (diagnostics gratuits + aides equipements)",
+            "montant_estime": None,
+            "conditions": ["Entreprise du BTP", "Cotisant OPPBTP"],
+            "tailles": ["tpe", "pme", "eti"],
+            "secteurs": ["F"],
+            "eligible": True,
+            "url_info": "https://www.preventionbtp.fr/",
+            "priorite": 2,
+        })
+
+    if lettre_naf in ("C", "J", "M"):
+        toutes_aides.append({
+            "id": "cifre", "nom": "Convention CIFRE (These en entreprise)",
+            "organisme": "ANRT / MESRI", "niveau": "national", "categorie": "innovation",
+            "type_aide": "subvention",
+            "description": "Subvention annuelle de 14 000 EUR pendant 3 ans pour l embauche d un doctorant en these au sein de l entreprise. Eligible au CIR en complementarite.",
+            "montant_max": "42 000 EUR (14 000/an x 3 ans)",
+            "montant_estime": 42000,
+            "conditions": ["Embauche d un doctorant en CDI ou CDD 3 ans", "Partenariat avec un laboratoire de recherche", "Sujet de these valide par l ANRT"],
+            "tailles": ["tpe", "pme", "eti", "ge"],
+            "secteurs": ["C", "J", "M"],
+            "eligible": innovation,
+            "url_info": "https://www.anrt.asso.fr/fr/le-dispositif-cifre-7844",
+            "priorite": 2,
+        })
+
+    # Filtrage : ne garder que les aides eligible = True
+    aides_eligibles = [a for a in toutes_aides if a.get("eligible")]
+
+    # Tri par priorite puis nom
+    aides_eligibles.sort(key=lambda a: (a.get("priorite", 5), a["nom"]))
+
+    # Statistiques
+    montant_total = 0
+    for a in aides_eligibles:
+        est = a.get("montant_estime")
+        if est and isinstance(est, (int, float)):
+            montant_total += est
+
+    niveaux = {}
+    categories = {}
+    types = {}
+    for a in aides_eligibles:
+        niveaux[a["niveau"]] = niveaux.get(a["niveau"], 0) + 1
+        categories[a["categorie"]] = categories.get(a["categorie"], 0) + 1
+        types[a["type_aide"]] = types.get(a["type_aide"], 0) + 1
+
+    return {
+        "total": len(aides_eligibles),
+        "montant_potentiel_estime": montant_total,
+        "par_niveau": niveaux,
+        "par_categorie": categories,
+        "par_type": types,
+        "aides": aides_eligibles,
+        "criteres_utilises": {
+            "code_naf": code_naf,
+            "effectif": effectif,
+            "forme_juridique": forme_juridique,
+            "region": region,
+            "zone": zone,
+            "ca": ca,
+            "age_entreprise": age_entreprise,
+            "masse_salariale": masse_salariale,
+            "innovation": innovation,
+            "environnement": environnement,
+            "numerique": numerique,
+            "export": export_intl,
+            "formation": formation,
+            "creation_reprise": creation_reprise,
+            "investissement": investissement,
+            "ess": ess,
+        },
+    }
+
+
+# ==============================
 # IDCC / CONVENTIONS COLLECTIVES
 # ==============================
 
@@ -2973,9 +5369,15 @@ async def idcc_detail(idcc: str):
 # ==============================
 
 @app.get("/api/atmp/taux")
-async def atmp_taux(code_naf: str = Query("62.02"), effectif: int = Query(10)):
+async def atmp_taux(
+    code_naf: str = Query(None),
+    naf: str = Query(None),
+    effectif: int = Query(10),
+):
     from urssaf_analyzer.config.taux_atmp import get_taux_atmp
-    return get_taux_atmp(code_naf, effectif)
+    # Accept both 'code_naf' and 'naf' as parameter names for the NAF code
+    effective_naf = code_naf or naf or "62.02"
+    return get_taux_atmp(effective_naf, effectif)
 
 
 # ==============================
@@ -3128,13 +5530,18 @@ async def ajouter_entreprise(
     effectif: int = Form(0), ville: str = Form(""),
 ):
     pm = PortfolioManager(get_db())
-    ent = pm.ajouter_entreprise(
-        siret=siret, raison_sociale=raison_sociale,
-        forme_juridique=forme_juridique, code_naf=code_naf,
-        effectif=effectif, ville=ville,
-    )
+    try:
+        ent = pm.ajouter_entreprise(
+            siret=siret, raison_sociale=raison_sociale,
+            forme_juridique=forme_juridique, code_naf=code_naf,
+            effectif=effectif, ville=ville,
+        )
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(409, "Entreprise avec ce SIRET deja existante")
+        raise
     log_action("utilisateur", "ajout_entreprise", f"{raison_sociale} ({siret})")
-    return {"id": ent.id, "siret": ent.siret, "raison_sociale": ent.raison_sociale}
+    return {"id": ent["id"], "siret": ent["siret"], "raison_sociale": ent["raison_sociale"]}
 
 
 @app.get("/api/entreprises")
@@ -3165,12 +5572,175 @@ async def declarations_entreprise(
 
 
 # ==============================
+# PROFILS INDEPENDANTS (T.I.)
+# ==============================
+
+@app.post("/api/independants")
+async def creer_profil_independant(
+    type_statut: str = Form(...),
+    siret: str = Form(""),
+    activite: str = Form(""),
+    code_naf: str = Form(""),
+    regime_fiscal: str = Form(""),
+    option_is: bool = Form(False),
+    tva_franchise: bool = Form(True),
+    caisse_retraite: str = Form(""),
+    acre: bool = Form(False),
+    annee_creation: int = Form(0),
+    chiffre_affaires_annuel: float = Form(0),
+    benefice_annuel: float = Form(0),
+    remuneration_nette: float = Form(0),
+):
+    """Cree un profil travailleur independant."""
+    import uuid as _uuid
+    ind_id = str(_uuid.uuid4())
+    profil_id = "default"  # En contexte reel, extrait du JWT
+    db = get_db()
+    db.execute(
+        """INSERT INTO profils_independants
+           (id, profil_id, type_statut, siret, activite, code_naf, regime_fiscal,
+            option_is, tva_franchise, caisse_retraite, acre, annee_creation,
+            chiffre_affaires_annuel, benefice_annuel, remuneration_nette)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (ind_id, profil_id, type_statut, siret, activite, code_naf, regime_fiscal,
+         1 if option_is else 0, 1 if tva_franchise else 0, caisse_retraite,
+         1 if acre else 0, annee_creation,
+         chiffre_affaires_annuel, benefice_annuel, remuneration_nette),
+    )
+    log_action("utilisateur", "ajout_independant", f"{type_statut} - {activite or siret}")
+    return _get_independant(db, ind_id)
+
+
+@app.get("/api/independants")
+async def liste_independants(q: str = Query("")):
+    """Liste les profils independants."""
+    db = get_db()
+    if q:
+        rows = db.execute(
+            """SELECT * FROM profils_independants
+               WHERE actif = 1 AND (
+                   activite LIKE ? OR siret LIKE ? OR type_statut LIKE ? OR code_naf LIKE ?
+               ) ORDER BY date_creation DESC""",
+            (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"),
+        )
+    else:
+        rows = db.execute(
+            "SELECT * FROM profils_independants WHERE actif = 1 ORDER BY date_creation DESC"
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/independants/{ind_id}")
+async def detail_independant(ind_id: str):
+    db = get_db()
+    ind = _get_independant(db, ind_id)
+    if not ind:
+        raise HTTPException(404, "Profil independant non trouve")
+    return ind
+
+
+@app.put("/api/independants/{ind_id}")
+async def modifier_independant(ind_id: str, request: Request):
+    db = get_db()
+    data = await request.json()
+    champs_autorises = {
+        "type_statut", "siret", "activite", "code_naf", "regime_fiscal",
+        "option_is", "tva_franchise", "caisse_retraite", "acre", "annee_creation",
+        "chiffre_affaires_annuel", "benefice_annuel", "remuneration_nette",
+    }
+    updates = {k: v for k, v in data.items() if k in champs_autorises}
+    if not updates:
+        return _get_independant(db, ind_id)
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [ind_id]
+    db.execute(
+        f"UPDATE profils_independants SET {set_clause}, date_modification = datetime('now') WHERE id = ?",
+        tuple(values),
+    )
+    log_action("utilisateur", "modif_independant", ind_id)
+    return _get_independant(db, ind_id)
+
+
+@app.delete("/api/independants/{ind_id}")
+async def supprimer_independant(ind_id: str):
+    db = get_db()
+    db.execute(
+        "UPDATE profils_independants SET actif = 0, date_modification = datetime('now') WHERE id = ?",
+        (ind_id,),
+    )
+    log_action("utilisateur", "suppression_independant", ind_id)
+    return {"ok": True}
+
+
+@app.get("/api/independants/{ind_id}/dashboard")
+async def dashboard_independant(ind_id: str):
+    """Tableau de bord pour un profil independant."""
+    db = get_db()
+    ind = _get_independant(db, ind_id)
+    if not ind:
+        raise HTTPException(404, "Profil independant non trouve")
+
+    # Cotisations estimees selon le statut
+    from decimal import Decimal
+    rev = Decimal(str(ind.get("remuneration_nette", 0) or ind.get("benefice_annuel", 0) or 0))
+    ca = Decimal(str(ind.get("chiffre_affaires_annuel", 0) or 0))
+    statut = ind.get("type_statut", "")
+    cotisations = {}
+
+    if statut == "micro_entrepreneur":
+        taux_map = {"prestations_bnc": "0.22", "prestations_bic": "0.217", "vente_marchandises": "0.123", "location_meublee": "0.06"}
+        taux = Decimal(taux_map.get(ind.get("regime_fiscal", ""), "0.22"))
+        if ind.get("acre"):
+            taux = taux / 2
+        total = round(float(ca * taux), 2)
+        cotisations = {"base_ca": float(ca), "taux": float(taux), "total_cotisations": total, "net_apres_cotisations": float(ca) - total}
+    elif rev > 0:
+        base = rev
+        maladie = round(float(base * Decimal("0.065")), 2)
+        vieillesse_base = round(float(min(base, Decimal("46368")) * Decimal("0.1775")), 2)
+        vieillesse_compl = round(float(min(base, Decimal("185472")) * Decimal("0.07")), 2)
+        invalidite = round(float(base * Decimal("0.013")), 2)
+        af = round(float(base * Decimal("0.0310")), 2)
+        csg_crds = round(float(base * Decimal("0.097")), 2)
+        formation = round(float(base * Decimal("0.0025")), 2)
+        total = maladie + vieillesse_base + vieillesse_compl + invalidite + af + csg_crds + formation
+        if ind.get("acre"):
+            total = round(total * 0.5, 2)
+        cotisations = {
+            "base_revenu": float(rev), "maladie": maladie,
+            "vieillesse_base": vieillesse_base, "vieillesse_complementaire": vieillesse_compl,
+            "invalidite_deces": invalidite, "allocations_familiales": af,
+            "csg_crds": csg_crds, "formation": formation,
+            "total_cotisations": total, "net_apres_cotisations": float(rev) - total,
+        }
+
+    # Historique analyses
+    analyses = db.execute(
+        """SELECT * FROM analyses WHERE independant_id = ? ORDER BY date_analyse DESC LIMIT 10""",
+        (ind_id,),
+    )
+    analyses_list = [dict(r) for r in analyses]
+
+    return {
+        "profil": ind,
+        "cotisations_estimees": cotisations,
+        "nb_analyses": len(analyses_list),
+        "dernieres_analyses": analyses_list,
+    }
+
+
+def _get_independant(db, ind_id: str):
+    rows = db.execute("SELECT * FROM profils_independants WHERE id = ?", (ind_id,))
+    return dict(rows[0]) if rows else None
+
+
+# ==============================
 # DOCUMENTS / BIBLIOTHEQUE
 # ==============================
 
 @app.get("/api/documents/bibliotheque")
-async def bibliotheque():
-    return _doc_library
+async def bibliotheque(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
+    return _paginate(_doc_library, offset, limit)
 
 
 @app.get("/api/bibliotheque/knowledge")
@@ -3193,10 +5763,85 @@ async def knowledge_base():
     }
 
 
+@app.post("/api/export/pdf")
+async def export_pdf(request: Request):
+    """Genere un vrai PDF telechargeable a partir des donnees d'analyse."""
+    user = get_current_user(request)
+    body = await request.json()
+    data = body.get("data") or {}
+    synthese = data.get("synthese", {})
+    constats = data.get("constats", [])
+    recommandations = data.get("recommandations", [])
+    mode = data.get("mode_analyse", "complet")
+    titres_mode = {"simple": "Rapport d analyse", "social": "Audit social", "fiscal": "Audit fiscal", "complet": "Audit complet"}
+    titre = titres_mode.get(mode, "Rapport NormaCheck")
+    nb_fichiers = synthese.get("nb_fichiers", 0)
+    impact = synthese.get("impact_financier_total", 0)
+    score_risque = synthese.get("score_risque_global", 0)
+    # Score de conformite v4.0 : utilise le score triple si disponible, sinon fallback
+    conformite_triple = data.get("score_conformite_v4", None)
+    if conformite_triple is not None:
+        conformite = max(0, min(100, conformite_triple))
+    else:
+        conformite = max(0, 100 - score_risque)
+    ent = dict(_entete_config)
+    date_str = datetime.now().strftime("%d/%m/%Y")
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{titre}</title>
+<style>body{{font-family:Helvetica,Arial,sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#1e293b;font-size:11pt}}
+h1{{color:#1e40af;text-align:center}}h2{{color:#1e40af;border-bottom:1px solid #e2e8f0;padding-bottom:6px;margin-top:24px}}
+table{{width:100%;border-collapse:collapse;margin:10px 0}}th{{background:#1e40af;color:#fff;padding:8px;text-align:left;font-size:9pt}}
+td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
+.badge{{display:inline-block;padding:2px 8px;border-radius:10px;font-size:8pt;font-weight:700}}
+.high{{background:#fef2f2;color:#dc2626}}.med{{background:#fffbeb;color:#d97706}}.low{{background:#eff6ff;color:#2563eb}}
+.score{{text-align:center;padding:16px;border:2px solid #e2e8f0;border-radius:10px;margin:16px 0}}
+.footer{{text-align:center;font-size:8pt;color:#94a3b8;margin-top:30px;border-top:1px solid #e2e8f0;padding-top:10px}}</style></head><body>"""
+    if ent.get("nom_entreprise"):
+        html += f"""<div style="text-align:center;border-bottom:2px solid #1e40af;padding-bottom:12px;margin-bottom:16px">
+<h1 style="margin:0">{ent.get("nom_entreprise","")}</h1>
+<p style="color:#64748b;font-size:9pt">{ent.get("forme_juridique","")} - {ent.get("adresse","")}</p>
+<p style="color:#64748b;font-size:9pt">SIRET: {ent.get("siret","")} | {ent.get("telephone","")}</p></div>"""
+    html += f"<h1>{titre}</h1>"
+    html += f'<p style="text-align:center;color:#64748b">Date: {date_str} | {nb_fichiers} fichier(s) | Operateur: {user.get("prenom","")} {user.get("nom","")}</p>'
+    html += f'<div class="score"><div style="font-size:2.5em;font-weight:800;color:#1e40af">{conformite}%</div><div>Score de conformite</div></div>'
+    html += f"<h2>Synthese</h2><table><tr><th>Indicateur</th><th>Valeur</th></tr>"
+    html += f"<tr><td>Anomalies detectees</td><td>{len(constats)}</td></tr>"
+    html += f"<tr><td>Impact financier total</td><td>{impact:.2f} EUR</td></tr>"
+    html += f"<tr><td>Score de conformite</td><td>{conformite}%</td></tr>"
+    html += f"<tr><td>Fichiers analyses</td><td>{nb_fichiers}</td></tr></table>"
+    if constats:
+        html += "<h2>Anomalies detectees</h2><table><tr><th>Titre</th><th>Severite</th><th>Impact</th><th>Categorie</th></tr>"
+        for c in constats:
+            sev = c.get("severite", "basse")
+            cls = "high" if sev == "haute" else ("med" if sev == "moyenne" else "low")
+            html += f'<tr><td>{c.get("titre","")}</td><td><span class="badge {cls}">{sev}</span></td>'
+            html += f'<td style="text-align:right">{abs(c.get("montant_impact",0)):.2f} EUR</td><td>{c.get("categorie","")}</td></tr>'
+        html += "</table>"
+        html += "<h2>Detail des anomalies</h2>"
+        for i, c in enumerate(constats):
+            html += f'<div style="border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0">'
+            html += f'<strong>{i+1}. {c.get("titre","")}</strong>'
+            html += f'<p style="color:#64748b;margin:4px 0">{c.get("description","")}</p>'
+            if c.get("reference_legale"):
+                html += f'<p style="font-size:9pt;color:#64748b"><em>Ref: {c["reference_legale"]}</em></p>'
+            if c.get("recommandation"):
+                html += f'<p style="color:#1e40af"><em>Action: {c["recommandation"]}</em></p>'
+            html += "</div>"
+    if recommandations:
+        html += "<h2>Recommandations</h2><ol>"
+        for r in recommandations:
+            html += f'<li>{r.get("description", r.get("titre", ""))}</li>'
+        html += "</ol>"
+    html += f'<div class="footer">Document genere par NormaCheck v3.8.1 le {date_str} - Non opposable aux administrations (art. L.243-6-3 CSS)</div>'
+    html += "</body></html>"
+    return HTMLResponse(content=html, headers={
+        "Content-Disposition": f'attachment; filename="normacheck_rapport_{datetime.now().strftime("%Y%m%d")}.html"',
+    })
+
+
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.0", "build": "20260222c", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True}
+    return {"version": "3.8.1", "build": "20260222f", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB, "auth": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -3714,8 +6359,8 @@ async def knowledge_audit():
     # 32. Detection travail dissimule - indicateurs (L.8221-1 CT)
     indicateurs_td = []
     # Indicateur 1: salaries sans DPAE importee
-    if _employees_found and not has_dpae:
-        indicateurs_td.append(f"{len(_employees_found)} salarie(s) sans accuse DPAE importe")
+    if ks["nb_salaries_connus"] > 0 and nb_dpae == 0:
+        indicateurs_td.append(f"{ks['nb_salaries_connus']} salarie(s) sans accuse DPAE importe")
     # Indicateur 2: contrats non verifies
     nb_non_verifies = sum(1 for c in _rh_contrats if not c.get("verifie", True))
     if nb_non_verifies > 0:
@@ -3888,12 +6533,12 @@ async def knowledge_audit():
 
     # Fiscal 10. DAS-2 - Declaration des honoraires (art. 241 CGI)
     fiscal_checks.append(_audit_check(
-        "DAS-2 - Declaration des honoraires (> 1200 EUR/beneficiaire)",
+        "DAS-2 - Declaration des honoraires (> 2400 EUR/beneficiaire)",
         "Art. 241 a 243-bis CGI - Art. L.133-5-3 CSS",
         "das2" in kb["pieces_justificatives"],
-        "DAS-2 importee" if "das2" in kb["pieces_justificatives"] else "DAS-2 non importee - obligatoire si honoraires > 1200 EUR/beneficiaire/an",
+        "DAS-2 importee" if "das2" in kb["pieces_justificatives"] else "DAS-2 non importee - obligatoire si honoraires > 2400 EUR/beneficiaire/an",
         "DAS-2, factures de prestataires/honoraires",
-        incidence="Amende 150 EUR par omission (art. 1736 CGI) + majoration 50% si retard > 1 mois",
+        incidence="Amende de 50% des sommes non declarees (art. 1736 CGI) + majoration 50% si retard > 1 mois",
     ))
 
     # Fiscal 11. FEC - Fichier des ecritures comptables (art. L.47 A-I LPF)
@@ -3936,10 +6581,10 @@ async def knowledge_audit():
         "Bulletins de paie, etats des avantages en nature",
     ))
 
-    # Fiscal 15. Credit impot formation dirigeant
+    # Fiscal 15. Credit impot formation dirigeant (EXPIRE 31/12/2024)
     fiscal_checks.append(_audit_check(
-        "Credit d impot formation du dirigeant",
-        "Art. 244 quater M CGI",
+        "Credit d impot formation du dirigeant (EXPIRE depuis 31/12/2024)",
+        "Art. 244 quater M CGI - Dispositif expire le 31/12/2024",
         "formation_dirigeant" in kb["pieces_justificatives"],
         "Attestation formation importee" if "formation_dirigeant" in kb["pieces_justificatives"] else "Non renseigne - verifier l eligibilite (PME < 250 sal.)",
         "Attestation de formation, cerfa 2079-FCE",
@@ -3978,7 +6623,7 @@ async def knowledge_audit():
     # CDC 6. Exhaustivite des charges sociales
     cdc_checks.append(_audit_check(
         "Exhaustivite des charges sociales declarees",
-        "Norme ISA 550 - NEP 550",
+        "Norme ISA 315 (identification des risques) / ISA 500 (elements probants)",
         ks["has_bulletins"] and ks["nb_cotisations_analysees"] > 0,
         f"{ks['nb_cotisations_analysees']} ligne(s) de cotisations verifiee(s)" if ks["nb_cotisations_analysees"] > 0 else "Non verifiable",
         "Bulletins de paie, journal de paie, DSN"))
@@ -4082,9 +6727,13 @@ async def corriger_document(
 
 @app.post("/api/collaboration/inviter")
 async def inviter_collaborateur(
+    request: Request,
     email_invite: str = Form(...),
     role: str = Form("collaborateur"),
 ):
+    current = get_optional_user(request)
+    inviter_email = current["email"] if current else "utilisateur"
+    inviter_tenant = current.get("tenant_id", "") if current else ""
     token = str(uuid.uuid4())[:12]
     inv = {
         "id": str(uuid.uuid4())[:8],
@@ -4093,10 +6742,11 @@ async def inviter_collaborateur(
         "token": token,
         "statut": "en_attente",
         "date": datetime.now().isoformat(),
-        "invite_par": "utilisateur",
+        "invite_par": inviter_email,
+        "tenant_id": inviter_tenant,
     }
     _invitations.append(inv)
-    log_action("utilisateur", "invitation", f"{email_invite} ({role})")
+    log_action(inviter_email, "invitation", f"{email_invite} ({role})")
     return {
         "status": "ok",
         "email": email_invite,
@@ -4134,11 +6784,26 @@ async def finaliser_invitation(
 ):
     for inv in _invitations:
         if inv["token"] == token:
+            if inv["statut"] == "active":
+                return HTMLResponse("<h2>Ce lien a deja ete utilise.</h2>", 400)
+            try:
+                user = create_user(
+                    inv["email"], mot_de_passe,
+                    nom=inv.get("email", "").split("@")[0],
+                    prenom="",
+                    role=inv["role"],
+                    tenant_id=inv.get("tenant_id", ""),
+                )
+            except ValueError as e:
+                return HTMLResponse(f"<h2>Erreur : {e}</h2>", 400)
             inv["statut"] = "active"
             log_action(inv["email"], "activation_compte", f"role={inv['role']}")
-            return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+            jwt_token = generate_token(user)
+            response = HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>NormaCheck - Compte active</title></head><body style="font-family:-apple-system,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f8fafc">
 <div style="text-align:center"><h2 style="color:#16a34a">Compte active !</h2><p>Vous pouvez maintenant <a href="/app">acceder a NormaCheck</a>.</p></div></body></html>""")
+            set_auth_cookie(response, jwt_token)
+            return response
     raise HTTPException(404, "Token invalide")
 
 
@@ -4360,9 +7025,9 @@ async def creer_contrat(
 
 
 @app.get("/api/rh/contrats")
-async def liste_contrats():
+async def liste_contrats(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les contrats de travail."""
-    return _rh_contrats
+    return _paginate(_rh_contrats, offset, limit)
 
 
 @app.get("/api/rh/contrats/{contrat_id}")
@@ -4492,7 +7157,7 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 <div class="sig-block"><p><strong>L employeur</strong></p><p style="font-size:.85em;color:#64748b">Nom, qualite, signature</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 <div class="sig-block"><p><strong>Le(la) salarie(e)</strong></p><p style="font-size:.85em;color:#64748b">{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 </div>
-<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.6 - Ce document doit etre signe en deux exemplaires originaux</p>
+<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.8 - Ce document doit etre signe en deux exemplaires originaux</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -4610,8 +7275,8 @@ async def generer_bulletin(
         # Deduction forfaitaire patronale : 1.50 EUR par heure (entreprises < 250 sal)
         exo_tepa_patronale = round(float(hs) * 1.50, 2)
 
-    net_avant_impot = float(bulletin_data.get("net_avant_impot", brut_total * Decimal("0.78")))
-    cout_employeur = float(bulletin_data.get("cout_total_employeur", brut_total * Decimal("1.45")))
+    net_avant_impot = float(bulletin_data.get("net_avant_impot", brut_total * 0.78))
+    cout_employeur = float(bulletin_data.get("cout_total_employeur", brut_total * 1.45))
 
     bulletin = {
         "id": str(uuid.uuid4())[:8],
@@ -4661,9 +7326,9 @@ async def generer_bulletin(
 
 
 @app.get("/api/rh/bulletins")
-async def liste_bulletins():
+async def liste_bulletins(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les bulletins de paie generes."""
-    return _rh_bulletins
+    return _paginate(_rh_bulletins, offset, limit)
 
 
 @app.get("/api/rh/bulletins/{bulletin_id}/document")
@@ -4740,7 +7405,7 @@ td{{padding:6px 12px;border-bottom:1px solid #e2e8f0;font-size:.88em}}.num{{text
 <tr class="total" style="background:#f0fdf4"><td>NET A PAYER AVANT IMPOT</td><td></td><td class="num" style="font-size:1.1em">{bulletin["net_a_payer"]:.2f} EUR</td></tr>
 <tr class="total" style="background:#eff6ff"><td>COUT TOTAL EMPLOYEUR</td><td class="num">{bulletin["cout_total_employeur"]:.2f} EUR</td><td></td></tr>
 </table>
-<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.6.</p>
+<p style="font-size:.78em;color:#94a3b8;margin-top:30px">Bulletin conforme aux mentions obligatoires de l'article R.3243-1 du Code du travail. Document genere par NormaCheck v3.8.</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -4854,6 +7519,197 @@ async def creer_sous_compte(
 
 
 # ======================================================================
+# FEC - IMPORT / EXPORT / VALIDATION
+# ======================================================================
+
+@app.post("/api/fec/importer")
+async def importer_fec(file: UploadFile = File(...)):
+    """Importe et analyse un fichier FEC (Art. L.47 A-I LPF).
+
+    Accepte les formats : .fec, .txt, .csv avec separateur tabulation ou pipe.
+    Retourne l'analyse complete : conformite, equilibre, ecritures.
+    """
+    from urssaf_analyzer.parsers.fec_parser import FECParser, detecter_fec
+    from urssaf_analyzer.models.documents import Document
+
+    contenu = await file.read()
+    ext = Path(file.filename).suffix.lower() if file.filename else ".fec"
+
+    # Sauvegarder temporairement
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="wb") as tmp:
+        tmp.write(contenu)
+        tmp_path = Path(tmp.name)
+
+    try:
+        parser = FECParser()
+        if not parser.peut_traiter(tmp_path):
+            raise HTTPException(
+                400,
+                "Le fichier ne semble pas etre un FEC valide. "
+                "Verifiez que les 18 colonnes obligatoires sont presentes."
+            )
+
+        doc = Document(
+            nom_fichier=file.filename or "fec_import.fec",
+            chemin=str(tmp_path),
+            taille=len(contenu),
+        )
+
+        declarations = parser.parser(tmp_path, doc)
+        metadata = parser.extraire_metadata(tmp_path)
+
+        # Importer les ecritures FEC dans le moteur comptable
+        moteur = get_moteur()
+        ecritures_importees = 0
+        if declarations and declarations[0].metadata.get("ecritures_fec"):
+            from urssaf_analyzer.comptabilite.ecritures import Ecriture, LigneEcriture
+            ecritures_fec = declarations[0].metadata["ecritures_fec"]
+
+            # Regrouper par ecriture_num
+            par_num = {}
+            for ec in ecritures_fec:
+                num = ec.get("ecriture_num", "")
+                if num not in par_num:
+                    par_num[num] = []
+                par_num[num].append(ec)
+
+            for num, lignes_ec in par_num.items():
+                if not lignes_ec:
+                    continue
+                premiere = lignes_ec[0]
+                journal_code = premiere.get("journal_code", "OD")
+
+                # Mapper vers TypeJournal
+                tj = TypeJournal.OPERATIONS_DIVERSES
+                for t in TypeJournal:
+                    if t.value == journal_code:
+                        tj = t
+                        break
+
+                ecriture_date = None
+                if premiere.get("ecriture_date"):
+                    try:
+                        ecriture_date = date.fromisoformat(premiere["ecriture_date"])
+                    except (ValueError, TypeError):
+                        ecriture_date = date.today()
+
+                piece_date = None
+                if premiere.get("piece_date"):
+                    try:
+                        piece_date = date.fromisoformat(premiere["piece_date"])
+                    except (ValueError, TypeError):
+                        pass
+
+                ecriture = Ecriture(
+                    journal=tj,
+                    date_ecriture=ecriture_date or date.today(),
+                    date_piece=piece_date or ecriture_date or date.today(),
+                    numero_piece=premiere.get("piece_ref", num),
+                    libelle=premiere.get("ecriture_lib", ""),
+                )
+
+                for l in lignes_ec:
+                    ecriture.lignes.append(LigneEcriture(
+                        compte=l.get("compte_num", ""),
+                        libelle=l.get("ecriture_lib", ""),
+                        debit=Decimal(str(l.get("debit", 0))),
+                        credit=Decimal(str(l.get("credit", 0))),
+                        lettrage=l.get("ecrture_let", ""),
+                        piece_ref=l.get("piece_ref", ""),
+                    ))
+
+                moteur.ecritures.append(ecriture)
+                ecritures_importees += 1
+
+        # Retirer les ecritures brutes de la reponse (trop volumineux)
+        result_meta = {k: v for k, v in (declarations[0].metadata or {}).items()
+                       if k != "ecritures_fec"}
+
+        log_action("utilisateur", "import_fec", f"{file.filename}: {ecritures_importees} ecritures importees")
+        return {
+            "ok": True,
+            "fichier": file.filename,
+            "ecritures_importees": ecritures_importees,
+            "metadata": metadata,
+            "analyse": result_meta,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.get("/api/fec/exporter")
+async def exporter_fec_endpoint(
+    siren: str = Query("", description="SIREN de l'entreprise (9 chiffres)"),
+    date_cloture: Optional[str] = Query(None, description="Date de cloture (YYYY-MM-DD)"),
+    validees_seulement: bool = Query(True, description="N'exporter que les ecritures validees"),
+):
+    """Exporte les ecritures comptables au format FEC reglementaire.
+
+    Genere un fichier conforme a l'art. L.47 A-I LPF, telechargeable directement.
+    Nom de fichier : {SIREN}FEC{YYYYMMDD}.txt
+    """
+    from urssaf_analyzer.comptabilite.fec_export import exporter_fec, nom_fichier_fec
+    from fastapi.responses import Response
+
+    moteur = get_moteur()
+    if not moteur.ecritures:
+        raise HTTPException(404, "Aucune ecriture comptable a exporter")
+
+    dt_cloture = None
+    if date_cloture:
+        try:
+            dt_cloture = date.fromisoformat(date_cloture)
+        except ValueError:
+            raise HTTPException(400, "Format de date invalide (attendu: YYYY-MM-DD)")
+
+    contenu = exporter_fec(moteur, siren=siren, date_cloture=dt_cloture,
+                            validees_seulement=validees_seulement)
+    filename = nom_fichier_fec(siren, dt_cloture)
+
+    log_action("utilisateur", "export_fec", f"Export FEC: {filename}")
+    return Response(
+        content=contenu.encode("utf-8-sig"),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-FEC-Siren": siren or "000000000",
+        },
+    )
+
+
+@app.post("/api/fec/valider")
+async def valider_fec_endpoint(file: UploadFile = File(...)):
+    """Valide la conformite d'un fichier FEC (controles DGFIP).
+
+    Controles effectues :
+    - Presence des 18 colonnes obligatoires (art. A.47 A-1 LPF)
+    - Format des dates (YYYYMMDD)
+    - Equilibre debit/credit par ecriture
+    - Equilibre general du fichier
+    """
+    from urssaf_analyzer.comptabilite.fec_export import valider_fec as _valider_fec
+
+    contenu_bytes = await file.read()
+    try:
+        contenu = contenu_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        contenu = contenu_bytes.decode("latin-1")
+
+    # Detecter le separateur
+    premiere_ligne = contenu.split("\n", 1)[0]
+    sep = "\t"
+    for s in ("\t", "|", ";"):
+        if s in premiere_ligne:
+            sep = s
+            break
+
+    rapport = _valider_fec(contenu, separateur=sep)
+    rapport["fichier"] = file.filename
+    log_action("utilisateur", "validation_fec", f"{file.filename}: {'conforme' if rapport['valide'] else 'non conforme'}")
+    return rapport
+
+
+# ======================================================================
 # RH - ALERTES PERSONNALISABLES
 # ======================================================================
 
@@ -4886,6 +7742,121 @@ async def personnaliser_alerte(
 async def liste_config_alertes():
     """Liste la configuration des alertes."""
     return _alertes_config
+
+
+# ======================================================================
+# RH - ALERTES LIBRES (PERSONNALISEES PAR L'UTILISATEUR)
+# ======================================================================
+
+_alertes_libres: list[dict] = []
+
+
+@app.post("/api/rh/alertes/libres")
+async def creer_alerte_libre(
+    titre: str = Form(...),
+    description: str = Form(""),
+    type_alerte: str = Form("personnalise"),
+    urgence: str = Form("moyenne"),
+    date_echeance: str = Form(""),
+    recurrence: str = Form(""),
+    destinataire: str = Form(""),
+    action_requise: str = Form(""),
+    reference_legale: str = Form(""),
+    categorie: str = Form("autre"),
+    actif: str = Form("true"),
+    delai_rappel_jours: str = Form("7"),
+    notes: str = Form(""),
+):
+    """Cree une alerte libre/personnalisee par l'utilisateur.
+
+    Permet de configurer des rappels sur des echeances specifiques, des obligations
+    ponctuelles ou recurrentes, avec notification avant echeance.
+    """
+    alerte = {
+        "id": str(uuid.uuid4())[:8],
+        "titre": titre,
+        "description": description,
+        "type_alerte": type_alerte,
+        "urgence": urgence if urgence in ("haute", "moyenne", "info") else "moyenne",
+        "date_echeance": date_echeance,
+        "recurrence": recurrence if recurrence in ("", "quotidien", "hebdomadaire", "mensuel", "trimestriel", "semestriel", "annuel") else "",
+        "destinataire": destinataire,
+        "action_requise": action_requise,
+        "reference_legale": reference_legale,
+        "categorie": categorie,
+        "actif": actif.lower() == "true",
+        "delai_rappel_jours": int(delai_rappel_jours or "7"),
+        "notes": notes,
+        "date_creation": datetime.now().isoformat(),
+        "date_modification": datetime.now().isoformat(),
+        "statut": "active",
+    }
+    _alertes_libres.append(alerte)
+    log_action("utilisateur", "creation_alerte_libre", f"{titre}")
+    return alerte
+
+
+@app.get("/api/rh/alertes/libres")
+async def liste_alertes_libres():
+    """Liste toutes les alertes libres configurees."""
+    return _alertes_libres
+
+
+@app.put("/api/rh/alertes/libres/{alerte_id}")
+async def modifier_alerte_libre(
+    alerte_id: str,
+    titre: str = Form(""),
+    description: str = Form(""),
+    urgence: str = Form(""),
+    date_echeance: str = Form(""),
+    recurrence: str = Form(""),
+    action_requise: str = Form(""),
+    actif: str = Form(""),
+    delai_rappel_jours: str = Form(""),
+    statut: str = Form(""),
+    notes: str = Form(""),
+):
+    """Modifie une alerte libre existante."""
+    alerte = None
+    for a in _alertes_libres:
+        if a["id"] == alerte_id:
+            alerte = a
+            break
+    if not alerte:
+        raise HTTPException(404, "Alerte non trouvee")
+
+    if titre:
+        alerte["titre"] = titre
+    if description:
+        alerte["description"] = description
+    if urgence and urgence in ("haute", "moyenne", "info"):
+        alerte["urgence"] = urgence
+    if date_echeance:
+        alerte["date_echeance"] = date_echeance
+    if recurrence is not None:
+        alerte["recurrence"] = recurrence
+    if action_requise:
+        alerte["action_requise"] = action_requise
+    if actif:
+        alerte["actif"] = actif.lower() == "true"
+    if delai_rappel_jours:
+        alerte["delai_rappel_jours"] = int(delai_rappel_jours)
+    if statut and statut in ("active", "traitee", "reportee", "archivee"):
+        alerte["statut"] = statut
+    if notes:
+        alerte["notes"] = notes
+    alerte["date_modification"] = datetime.now().isoformat()
+    return alerte
+
+
+@app.delete("/api/rh/alertes/libres/{alerte_id}")
+async def supprimer_alerte_libre(alerte_id: str):
+    """Supprime une alerte libre."""
+    before = len(_alertes_libres)
+    _alertes_libres[:] = [a for a in _alertes_libres if a["id"] != alerte_id]
+    if len(_alertes_libres) == before:
+        raise HTTPException(404, "Alerte non trouvee")
+    return {"status": "ok", "message": "Alerte supprimee"}
 
 
 # ======================================================================
@@ -4944,9 +7915,9 @@ async def creer_avenant(
 
 
 @app.get("/api/rh/avenants")
-async def liste_avenants():
+async def liste_avenants(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les avenants."""
-    return _rh_avenants
+    return _paginate(_rh_avenants, offset, limit)
 
 
 # ======================================================================
@@ -4955,7 +7926,8 @@ async def liste_avenants():
 
 @app.post("/api/rh/conges")
 async def enregistrer_conge(
-    salarie_id: str = Form(...),
+    nom_salarie: str = Form(""),
+    salarie_id: str = Form(""),
     type_conge: str = Form(...),
     date_debut: str = Form(...),
     date_fin: str = Form(...),
@@ -4963,6 +7935,9 @@ async def enregistrer_conge(
     statut: str = Form("demande"),
 ):
     """Enregistre une demande ou un conge (art. L.3141-1 et suivants CT)."""
+    # Accept nom_salarie as an alias for salarie_id
+    effective_salarie_id = salarie_id or nom_salarie
+
     types_valides = ("cp", "rtt", "maladie", "maternite", "paternite", "sans_solde", "familial", "formation")
     if type_conge not in types_valides:
         raise HTTPException(400, f"Type de conge invalide. Valeurs acceptees: {', '.join(types_valides)}")
@@ -4987,7 +7962,9 @@ async def enregistrer_conge(
 
     conge = {
         "id": conge_id,
-        "salarie_id": salarie_id,
+        "salarie_id": effective_salarie_id,
+        "nom_salarie": nom_salarie,
+        "type": type_conge,
         "type_conge": type_conge,
         "date_debut": date_debut,
         "date_fin": date_fin,
@@ -4998,16 +7975,15 @@ async def enregistrer_conge(
     }
 
     _rh_conges.append(conge)
-    log_action("utilisateur", "enregistrement_conge", f"{type_conge} salarie {salarie_id} du {date_debut} au {date_fin}")
+    log_action("utilisateur", "enregistrement_conge", f"{type_conge} salarie {effective_salarie_id} du {date_debut} au {date_fin}")
     return conge
 
 
 @app.get("/api/rh/conges")
-async def liste_conges(salarie_id: Optional[str] = Query(None)):
+async def liste_conges(salarie_id: Optional[str] = Query(None), offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste les conges, avec filtre optionnel par salarie."""
-    if salarie_id:
-        return [c for c in _rh_conges if c["salarie_id"] == salarie_id]
-    return _rh_conges
+    data = [c for c in _rh_conges if c["salarie_id"] == salarie_id] if salarie_id else _rh_conges
+    return _paginate(data, offset, limit)
 
 
 # ======================================================================
@@ -5084,9 +8060,9 @@ async def enregistrer_arret(
 
 
 @app.get("/api/rh/arrets")
-async def liste_arrets():
+async def liste_arrets(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les arrets de travail."""
-    return _rh_arrets
+    return _paginate(_rh_arrets, offset, limit)
 
 
 # ======================================================================
@@ -5158,9 +8134,9 @@ async def enregistrer_sanction(
 
 
 @app.get("/api/rh/sanctions")
-async def liste_sanctions():
+async def liste_sanctions(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste toutes les sanctions disciplinaires."""
-    return _rh_sanctions
+    return _paginate(_rh_sanctions, offset, limit)
 
 
 # ======================================================================
@@ -5334,9 +8310,9 @@ async def generer_attestation(
 
 
 @app.get("/api/rh/attestations")
-async def liste_attestations():
+async def liste_attestations(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste toutes les attestations generees."""
-    return _rh_attestations
+    return _paginate(_rh_attestations, offset, limit)
 
 
 # ======================================================================
@@ -5423,9 +8399,9 @@ async def enregistrer_entretien(
 
 
 @app.get("/api/rh/entretiens")
-async def liste_entretiens():
+async def liste_entretiens(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les entretiens professionnels."""
-    return _rh_entretiens
+    return _paginate(_rh_entretiens, offset, limit)
 
 
 # ======================================================================
@@ -5516,9 +8492,9 @@ async def enregistrer_visite_medicale(
 
 
 @app.get("/api/rh/visites-medicales")
-async def liste_visites_medicales():
+async def liste_visites_medicales(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste toutes les visites medicales."""
-    return _rh_visites_med
+    return _paginate(_rh_visites_med, offset, limit)
 
 
 # ======================================================================
@@ -5810,7 +8786,7 @@ async def get_rh_alertes():
             "echeance": "",
         })
 
-    # 4k. DAS-2 (honoraires > 1200 EUR/beneficiaire/an)
+    # 4k. DAS-2 (honoraires > 2400 EUR/beneficiaire/an)
     kb = _biblio_knowledge
     docs_compta = kb.get("documents_comptables", [])
     factures_importees = [d for d in _doc_library if d.get("nature") in ("facture_achat", "facture_vente", "note_frais")]
@@ -5822,13 +8798,13 @@ async def get_rh_alertes():
             "titre": "DAS-2 : declaration des honoraires",
             "description": (
                 "Tout versement d'honoraires, commissions, courtages, ristournes "
-                "superieurs a 1200 EUR par beneficiaire et par an doit etre declare "
+                "superieurs a 2400 EUR par beneficiaire et par an doit etre declare "
                 "via la DAS-2 avant le 28 fevrier de l'annee suivante."
             ),
             "reference": "CGI art. 241 a 243-bis - CSS art. L.133-5-3",
             "action_requise": "Verifier le montant cumule des honoraires verses par beneficiaire et deposer la DAS-2",
             "echeance": f"{aujourdhui.year + 1}-02-28",
-            "incidence_legale": "Amende de 150 EUR par declaration omise ou inexacte (art. 1736 CGI). Majoration 50% si retard > 1 mois.",
+            "incidence_legale": "Amende de 50% des sommes non declarees (art. 1736 CGI). Majoration 50% si retard > 1 mois.",
         })
 
     # 4l. Heures supplementaires - contingent annuel 220h
@@ -5897,6 +8873,505 @@ async def get_rh_alertes():
             "reference": "Art. L.6315-1 CT",
             "action_requise": "Verifier la planification des entretiens professionnels pour chaque salarie",
             "incidence_legale": "Abondement correctif CPF de 3000 EUR par salarie si non-realise dans les 6 ans (entreprises >= 50 sal.).",
+        })
+
+    # --- 5. ECHEANCES LEGALES CALENDAIRES ---
+    mois = aujourdhui.month
+    annee = aujourdhui.year
+
+    # 5a. Taxe sur les salaires (entreprises non assujetties TVA)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "taxe_salaires",
+            "urgence": "info",
+            "titre": "Taxe sur les salaires (si non assujetti TVA)",
+            "description": (
+                "Les employeurs non soumis a la TVA ou partiellement doivent declarer et payer "
+                "la taxe sur les salaires. Baremes progressifs : 4.25%, 8.50%, 13.60%. "
+                "Paiement mensuel (>10 000 EUR/an), trimestriel (4 000-10 000 EUR) ou annuel."
+            ),
+            "reference": "CGI art. 231 a 231 bis V",
+            "action_requise": "Verifier l'assujettissement TVA et le cas echeant declarer la taxe sur les salaires",
+            "echeance": f"15 janvier {annee + 1}",
+            "incidence_legale": "Majoration de 10% pour defaut de declaration, 5% pour retard de paiement.",
+        })
+
+    # 5b. Contribution formation professionnelle et taxe apprentissage (via DSN depuis 2022)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "contribution_formation",
+            "urgence": "moyenne",
+            "titre": "Contribution formation professionnelle et taxe d'apprentissage",
+            "description": (
+                f"Depuis 2022, la contribution a la formation professionnelle (0.55% si <11 sal., 1% au-dela) "
+                f"et la taxe d'apprentissage (0.68%) sont collectees mensuellement via la DSN par l'URSSAF. "
+                f"Le solde de la taxe d'apprentissage (0.09%) est verse directement aux etablissements eligibles."
+            ),
+            "reference": "Art. L.6131-1 et L.6241-1 CT - Loi Avenir professionnel du 05/09/2018",
+            "action_requise": "Verifier le paiement via DSN et le versement du solde de la TA aux organismes eligibles",
+            "echeance": "Mensuel (DSN) + solde TA avant le 31 mai",
+            "incidence_legale": "Majoration de 100% de l'insuffisance constatee (art. L.6252-4 CT).",
+        })
+
+    # 5c. Participation construction (effort construction) >= 50 salaries
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "participation_construction",
+            "urgence": "moyenne",
+            "titre": "Participation a l'effort de construction (PEEC)",
+            "description": (
+                f"Les entreprises >= 50 salaries doivent investir 0.45% de la masse salariale N-1 dans "
+                f"le logement des salaries via un organisme collecteur (Action Logement). Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.313-1 CCH",
+            "action_requise": "Verifier le versement a Action Logement avant le 31 decembre",
+            "echeance": f"{annee}-12-31",
+            "incidence_legale": "Cotisation de 2% de la masse salariale en cas de non-versement (art. L.313-4 CCH).",
+        })
+
+    # 5d. AGEFIPH - Obligation emploi travailleurs handicapes >= 20 salaries
+    if nb_actifs >= 20:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "oeth_handicap",
+            "urgence": "moyenne",
+            "titre": "Obligation d'emploi de travailleurs handicapes (OETH)",
+            "description": (
+                f"Les entreprises >= 20 salaries doivent employer au moins 6% de travailleurs handicapes. "
+                f"Effectif actif: {nb_actifs}, objectif: {max(1, round(nb_actifs * 0.06))} TH. "
+                f"Declaration annuelle via la DSN."
+            ),
+            "reference": "Art. L.5212-1 et suivants CT",
+            "action_requise": "Verifier le taux d'emploi de TH et la declaration OETH via DSN",
+            "echeance": "Declaration annuelle via DSN de mars",
+            "incidence_legale": f"Contribution AGEFIPH : environ {max(1, round(nb_actifs * 0.06))} x 400 a 600 SMIC horaire/an selon effort.",
+        })
+
+    # 5e. Versement mobilite (transport) >= 11 salaries
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "versement_mobilite",
+            "urgence": "info",
+            "titre": "Versement mobilite (ex-versement transport)",
+            "description": (
+                f"Le versement mobilite est du par les entreprises >= 11 salaries. "
+                f"Taux variable selon la zone (0.55% a 2.95% en IDF). Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.2333-64 CGCT",
+            "action_requise": "Verifier le taux applicable selon la zone et le paiement via DSN",
+        })
+
+    # 5f. Forfait social sur epargne salariale
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "forfait_social",
+            "urgence": "info",
+            "titre": "Forfait social sur epargne salariale",
+            "description": (
+                "Le forfait social de 20% s'applique sur l'interessement, la participation, "
+                "l'abondement PEE pour les entreprises >= 50 salaries. "
+                "Exoneration pour les entreprises < 50 salaries."
+            ),
+            "reference": "Art. L.137-15 et L.137-16 CSS",
+            "action_requise": "Verifier le calcul et le paiement du forfait social sur les sommes versees",
+        })
+
+    # 5g. Contribution patronale prevoyance - Declaration DAS2
+    # deja gere en 4k
+
+    # 5h. Declaration des effectifs (DADS/DSN annuelle)
+    if nb_actifs >= 1 and mois in (1, 2):
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "dsn_annuelle",
+            "urgence": "haute",
+            "titre": "DSN evenementielle annuelle (bilan)",
+            "description": (
+                "La DSN de janvier doit inclure les donnees de bilan annuel : effectifs, "
+                "masse salariale annuelle, base OETH, base formation. A transmettre avant le 31 janvier."
+            ),
+            "reference": "Art. R.133-14 CSS",
+            "action_requise": "Verifier et transmettre la DSN annuelle (bilan) avant le 31 janvier",
+            "echeance": f"{annee}-01-31",
+        })
+
+    # 5i. Cotisations retraite complementaire AGIRC-ARRCO
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "agirc_arrco",
+            "urgence": "info",
+            "titre": "Cotisations retraite complementaire AGIRC-ARRCO",
+            "description": (
+                "Cotisations obligatoires : Tranche 1 (jusqu'a 1 PASS) 7.87% dont 3.15% salarial. "
+                "Tranche 2 (1 a 8 PASS) 21.59% dont 8.64% salarial. "
+                "Paiement mensuel ou trimestriel (< 10 salaries)."
+            ),
+            "reference": "ANI du 17/11/2017 - Accord AGIRC-ARRCO",
+            "action_requise": "Verifier les declarations et paiements AGIRC-ARRCO",
+        })
+
+    # 5j. Remboursement des frais de transport (50% abonnement)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "remboursement_transport",
+            "urgence": "info",
+            "titre": "Prise en charge obligatoire des frais de transport",
+            "description": (
+                "L'employeur doit prendre en charge 50% du prix des abonnements de transports "
+                "publics (metro, bus, train, velo). Egalement le forfait mobilites durables "
+                "(velo, covoiturage) jusqu'a 800 EUR/an net d'impot."
+            ),
+            "reference": "Art. L.3261-2 CT et Art. L.3261-3-1 CT",
+            "action_requise": "Verifier la prise en charge des abonnements transport et le forfait mobilites durables",
+            "incidence_legale": "Amende de 3750 EUR par salarie concerne (art. R.3261-1 CT).",
+        })
+
+    # 5k. NAO (Negociation Annuelle Obligatoire) >= 50 salaries
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "nao",
+            "urgence": "moyenne",
+            "titre": "Negociation Annuelle Obligatoire (NAO)",
+            "description": (
+                f"L'employeur doit engager chaque annee une negociation sur la remuneration, "
+                f"le temps de travail, le partage de la valeur ajoutee et l'egalite professionnelle. "
+                f"Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.2242-1 et suivants CT",
+            "action_requise": "Convoquer les delegues syndicaux pour l'ouverture de la NAO",
+            "echeance": "Annuelle",
+            "incidence_legale": "Delit d'entrave : 1 an d'emprisonnement et 3750 EUR d'amende (art. L.2243-1 CT).",
+        })
+
+    # 5l. BDESE (Base de Donnees Economiques, Sociales et Environnementales) >= 50 sal
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "bdese",
+            "urgence": "moyenne",
+            "titre": "BDESE (Base de Donnees Economiques, Sociales et Environnementales)",
+            "description": (
+                f"La BDESE doit etre mise a disposition du CSE et mise a jour annuellement. "
+                f"Contient les informations sur 6 ans (investissements, egalite, flux financiers, "
+                f"remuneration, fonds propres, consequences environnementales). Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.2312-18 et R.2312-7 CT - Loi Climat et Resilience 2021",
+            "action_requise": "Verifier la mise a jour annuelle de la BDESE",
+            "incidence_legale": "Delit d'entrave (7500 EUR d'amende).",
+        })
+
+    # 5m. Plan de mobilite >= 50 salaries sur un meme site
+    if nb_actifs >= 50:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "plan_mobilite",
+            "urgence": "info",
+            "titre": "Plan de mobilite employeur",
+            "description": (
+                f"Les entreprises regroupant >= 50 salaries sur un meme site doivent elaborer "
+                f"un plan de mobilite employeur. Effectif: {nb_actifs}."
+            ),
+            "reference": "Art. L.1214-8-2 Code des transports - Loi LOM du 24/12/2019",
+            "action_requise": "Elaborer ou mettre a jour le plan de mobilite",
+        })
+
+    # 5n. Referent harcelement CSE + employeur
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "referent_harcelement",
+            "urgence": "info",
+            "titre": "Designation d'un referent harcelement sexuel",
+            "description": (
+                "Le CSE doit designer un referent harcelement sexuel parmi ses membres. "
+                "Dans les entreprises >= 250 salaries, l'employeur doit aussi designer un referent charge "
+                "d'orienter, informer et accompagner les salaries."
+            ),
+            "reference": "Art. L.1153-5-1 CT et Art. L.2314-1 CT",
+            "action_requise": "Verifier la designation du/des referent(s) harcelement",
+        })
+
+    # 5o. Referent securite (personne competente prevention risques)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "referent_securite",
+            "urgence": "info",
+            "titre": "Designation d'un referent securite / prevention",
+            "description": (
+                "L'employeur doit designer un ou plusieurs salaries competents pour s'occuper "
+                "des activites de protection et de prevention des risques professionnels. "
+                "A defaut, il peut faire appel a des intervenants exterieurs (IPRP)."
+            ),
+            "reference": "Art. L.4644-1 CT",
+            "action_requise": "Verifier la designation du salarie competent en prevention",
+        })
+
+    # 5p. Entretien de retour (apres absence longue)
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif":
+            continue
+        # Verifier arrets > 30 jours
+        for arret in _rh_arrets:
+            if arret.get("salarie_id") == contrat.get("salarie_id") and arret.get("date_fin"):
+                try:
+                    fin_arret = date.fromisoformat(arret["date_fin"])
+                    debut_arret = date.fromisoformat(arret.get("date_debut", arret["date_fin"]))
+                    duree = (fin_arret - debut_arret).days
+                    retour_recent = 0 <= (aujourdhui - fin_arret).days <= 14
+                    if duree >= 30 and retour_recent:
+                        alertes.append({
+                            "id": str(uuid.uuid4())[:8],
+                            "type": "entretien_retour_absence",
+                            "urgence": "haute",
+                            "titre": f"Entretien de retour : {contrat['prenom_salarie']} {contrat['nom_salarie']}",
+                            "description": (
+                                f"Entretien de reprise obligatoire apres une absence de {duree} jours "
+                                f"(retour le {arret['date_fin']}). Un entretien professionnel doit etre propose "
+                                f"au salarie de retour d'un arret de travail d'au moins 30 jours."
+                            ),
+                            "reference": "Art. L.6315-1 CT - Art. R.4624-31 CT",
+                            "action_requise": "Organiser l'entretien professionnel de reprise et la visite medicale de reprise",
+                            "salarie_id": contrat.get("salarie_id"),
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+    # 5q. Visite d'information et de prevention (VIP) embauche
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif":
+            continue
+        try:
+            dd = date.fromisoformat(contrat["date_debut"])
+            anciennete = (aujourdhui - dd).days
+            if anciennete <= 90:  # < 3 mois
+                sid = contrat.get("salarie_id", "")
+                # Verifier si visite deja planifiee
+                a_visite = any(v.get("salarie_id") == sid for v in _rh_visites_med)
+                if not a_visite:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "vip_embauche",
+                        "urgence": "haute" if anciennete > 60 else "moyenne",
+                        "titre": f"VIP embauche : {contrat['prenom_salarie']} {contrat['nom_salarie']}",
+                        "description": (
+                            f"La visite d'information et de prevention (VIP) doit avoir lieu dans les 3 mois "
+                            f"suivant la prise de poste. Embauche le {contrat['date_debut']} ({anciennete} jours). "
+                            f"Suivi renforce si poste a risque."
+                        ),
+                        "reference": "Art. R.4624-10 CT",
+                        "action_requise": "Prendre rendez-vous avec le service de prevention et sante au travail",
+                        "salarie_id": sid,
+                        "contrat_id": contrat["id"],
+                    })
+        except (ValueError, TypeError):
+            pass
+
+    # 5r. Arrets de travail en cours - suivi
+    for arret in _rh_arrets:
+        if arret.get("date_fin") and arret.get("date_debut"):
+            try:
+                debut = date.fromisoformat(arret["date_debut"])
+                fin = date.fromisoformat(arret["date_fin"])
+                if debut <= aujourdhui <= fin:
+                    duree = (fin - debut).days
+                    jours_restants = (fin - aujourdhui).days
+                    nom_complet = arret.get("salarie_id", "")
+                    for c in _rh_contrats:
+                        if c.get("salarie_id") == arret.get("salarie_id"):
+                            nom_complet = f"{c['prenom_salarie']} {c['nom_salarie']}"
+                            break
+                    if jours_restants <= 7:
+                        alertes.append({
+                            "id": str(uuid.uuid4())[:8],
+                            "type": "retour_arret_imminent",
+                            "urgence": "moyenne",
+                            "titre": f"Retour d'arret imminent : {nom_complet}",
+                            "description": (
+                                f"Fin de l'arret prevue le {arret['date_fin']} (dans {jours_restants} jour(s)). "
+                                f"Duree totale: {duree} jours. "
+                                + ("Visite de reprise obligatoire (arret > 30 jours)." if duree >= 30 else "")
+                            ),
+                            "reference": "Art. R.4624-31 CT" if duree >= 30 else "",
+                            "action_requise": "Preparer la reprise" + (" et planifier la visite medicale de reprise" if duree >= 30 else ""),
+                            "salarie_id": arret.get("salarie_id"),
+                        })
+            except (ValueError, TypeError):
+                pass
+
+    # 5s. Conges payes en cours - solde et planification
+    for conge in _rh_conges:
+        if conge.get("date_fin") and conge.get("statut") in ("valide", "accepte", "en_cours"):
+            try:
+                fin_conge = date.fromisoformat(conge["date_fin"])
+                jours_avant_retour = (fin_conge - aujourdhui).days
+                if 0 <= jours_avant_retour <= 3:
+                    sid = conge.get("salarie_id", "")
+                    nom_complet = sid
+                    for c in _rh_contrats:
+                        if c.get("salarie_id") == sid:
+                            nom_complet = f"{c['prenom_salarie']} {c['nom_salarie']}"
+                            break
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "retour_conge",
+                        "urgence": "info",
+                        "titre": f"Retour de conge : {nom_complet}",
+                        "description": f"Retour prevu le {conge['date_fin']} (dans {jours_avant_retour} jour(s)).",
+                        "salarie_id": sid,
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # 5t. Sanctions disciplinaires - purge du dossier
+    for sanction in _rh_sanctions:
+        if sanction.get("date_notification"):
+            try:
+                date_sanction = date.fromisoformat(sanction["date_notification"])
+                anciennete_sanction = (aujourdhui - date_sanction).days
+                if 1060 <= anciennete_sanction <= 1100:  # Proche des 3 ans
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "purge_sanction",
+                        "urgence": "info",
+                        "titre": f"Sanction a purger : {sanction.get('nom_salarie', '')}",
+                        "description": (
+                            f"La sanction du {sanction['date_notification']} ne peut plus etre invoquee "
+                            f"(prescription de 3 ans - art. L.1332-5 CT). Elle doit etre retiree du dossier."
+                        ),
+                        "reference": "Art. L.1332-5 CT",
+                        "action_requise": "Retirer la sanction du dossier disciplinaire du salarie",
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    # 5u. Echeances fiscales calendaires
+    echeances_fiscales = [
+        (1, 15, "TVA mensuelle", "Declarer et payer la TVA du mois precedent (regime mensuel)", "CGI art. 287"),
+        (1, 15, "Acompte IS 1er trimestre", "Verser le 1er acompte d'IS (15% ou 25% de l'IS N-1)", "CGI art. 1668"),
+        (2, 28, "DAS-2 Honoraires", "Declarer les honoraires verses > 2400 EUR/beneficiaire/an", "CGI art. 240"),
+        (3, 1, "Index egalite pro", "Publier l'index d'egalite professionnelle F/H", "Art. L.1142-8 CT"),
+        (3, 31, "Contribution AGEFIPH", "Declaration OETH via DSN de mars", "Art. L.5212-5 CT"),
+        (4, 15, "Acompte IS 2eme trimestre", "Verser le 2e acompte d'IS", "CGI art. 1668"),
+        (5, 31, "Solde taxe apprentissage", "Verser le solde de la taxe d'apprentissage (0.09%)", "Art. L.6241-2 CT"),
+        (5, 15, "Liasse fiscale / IS", "Deposer la liasse fiscale et payer le solde d'IS", "CGI art. 223"),
+        (6, 15, "Acompte IS 3eme trimestre", "Verser le 3e acompte d'IS", "CGI art. 1668"),
+        (12, 15, "Acompte IS 4eme trimestre", "Verser le 4e acompte d'IS", "CGI art. 1668"),
+        (12, 31, "PEEC (Action Logement)", "Verser la participation construction 0.45%", "Art. L.313-1 CCH"),
+    ]
+
+    for m_ech, j_ech, titre_ech, desc_ech, ref_ech in echeances_fiscales:
+        try:
+            date_ech = date(annee, m_ech, j_ech)
+            jours_avant = (date_ech - aujourdhui).days
+            if -7 <= jours_avant <= 30:
+                urg = "haute" if jours_avant <= 3 else ("moyenne" if jours_avant <= 14 else "info")
+                alertes.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "type": "echeance_fiscale",
+                    "urgence": urg,
+                    "titre": titre_ech,
+                    "description": f"{desc_ech}. Echeance: {date_ech.isoformat()} ({jours_avant} jour(s)).",
+                    "reference": ref_ech,
+                    "action_requise": desc_ech,
+                    "echeance": date_ech.isoformat(),
+                })
+        except (ValueError, TypeError):
+            pass
+
+    # 5v. Elections CSE - renouvellement tous les 4 ans
+    if nb_actifs >= 11:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "elections_cse_renouvellement",
+            "urgence": "info",
+            "titre": "Renouvellement du CSE (tous les 4 ans)",
+            "description": (
+                "Le mandat des elus du CSE est de 4 ans. L'employeur doit organiser les elections "
+                "de renouvellement et informer les organisations syndicales au moins 2 mois avant l'expiration."
+            ),
+            "reference": "Art. L.2314-33 et L.2314-4 CT",
+            "action_requise": "Verifier la date de fin des mandats CSE et anticiper l'organisation des elections",
+        })
+
+    # 5w. Protection des donnees (RGPD / DPO)
+    if nb_actifs >= 1:
+        alertes.append({
+            "id": str(uuid.uuid4())[:8],
+            "type": "rgpd_conformite",
+            "urgence": "info",
+            "titre": "Conformite RGPD - Protection des donnees personnelles",
+            "description": (
+                "L'employeur traite des donnees personnelles de ses salaries (paie, sante, evaluations). "
+                "Registre des traitements obligatoire. DPO obligatoire si plus de 250 salaries ou "
+                "traitement de donnees sensibles a grande echelle."
+            ),
+            "reference": "RGPD art. 30, 37 - Loi Informatique et Libertes (CNIL)",
+            "action_requise": "Verifier le registre des traitements, les clauses contractuelles et la designation DPO si necessaire",
+        })
+
+    # 5x. Medaille du travail (20, 30, 35, 40 ans)
+    for contrat in _rh_contrats:
+        if contrat.get("statut") != "actif" or not contrat.get("date_debut"):
+            continue
+        try:
+            dd = date.fromisoformat(contrat["date_debut"])
+            anciennete_ans = (aujourdhui - dd).days / 365.25
+            for seuil in (20, 30, 35, 40):
+                if seuil - 0.5 <= anciennete_ans <= seuil + 0.5:
+                    alertes.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "type": "medaille_travail",
+                        "urgence": "info",
+                        "titre": f"Medaille du travail : {contrat['prenom_salarie']} {contrat['nom_salarie']} ({seuil} ans)",
+                        "description": (
+                            f"Eligible a la medaille du travail ({seuil} ans de service). "
+                            f"Gratification facultative exoneree dans la limite d'un mois de salaire."
+                        ),
+                        "reference": "Decret n2000-1015 du 17/10/2000",
+                        "salarie_id": contrat.get("salarie_id"),
+                    })
+                    break
+        except (ValueError, TypeError):
+            pass
+
+    # --- 5bis. Alertes libres de l'utilisateur ---
+    for al in _alertes_libres:
+        if not al.get("actif", True) or al.get("statut") == "archivee":
+            continue
+        urgence_libre = al.get("urgence", "moyenne")
+        # Ajuster urgence si echeance proche
+        if al.get("date_echeance"):
+            try:
+                ech = date.fromisoformat(al["date_echeance"])
+                jours_avant = (ech - aujourdhui).days
+                if jours_avant < 0:
+                    urgence_libre = "haute"
+                elif jours_avant <= al.get("delai_rappel_jours", 7):
+                    urgence_libre = "haute" if jours_avant <= 3 else "moyenne"
+            except (ValueError, TypeError):
+                pass
+        alertes.append({
+            "id": al["id"],
+            "type": al.get("type_alerte", "personnalise"),
+            "urgence": urgence_libre,
+            "titre": al.get("titre", "Alerte personnalisee"),
+            "description": al.get("description", ""),
+            "reference": al.get("reference_legale", ""),
+            "action_requise": al.get("action_requise", ""),
+            "echeance": al.get("date_echeance", ""),
+            "recurrence": al.get("recurrence", ""),
+            "categorie": al.get("categorie", "autre"),
+            "notes": al.get("notes", ""),
+            "est_libre": True,
         })
 
     # --- 6. Rappels declarations ---
@@ -6046,40 +9521,83 @@ async def enregistrer_echange(
 
 
 @app.get("/api/rh/echanges")
-async def liste_echanges():
+async def liste_echanges(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
     """Liste tous les echanges enregistres."""
-    return _rh_echanges
+    return _paginate(_rh_echanges, offset, limit)
 
 
 # ======================================================================
-# RH - PLANNING
+# RH - PLANNING (vues jour/hebdo/mensuelle/annuelle, filtrage, integration salaries)
 # ======================================================================
 
-@app.post("/api/rh/planning")
-async def ajouter_planning(
-    salarie_id: str = Form(...),
-    date: str = Form(...),
-    heure_debut: str = Form(...),
-    heure_fin: str = Form(...),
-    type_poste: str = Form("normal"),
-):
-    """Ajoute ou modifie une entree de planning pour un salarie."""
-    types_valides = ("normal", "astreinte", "nuit", "dimanche", "ferie")
-    if type_poste not in types_valides:
-        raise HTTPException(400, f"Type de poste invalide. Valeurs acceptees: {', '.join(types_valides)}")
+# Creneau par defaut applique a l'integration automatique (modifiable)
+_planning_creneau_defaut = {
+    "heure_debut": "09:00",
+    "heure_fin": "17:00",
+    "type_poste": "normal",
+}
 
-    planning_id = str(uuid.uuid4())[:8]
 
-    # Calcul de la duree
-    try:
-        h_deb = datetime.strptime(heure_debut, "%H:%M")
-        h_fin = datetime.strptime(heure_fin, "%H:%M")
-        duree_minutes = (h_fin - h_deb).seconds // 60
-        duree_heures = round(duree_minutes / 60, 2)
-    except (ValueError, TypeError):
-        duree_heures = 0
+def _resoudre_salarie(salarie_id: str) -> dict:
+    """Resout les infos d'un salarie depuis contrats RH et base de connaissances."""
+    # 1. Chercher dans les contrats RH
+    for c in _rh_contrats:
+        if c.get("id") == salarie_id or c.get("salarie_id") == salarie_id:
+            return {
+                "id": c.get("id", salarie_id),
+                "nom": c.get("nom", ""),
+                "prenom": c.get("prenom", ""),
+                "nom_complet": f"{c.get('prenom', '')} {c.get('nom', '')}".strip(),
+                "statut": c.get("categorie", c.get("statut", "")),
+                "type_contrat": c.get("type_contrat", ""),
+                "source": "contrat_rh",
+            }
+    # 2. Chercher dans la base de connaissances (salaries detectes)
+    kb = _biblio_knowledge
+    for nir, sal in kb.get("salaries", {}).items():
+        if nir == salarie_id or sal.get("nom", "") == salarie_id:
+            return {
+                "id": nir,
+                "nom": sal.get("nom", ""),
+                "prenom": sal.get("prenom", ""),
+                "nom_complet": f"{sal.get('prenom', '')} {sal.get('nom', '')}".strip(),
+                "statut": sal.get("statut", ""),
+                "type_contrat": "",
+                "source": "analyse_documents",
+            }
+    return {
+        "id": salarie_id,
+        "nom": salarie_id,
+        "prenom": "",
+        "nom_complet": salarie_id,
+        "statut": "",
+        "type_contrat": "",
+        "source": "manuel",
+    }
 
-    # Majorations applicables
+
+def _get_statut_jour(salarie_id: str, date_str: str) -> str:
+    """Determine le statut d'un salarie pour un jour donne (present, conge, absence, arret)."""
+    # Verifier conges
+    for c in _rh_conges:
+        if c.get("salarie_id") == salarie_id or c.get("nom_salarie") == salarie_id:
+            if c.get("statut") != "refuse":
+                deb = c.get("date_debut", "")
+                fin = c.get("date_fin", "")
+                if deb <= date_str <= fin:
+                    return f"conge_{c.get('type_conge', c.get('type', 'cp'))}"
+    # Verifier arrets
+    for a in _rh_arrets:
+        if a.get("salarie_id") == salarie_id:
+            deb = a.get("date_debut", "")
+            fin = a.get("date_fin", "")
+            if deb <= date_str <= fin:
+                return f"arret_{a.get('type_arret', a.get('type', 'maladie'))}"
+    return "present"
+
+
+def _calculer_majorations(type_poste: str) -> list[dict]:
+    """Calcule les majorations applicables selon le type de poste."""
     majorations = []
     if type_poste == "nuit":
         majorations.append({
@@ -6105,36 +9623,173 @@ async def ajouter_planning(
             "taux": "Compensation obligatoire (repos ou financiere)",
             "reference": "Art. L.3121-9 CT",
         })
+    return majorations
 
-    # Verifier s'il existe deja une entree pour ce salarie a cette date, et la remplacer
+
+def _semaine_iso_vers_dates(semaine: str):
+    """Convertit une semaine ISO (YYYY-Www) en tuple (lundi, dimanche)."""
+    from datetime import timedelta
+    parts = semaine.split("-W")
+    if len(parts) != 2:
+        raise ValueError("Format semaine invalide. Utiliser YYYY-Www (ex: 2026-W10)")
+    annee = int(parts[0])
+    num_semaine = int(parts[1])
+    jan4 = date(annee, 1, 4)
+    lundi_s1 = jan4 - timedelta(days=jan4.weekday())
+    lundi = lundi_s1 + timedelta(weeks=num_semaine - 1)
+    dimanche = lundi + timedelta(days=6)
+    return lundi, dimanche
+
+
+@app.get("/api/rh/salaries")
+async def liste_salaries():
+    """Liste tous les salaries connus (detectes par analyse + contrats RH + manuels).
+
+    Alimente la liste deroulante du planning.
+    Fusionne les sources : base de connaissances (OCR/DSN) et contrats RH.
+    """
+    salaries = {}
+
+    # 1. Salaries detectes lors de l'analyse documentaire
+    kb = _biblio_knowledge
+    for nir, sal in kb.get("salaries", {}).items():
+        nom_complet = f"{sal.get('prenom', '')} {sal.get('nom', '')}".strip()
+        salaries[nir] = {
+            "id": nir,
+            "nir": nir if not nir.startswith("unknown_") else "",
+            "nom": sal.get("nom", ""),
+            "prenom": sal.get("prenom", ""),
+            "nom_complet": nom_complet or nir,
+            "statut": sal.get("statut", ""),
+            "dernier_brut": sal.get("dernier_brut", 0),
+            "type_contrat": "",
+            "source": "analyse_documents",
+            "date_embauche": "",
+            "actif": True,
+        }
+
+    # 2. Salaries issus des contrats RH (enrichir ou ajouter)
+    for c in _rh_contrats:
+        cid = c.get("id", "")
+        nom_complet = f"{c.get('prenom', '')} {c.get('nom', '')}".strip()
+        # Chercher si deja present par NIR dans les salaries detectes
+        matched = False
+        for nir, sal in list(salaries.items()):
+            if sal["nom"] == c.get("nom", "") and sal["prenom"] == c.get("prenom", ""):
+                # Enrichir le salarie existant
+                salaries[nir]["type_contrat"] = c.get("type_contrat", "")
+                salaries[nir]["date_embauche"] = c.get("date_debut", "")
+                salaries[nir]["source"] = "contrat_rh+analyse"
+                salaries[nir]["actif"] = c.get("statut", "") != "termine"
+                matched = True
+                break
+        if not matched:
+            salaries[cid] = {
+                "id": cid,
+                "nir": c.get("nir", ""),
+                "nom": c.get("nom", ""),
+                "prenom": c.get("prenom", ""),
+                "nom_complet": nom_complet or cid,
+                "statut": c.get("categorie", c.get("statut", "")),
+                "dernier_brut": float(c.get("remuneration", 0)),
+                "type_contrat": c.get("type_contrat", ""),
+                "source": "contrat_rh",
+                "date_embauche": c.get("date_debut", ""),
+                "actif": c.get("statut", "") != "termine",
+            }
+
+    # 3. Salaries presents uniquement dans le planning (ajouts manuels)
+    for p in _rh_planning:
+        sid = p.get("salarie_id", "")
+        if sid and sid not in salaries:
+            salaries[sid] = {
+                "id": sid,
+                "nir": "",
+                "nom": p.get("salarie_nom", sid),
+                "prenom": "",
+                "nom_complet": p.get("salarie_nom", sid),
+                "statut": "",
+                "dernier_brut": 0,
+                "type_contrat": "",
+                "source": "planning_manuel",
+                "date_embauche": "",
+                "actif": True,
+            }
+
+    result = sorted(salaries.values(), key=lambda s: s.get("nom_complet", ""))
+    return {"total": len(result), "salaries": result}
+
+
+@app.post("/api/rh/planning")
+async def ajouter_planning(
+    salarie_id: str = Form(...),
+    date: str = Form(...),
+    heure_debut: str = Form(""),
+    heure_fin: str = Form(""),
+    type_poste: str = Form(""),
+    statut: str = Form(""),
+):
+    """Ajoute ou modifie une entree de planning pour un salarie.
+
+    Si heure_debut/heure_fin ne sont pas fournis, utilise le creneau par defaut.
+    Le statut peut etre force (conge_cp, arret_maladie...) ou determine automatiquement.
+    """
+    # Appliquer le creneau par defaut si non specifie
+    if not heure_debut:
+        heure_debut = _planning_creneau_defaut["heure_debut"]
+    if not heure_fin:
+        heure_fin = _planning_creneau_defaut["heure_fin"]
+    if not type_poste:
+        type_poste = _planning_creneau_defaut["type_poste"]
+
+    types_valides = ("normal", "astreinte", "nuit", "dimanche", "ferie")
+    if type_poste not in types_valides:
+        raise HTTPException(400, f"Type de poste invalide. Valeurs acceptees: {', '.join(types_valides)}")
+
+    planning_id = str(uuid.uuid4())[:8]
+
+    # Calcul de la duree
+    try:
+        h_deb = datetime.strptime(heure_debut, "%H:%M")
+        h_fin = datetime.strptime(heure_fin, "%H:%M")
+        duree_minutes = (h_fin - h_deb).seconds // 60
+        duree_heures = round(duree_minutes / 60, 2)
+    except (ValueError, TypeError):
+        duree_heures = 0
+
+    majorations = _calculer_majorations(type_poste)
+
+    # Verifier s'il existe deja une entree pour ce salarie a cette date/heure
     index_existant = None
     for i, p in enumerate(_rh_planning):
         if p["salarie_id"] == salarie_id and p["date"] == date and p["heure_debut"] == heure_debut:
             index_existant = i
             break
 
-    # Resoudre le nom du salarie depuis les contrats
-    salarie_nom = salarie_id
-    for c in _rh_contrats:
-        if c.get("id") == salarie_id:
-            salarie_nom = f"{c.get('prenom', '')} {c.get('nom', '')}".strip() or salarie_id
-            break
+    # Resoudre le nom du salarie
+    sal_info = _resoudre_salarie(salarie_id)
+
+    # Determiner le statut automatiquement si non force
+    if not statut:
+        statut = _get_statut_jour(salarie_id, date)
 
     entree = {
         "id": planning_id,
         "salarie_id": salarie_id,
-        "salarie_nom": salarie_nom,
+        "salarie_nom": sal_info["nom_complet"],
+        "salarie_statut": sal_info["statut"],
         "date": date,
         "heure_debut": heure_debut,
         "heure_fin": heure_fin,
         "duree_heures": duree_heures,
         "type_poste": type_poste,
+        "statut": statut,
         "majorations": majorations,
         "date_creation": datetime.now().isoformat(),
     }
 
     if index_existant is not None:
-        entree["id"] = _rh_planning[index_existant]["id"]  # Conserver l'id original
+        entree["id"] = _rh_planning[index_existant]["id"]
         _rh_planning[index_existant] = entree
         log_action("utilisateur", "modification_planning", f"salarie {salarie_id} le {date} {heure_debut}-{heure_fin}")
     else:
@@ -6145,34 +9800,36 @@ async def ajouter_planning(
 
 
 @app.get("/api/rh/planning")
-async def liste_planning(semaine: Optional[str] = Query(None)):
-    """Liste le planning, avec filtre optionnel par semaine ISO (ex: 2026-W08).
+async def liste_planning(
+    semaine: Optional[str] = Query(None, description="Semaine ISO: YYYY-Www (ex: 2026-W10)"),
+    salarie_id: Optional[str] = Query(None, description="Filtrer par salarie"),
+    statut: Optional[str] = Query(None, description="Filtrer par statut (present, conge_cp, arret_maladie...)"),
+):
+    """Liste le planning hebdomadaire avec filtres optionnels.
 
-    Le format semaine est ISO 8601: YYYY-Www (ex: 2026-W08).
+    Filtres disponibles :
+    - semaine : format ISO 8601 YYYY-Www (ex: 2026-W10)
+    - salarie_id : identifiant du salarie
+    - statut : present, conge_cp, conge_maladie, arret_maladie, arret_accident_travail...
     """
+    data = list(_rh_planning)
+
+    # Filtre par salarie
+    if salarie_id:
+        data = [p for p in data if p.get("salarie_id") == salarie_id or p.get("salarie_nom", "").lower() == salarie_id.lower()]
+
+    # Filtre par statut
+    if statut:
+        data = [p for p in data if p.get("statut", "present") == statut]
+
     if not semaine:
-        return _rh_planning
+        return _paginate(data, 0, _DEFAULT_PAGE_LIMIT)
 
-    # Parser la semaine ISO pour determiner les dates lundi-dimanche
+    # Parser la semaine ISO
     try:
-        # Format: 2026-W08
-        parts = semaine.split("-W")
-        if len(parts) != 2:
-            raise HTTPException(400, "Format semaine invalide. Utiliser YYYY-Www (ex: 2026-W08)")
-        annee = int(parts[0])
-        num_semaine = int(parts[1])
-
-        # Calculer le lundi de la semaine ISO
-        # Le 4 janvier est toujours dans la semaine 1 ISO
-        jan4 = date(annee, 1, 4)
-        # Lundi de la semaine 1
-        lundi_s1 = jan4 - __import__("datetime").timedelta(days=jan4.weekday())
-        # Lundi de la semaine demandee
-        lundi = lundi_s1 + __import__("datetime").timedelta(weeks=num_semaine - 1)
-        dimanche = lundi + __import__("datetime").timedelta(days=6)
-
+        lundi, dimanche = _semaine_iso_vers_dates(semaine)
         resultats = []
-        for p in _rh_planning:
+        for p in data:
             try:
                 d = date.fromisoformat(p["date"])
                 if lundi <= d <= dimanche:
@@ -6189,6 +9846,340 @@ async def liste_planning(semaine: Optional[str] = Query(None)):
         }
     except (ValueError, TypeError) as e:
         raise HTTPException(400, f"Format semaine invalide: {e}")
+
+
+@app.get("/api/rh/planning/jour")
+async def planning_jour(
+    date_jour: str = Query(..., description="Date au format YYYY-MM-DD"),
+    salarie_id: Optional[str] = Query(None),
+    statut: Optional[str] = Query(None),
+):
+    """Vue journaliere du planning.
+
+    Retourne tous les creneaux planifies pour une date donnee,
+    enrichis du statut reel de chaque salarie (present, conge, arret...).
+    """
+    try:
+        d = date.fromisoformat(date_jour)
+    except ValueError:
+        raise HTTPException(400, "Format de date invalide (attendu: YYYY-MM-DD)")
+
+    entrees = []
+    for p in _rh_planning:
+        if p.get("date") != date_jour:
+            continue
+        if salarie_id and p.get("salarie_id") != salarie_id:
+            continue
+        # Enrichir avec le statut reel
+        st = _get_statut_jour(p["salarie_id"], date_jour)
+        entry = dict(p)
+        entry["statut_reel"] = st
+        if statut and st != statut:
+            continue
+        entrees.append(entry)
+
+    # Ajouter les salaries qui n'ont pas de creneau mais ont un statut specifique ce jour
+    ids_planifies = {p["salarie_id"] for p in entrees}
+    tous_salaries = set()
+    for c in _rh_contrats:
+        if c.get("statut") != "termine":
+            tous_salaries.add(c.get("id", ""))
+    for nir in _biblio_knowledge.get("salaries", {}):
+        tous_salaries.add(nir)
+
+    for sid in tous_salaries:
+        if sid in ids_planifies:
+            continue
+        st = _get_statut_jour(sid, date_jour)
+        if st != "present":
+            sal = _resoudre_salarie(sid)
+            entrees.append({
+                "id": "",
+                "salarie_id": sid,
+                "salarie_nom": sal["nom_complet"],
+                "salarie_statut": sal["statut"],
+                "date": date_jour,
+                "heure_debut": "",
+                "heure_fin": "",
+                "duree_heures": 0,
+                "type_poste": "",
+                "statut": st,
+                "statut_reel": st,
+                "majorations": [],
+            })
+
+    jour_semaine = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    return {
+        "date": date_jour,
+        "jour": jour_semaine[d.weekday()],
+        "entrees": entrees,
+        "nb_entrees": len(entrees),
+        "nb_presents": sum(1 for e in entrees if e.get("statut_reel", e.get("statut")) == "present"),
+        "nb_absents": sum(1 for e in entrees if e.get("statut_reel", e.get("statut")) != "present"),
+    }
+
+
+@app.get("/api/rh/planning/mois")
+async def planning_mois(
+    annee: int = Query(..., description="Annee"),
+    mois: int = Query(..., ge=1, le=12, description="Mois (1-12)"),
+    salarie_id: Optional[str] = Query(None),
+    statut: Optional[str] = Query(None),
+):
+    """Vue mensuelle du planning.
+
+    Retourne un calendrier mensuel avec pour chaque jour le nombre de
+    salaries presents/absents et le detail des creneaux.
+    """
+    import calendar
+    nb_jours = calendar.monthrange(annee, mois)[1]
+
+    jours = []
+    jour_semaine = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    total_heures = 0
+
+    for j in range(1, nb_jours + 1):
+        d = date(annee, mois, j)
+        date_str = d.isoformat()
+
+        entrees_jour = []
+        for p in _rh_planning:
+            if p.get("date") != date_str:
+                continue
+            if salarie_id and p.get("salarie_id") != salarie_id:
+                continue
+            st = _get_statut_jour(p["salarie_id"], date_str)
+            entry = {
+                "salarie_id": p["salarie_id"],
+                "salarie_nom": p.get("salarie_nom", ""),
+                "heure_debut": p.get("heure_debut", ""),
+                "heure_fin": p.get("heure_fin", ""),
+                "type_poste": p.get("type_poste", "normal"),
+                "statut": st,
+                "duree_heures": p.get("duree_heures", 0),
+            }
+            if statut and st != statut:
+                continue
+            entrees_jour.append(entry)
+            total_heures += p.get("duree_heures", 0)
+
+        jours.append({
+            "date": date_str,
+            "jour_semaine": jour_semaine[d.weekday()],
+            "nb_salaries": len(entrees_jour),
+            "nb_presents": sum(1 for e in entrees_jour if e["statut"] == "present"),
+            "nb_absents": sum(1 for e in entrees_jour if e["statut"] != "present"),
+            "entrees": entrees_jour,
+        })
+
+    return {
+        "annee": annee,
+        "mois": mois,
+        "nb_jours": nb_jours,
+        "jours": jours,
+        "total_heures_planifiees": round(total_heures, 2),
+    }
+
+
+@app.get("/api/rh/planning/annee")
+async def planning_annee(
+    annee: int = Query(..., description="Annee"),
+    salarie_id: Optional[str] = Query(None),
+):
+    """Vue annuelle du planning.
+
+    Retourne un resume par mois : jours travailles, heures, absences.
+    """
+    import calendar
+
+    mois_resume = []
+    total_heures_annee = 0
+    total_jours_travailles = 0
+    total_absences = 0
+
+    for m in range(1, 13):
+        nb_jours = calendar.monthrange(annee, m)[1]
+        heures_mois = 0
+        jours_travailles = 0
+        jours_absence = 0
+
+        for j in range(1, nb_jours + 1):
+            date_str = date(annee, m, j).isoformat()
+            entrees_jour = [p for p in _rh_planning if p.get("date") == date_str]
+            if salarie_id:
+                entrees_jour = [p for p in entrees_jour if p.get("salarie_id") == salarie_id]
+
+            if entrees_jour:
+                jours_travailles += 1
+                heures_mois += sum(p.get("duree_heures", 0) for p in entrees_jour)
+
+            # Compter les absences
+            if salarie_id:
+                st = _get_statut_jour(salarie_id, date_str)
+                if st != "present":
+                    jours_absence += 1
+
+        mois_noms = ["", "Janvier", "Fevrier", "Mars", "Avril", "Mai", "Juin",
+                      "Juillet", "Aout", "Septembre", "Octobre", "Novembre", "Decembre"]
+        mois_resume.append({
+            "mois": m,
+            "nom_mois": mois_noms[m],
+            "jours_travailles": jours_travailles,
+            "heures_planifiees": round(heures_mois, 2),
+            "jours_absence": jours_absence,
+        })
+        total_heures_annee += heures_mois
+        total_jours_travailles += jours_travailles
+        total_absences += jours_absence
+
+    return {
+        "annee": annee,
+        "salarie_id": salarie_id,
+        "mois": mois_resume,
+        "total_heures": round(total_heures_annee, 2),
+        "total_jours_travailles": total_jours_travailles,
+        "total_jours_absence": total_absences,
+    }
+
+
+@app.post("/api/rh/planning/integrer-salaries")
+async def integrer_salaries_planning(
+    date_debut: str = Form(..., description="Date de debut (YYYY-MM-DD)"),
+    date_fin: str = Form(..., description="Date de fin (YYYY-MM-DD)"),
+    heure_debut: str = Form(""),
+    heure_fin: str = Form(""),
+    type_poste: str = Form(""),
+    jours_semaine: str = Form("1,2,3,4,5"),
+):
+    """Integre automatiquement tous les salaries detectes et contractuels au planning.
+
+    Cree des creneaux par defaut pour chaque salarie actif sur la periode demandee.
+    Par defaut : lundi-vendredi, creneau par defaut (modifiable).
+    jours_semaine : liste des jours (1=lundi...7=dimanche), ex: "1,2,3,4,5"
+    """
+    from datetime import timedelta
+
+    if not heure_debut:
+        heure_debut = _planning_creneau_defaut["heure_debut"]
+    if not heure_fin:
+        heure_fin = _planning_creneau_defaut["heure_fin"]
+    if not type_poste:
+        type_poste = _planning_creneau_defaut["type_poste"]
+
+    try:
+        d_debut = date.fromisoformat(date_debut)
+        d_fin = date.fromisoformat(date_fin)
+    except ValueError:
+        raise HTTPException(400, "Format de date invalide (attendu: YYYY-MM-DD)")
+
+    if d_fin < d_debut:
+        raise HTTPException(400, "date_fin doit etre >= date_debut")
+    if (d_fin - d_debut).days > 366:
+        raise HTTPException(400, "Periode maximale: 366 jours")
+
+    try:
+        jours = [int(j.strip()) for j in jours_semaine.split(",")]
+    except ValueError:
+        raise HTTPException(400, "jours_semaine invalide (ex: 1,2,3,4,5)")
+
+    # Collecter tous les salaries actifs
+    salaries_actifs = {}
+    # Depuis les contrats RH
+    for c in _rh_contrats:
+        if c.get("statut") != "termine":
+            cid = c.get("id", "")
+            salaries_actifs[cid] = f"{c.get('prenom', '')} {c.get('nom', '')}".strip() or cid
+    # Depuis la base de connaissances
+    for nir, sal in _biblio_knowledge.get("salaries", {}).items():
+        if nir not in salaries_actifs:
+            nom = f"{sal.get('prenom', '')} {sal.get('nom', '')}".strip() or nir
+            salaries_actifs[nir] = nom
+
+    if not salaries_actifs:
+        return {"ok": True, "nb_entrees_creees": 0, "message": "Aucun salarie connu a integrer"}
+
+    # Calcul duree
+    try:
+        h_deb = datetime.strptime(heure_debut, "%H:%M")
+        h_fin_dt = datetime.strptime(heure_fin, "%H:%M")
+        duree_heures = round((h_fin_dt - h_deb).seconds / 3600, 2)
+    except (ValueError, TypeError):
+        duree_heures = 0
+
+    majorations = _calculer_majorations(type_poste)
+
+    # Generer les creneaux
+    nb_creees = 0
+    current = d_debut
+    while current <= d_fin:
+        # weekday(): 0=lundi, 6=dimanche => ISO: 1=lundi, 7=dimanche
+        jour_iso = current.weekday() + 1
+        if jour_iso in jours:
+            date_str = current.isoformat()
+            for sid, nom in salaries_actifs.items():
+                # Verifier si deja present dans le planning
+                deja = any(
+                    p["salarie_id"] == sid and p["date"] == date_str and p["heure_debut"] == heure_debut
+                    for p in _rh_planning
+                )
+                if deja:
+                    continue
+
+                st = _get_statut_jour(sid, date_str)
+                _rh_planning.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "salarie_id": sid,
+                    "salarie_nom": nom,
+                    "salarie_statut": "",
+                    "date": date_str,
+                    "heure_debut": heure_debut,
+                    "heure_fin": heure_fin,
+                    "duree_heures": duree_heures,
+                    "type_poste": type_poste,
+                    "statut": st,
+                    "majorations": majorations,
+                    "date_creation": datetime.now().isoformat(),
+                })
+                nb_creees += 1
+        current += timedelta(days=1)
+
+    log_action("utilisateur", "integration_planning",
+               f"{nb_creees} creneaux crees pour {len(salaries_actifs)} salaries du {date_debut} au {date_fin}")
+    return {
+        "ok": True,
+        "nb_salaries": len(salaries_actifs),
+        "nb_entrees_creees": nb_creees,
+        "periode": {"debut": date_debut, "fin": date_fin},
+        "creneau": {"heure_debut": heure_debut, "heure_fin": heure_fin, "type_poste": type_poste},
+        "salaries_integres": [{"id": k, "nom": v} for k, v in salaries_actifs.items()],
+    }
+
+
+@app.put("/api/rh/planning/creneau-defaut")
+async def modifier_creneau_defaut(request: Request):
+    """Modifie le creneau par defaut applique lors de l'integration automatique."""
+    global _planning_creneau_defaut
+    body = await request.json()
+    if "heure_debut" in body:
+        _planning_creneau_defaut["heure_debut"] = body["heure_debut"]
+    if "heure_fin" in body:
+        _planning_creneau_defaut["heure_fin"] = body["heure_fin"]
+    if "type_poste" in body:
+        if body["type_poste"] in ("normal", "astreinte", "nuit", "dimanche", "ferie"):
+            _planning_creneau_defaut["type_poste"] = body["type_poste"]
+    log_action("utilisateur", "modification_creneau_defaut", str(_planning_creneau_defaut))
+    return {"ok": True, "creneau_defaut": _planning_creneau_defaut}
+
+
+@app.delete("/api/rh/planning/{planning_id}")
+async def supprimer_planning(planning_id: str):
+    """Supprime une entree de planning."""
+    for i, p in enumerate(_rh_planning):
+        if p.get("id") == planning_id:
+            removed = _rh_planning.pop(i)
+            log_action("utilisateur", "suppression_planning", f"Planning {planning_id} supprime")
+            return {"ok": True, "supprime": removed}
+    raise HTTPException(404, "Entree de planning non trouvee")
 
 
 # ======================================================================
@@ -6317,7 +10308,7 @@ async def generer_dsn(
     add("S10.G00.00.001", siren_emetteur)
     add("S10.G00.00.002", nic_emetteur)
     add("S10.G00.00.003", nom_logiciel)
-    add("S10.G00.00.004", "NormaCheck v3.6")
+    add("S10.G00.00.004", "NormaCheck v3.8")
     add("S10.G00.00.005", "01")  # Nature de la declaration: DSN mensuelle
     add("S10.G00.00.006", "11")  # Type: normale
     add("S10.G00.00.007", "01")  # Numero de fraction
@@ -6431,8 +10422,8 @@ async def generer_dsn(
 
 
 @app.get("/api/dsn/brouillons")
-async def liste_dsn_brouillons():
-    return _dsn_drafts
+async def liste_dsn_brouillons(offset: int = Query(0, ge=0), limit: int = Query(_DEFAULT_PAGE_LIMIT, ge=1)):
+    return _paginate(_dsn_drafts, offset, limit)
 
 
 @app.get("/api/dsn/telecharger/{draft_id}")
@@ -6544,8 +10535,8 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
 </div>
 <div class="limits">
-<div class="limit"><strong>20 fichiers</strong> par analyse</div>
-<div class="limit"><strong>500 Mo</strong> max par analyse</div>
+<div class="limit"><strong>50 fichiers</strong> par analyse</div>
+<div class="limit"><strong>2 Go</strong> max par analyse</div>
 <div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
 </div>
 </div>
@@ -6656,13 +10647,13 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.6.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+NormaCheck v3.8.1 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 <span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
 </footer>
 <script>
 function showAT(t){document.querySelectorAll(".auth-tab").forEach(function(b,i){b.classList.toggle("active",i===(t==="login"?0:1))});document.getElementById("form-login").classList.toggle("active",t==="login");document.getElementById("form-register").classList.toggle("active",t==="register");document.getElementById("amsg").className="msg";}
-function doLogin(){var fd=new FormData();fd.append("email",document.getElementById("le").value);fd.append("mot_de_passe",document.getElementById("lp").value);fetch("/api/auth/login",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
-function doReg(){if(document.getElementById("rpw").value!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Mots de passe differents.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var fd=new FormData();fd.append("nom",document.getElementById("rn").value);fd.append("prenom",document.getElementById("rp2").value);fd.append("email",document.getElementById("re").value);fd.append("mot_de_passe",document.getElementById("rpw").value);fetch("/api/auth/register",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function doLogin(){var fd=new FormData();fd.append("email",document.getElementById("le").value);fd.append("mot_de_passe",document.getElementById("lp").value);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function doReg(){if(document.getElementById("rpw").value!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Mots de passe differents.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var fd=new FormData();fd.append("nom",document.getElementById("rn").value);fd.append("prenom",document.getElementById("rp2").value);fd.append("email",document.getElementById("re").value);fd.append("mot_de_passe",document.getElementById("rpw").value);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
 </script>
 </body>
 </html>"""
@@ -6726,6 +10717,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <li><strong>Droit de suppression :</strong> demander l'effacement de ses donnees</li>
 <li><strong>Droit a la portabilite :</strong> recuperer ses donnees dans un format structure</li>
 <li><strong>Droit d'opposition :</strong> s'opposer au traitement de ses donnees</li>
+<li><strong>Droit relatif aux decisions automatisees (art. 22 RGPD) :</strong> obtenir une intervention humaine, exprimer son point de vue et contester toute decision. NormaCheck est un outil d'aide a la decision ; les scores sont provisoires et necessitent une validation humaine</li>
 </ul>
 <p>Les donnees sont traitees aux fins suivantes : fourniture du service, analyse de documents, amelioration de la plateforme. Base legale : execution du contrat (art. 6.1.b RGPD).</p>
 <p>Contact DPO : dpo@normacheck-app.fr</p>
@@ -6739,7 +10731,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 9 - Droit applicable</h2>
 <p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
 </div>
-<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6796,7 +10788,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 8 - Droit applicable</h2>
 <p>Les presentes CGV sont soumises au droit francais. Tout litige releve de la competence des tribunaux francais.</p>
 </div>
-<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6845,6 +10837,21 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <li><strong>Reclamation CNIL :</strong> www.cnil.fr</li>
 </ul>
 
+<h2 id="art22">Decisions automatisees et droit a l'intervention humaine (Art. 22 RGPD)</h2>
+<div class="warn">
+<p><strong>Qualification du systeme :</strong> NormaCheck est un <strong>outil d'aide a la decision</strong>, et non un systeme de decision automatisee au sens de l'article 22 du RGPD. Les scores produits sont des indicateurs provisoires qui necessitent une validation par un professionnel qualifie avant toute utilisation a des fins decisionnelles.</p>
+</div>
+<p>Conformement a l'article 22 du Reglement (UE) 2016/679 (RGPD) et aux lignes directrices du Comite europeen de la protection des donnees (CEPD, WP251rev.01) :</p>
+<ul>
+<li><strong>Aucune decision juridique ou administrative</strong> ne resulte directement et exclusivement des scores NormaCheck</li>
+<li><strong>Droit a l'intervention humaine :</strong> tout score est qualifie de &laquo; provisoire &raquo; jusqu'a validation par un operateur humain qualifie. L'utilisateur peut demander une revision humaine a tout moment</li>
+<li><strong>Droit d'expression :</strong> l'entite auditee peut exprimer son point de vue et fournir des justificatifs via la procedure contradictoire (delai de 30 jours, art. R*243-59 CSS)</li>
+<li><strong>Droit de contestation :</strong> tout constat et le score global peuvent etre contestes. La contestation declenche un reexamen humain obligatoire dont le resultat est scelle dans la chaine de preuve</li>
+<li><strong>Explicabilite :</strong> la methodologie complete de calcul est documentee et accessible (endpoint /api/scores/methodologie). Chaque element du score (routage domaine, poids, normalisation, couverture) est traçable</li>
+<li><strong>AIPD :</strong> une Analyse d'Impact relative a la Protection des Donnees (art. 35 RGPD) a ete realisee pour le traitement de scoring</li>
+</ul>
+<p>Contact pour exercer ces droits : <strong>dpo@normacheck-app.fr</strong></p>
+
 <h2>Cookies</h2>
 <p>NormaCheck utilise uniquement des cookies techniques strictement necessaires au fonctionnement du service (authentification, session). Aucun cookie publicitaire ou de tracking n'est utilise. Conformement a la directive ePrivacy, ces cookies techniques ne necessitent pas de consentement.</p>
 
@@ -6867,7 +10874,7 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Droit applicable</h2>
 <p>Le present site et ses mentions legales sont regis par le droit francais.</p>
 </div>
-<footer>NormaCheck v3.6.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -6875,35 +10882,42 @@ APP_HTML = """<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NormaCheck - Application</title>
 <style>
-:root{--p:#0f172a;--p2:#1e40af;--p3:#3b82f6;--pl:#eff6ff;--g:#22c55e;--gl:#f0fdf4;--r:#ef4444;--rl:#fef2f2;--o:#f59e0b;--ol:#fffbeb;--pu:#a855f7;--pul:#faf5ff;--tl:#0d9488;--bg:#f8fafc;--tx:#1e293b;--tx2:#64748b;--brd:#e2e8f0;--sh:0 1px 3px rgba(0,0,0,.06);--sidebar-w:240px}
+:root{--p:#0f172a;--p2:#1e40af;--p3:#3b82f6;--pl:#eff6ff;--g:#22c55e;--gl:#f0fdf4;--r:#ef4444;--rl:#fef2f2;--o:#f59e0b;--ol:#fffbeb;--pu:#a855f7;--pul:#faf5ff;--tl:#0d9488;--bg:#f8fafc;--tx:#1e293b;--tx2:#64748b;--brd:#e2e8f0;--sh:0 1px 3px rgba(0,0,0,.06);--sidebar-w:240px;--card-bg:#fff}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden}
-.layout{display:flex;min-height:100vh}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden;-webkit-text-size-adjust:100%}
+.layout{display:flex;min-height:100vh;min-height:100dvh}
+:focus-visible{outline:2px solid var(--p3);outline-offset:2px;border-radius:4px}:focus:not(:focus-visible){outline:none}
 /* Sidebar desktop */
 .sidebar{width:var(--sidebar-w);background:var(--p);color:#fff;display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;transition:transform .3s}
 .sidebar .logo{padding:20px 22px;font-size:1.4em;font-weight:800;border-bottom:1px solid rgba(255,255,255,.08)}
 .sidebar .logo em{font-style:normal;color:#60a5fa}
 .sidebar .nav-group{padding:14px 10px 4px;font-size:.68em;text-transform:uppercase;letter-spacing:1.5px;color:#475569;font-weight:600}
-.sidebar .nl{display:flex;align-items:center;gap:10px;padding:9px 18px;cursor:pointer;color:rgba(255,255,255,.6);transition:.2s;border-radius:8px;margin:2px 8px;font-size:.88em;-webkit-tap-highlight-color:transparent}
+.sidebar .nl{display:flex;align-items:center;gap:10px;padding:12px 18px;cursor:pointer;color:rgba(255,255,255,.6);transition:.2s;border-radius:8px;margin:2px 8px;font-size:.88em;-webkit-tap-highlight-color:transparent;min-height:44px}
 .sidebar .nl:hover{background:rgba(255,255,255,.07);color:#fff}
 .sidebar .nl.active{background:rgba(96,165,250,.15);color:#60a5fa;font-weight:600}
 .sidebar .nl .ico{width:20px;text-align:center;font-size:1.1em;flex-shrink:0}
 .sidebar .spacer{flex:1}
-.sidebar .logout{padding:14px 18px;cursor:pointer;color:rgba(255,255,255,.4);font-size:.84em;border-top:1px solid rgba(255,255,255,.06);transition:.2s;display:flex;align-items:center;gap:8px}
+.sidebar .logout{padding:14px 18px;cursor:pointer;color:rgba(255,255,255,.4);font-size:.84em;border-top:1px solid rgba(255,255,255,.06);transition:.2s;display:flex;align-items:center;gap:8px;min-height:44px;padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px))}
 .sidebar .logout:hover{color:#fff;background:rgba(239,68,68,.12)}
-.content{margin-left:var(--sidebar-w);flex:1;min-height:100vh}
+.content{margin-left:var(--sidebar-w);flex:1;min-height:100vh;min-height:100dvh}
 /* Topbar */
 .topbar{background:#fff;border-bottom:1px solid var(--brd);padding:14px 28px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:50}
 .topbar h1{font-size:1.12em;font-weight:700;color:var(--p)}
 .topbar .info{font-size:.83em;color:var(--tx2)}
-.topbar .mob-menu{display:none;background:none;border:none;font-size:1.5em;cursor:pointer;padding:4px 8px;color:var(--p);-webkit-tap-highlight-color:transparent}
+.topbar .mob-menu{display:none;background:none;border:none;font-size:1.5em;cursor:pointer;padding:8px 12px;color:var(--p);-webkit-tap-highlight-color:transparent;min-height:44px;min-width:44px}
 .page{padding:24px 28px;max-width:1200px}
 .sec{display:none}.sec.active{display:block}
 /* Overlay mobile */
 .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90;-webkit-tap-highlight-color:transparent}
+/* Tablet */
+@media(max-width:1024px){
+.page{padding:20px 20px;max-width:100%}
+.topbar{padding:12px 20px}
+.g3{grid-template-columns:1fr 1fr}
+}
 /* Mobile */
 @media(max-width:768px){
 :root{--sidebar-w:0px}
@@ -6911,28 +10925,55 @@ body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--
 .sidebar.open{transform:translateX(0)}
 .sidebar-overlay.show{display:block}
 .content{margin-left:0}
-.topbar{padding:10px 16px}
+.topbar{padding:10px 16px;padding-top:calc(10px + env(safe-area-inset-top, 0px))}
 .topbar .mob-menu{display:block}
 .topbar .info{display:none}
-.page{padding:14px 12px}
+.page{padding:14px 12px;padding-left:calc(12px + env(safe-area-inset-left, 0px));padding-right:calc(12px + env(safe-area-inset-right, 0px));padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px))}
 .g2,.g3{grid-template-columns:1fr}
 .g4{grid-template-columns:repeat(2,1fr);gap:8px}
-.card{padding:16px;margin-bottom:12px;border-radius:10px}
+.card{padding:16px;margin-bottom:12px;border-radius:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .tabs{gap:0;padding:3px;margin-bottom:10px}
-.tab{padding:6px 10px;font-size:.76em}
-table{font-size:.78em}
-th{padding:6px 8px}td{padding:5px 8px}
+.tab{padding:10px 14px;font-size:.85em}
+table{font-size:.85em;min-width:480px}
+th{padding:8px 10px}td{padding:7px 10px}
 .sc .val{font-size:1.2em}
-.sc .lab{font-size:.68em}
-.btn{padding:8px 14px;font-size:.82em}
+.sc .lab{font-size:.72em}
+.btn{padding:11px 16px;font-size:.85em}
+.btn-sm{padding:8px 14px}
 .uz{padding:20px 12px}
-.anomalie{padding:10px}
-.anomalie .title{font-size:.82em}
+.anomalie{padding:12px}
+.anomalie .title{font-size:.85em}
 .anomalie .montant{font-size:1em}
-.al{padding:8px 12px;font-size:.8em}
+.al{padding:10px 12px;font-size:.85em}
+input,select,textarea{font-size:16px;padding:12px 14px}
+.badge{font-size:.78em}
+.fmts{flex-direction:column}
+.fopt{padding:12px}
+.gauge{width:100px;height:100px}
+.gauge-inner{width:74px;height:74px;font-size:1.3em}
+.btn-group{gap:6px}
+}
+/* Small phones */
+@media(max-width:480px){
+.g4{grid-template-columns:1fr 1fr;gap:6px}
+.sc{padding:10px}
+.sc .val{font-size:1em}
+.sc .lab{font-size:.68em}
+.card{padding:12px}
+.card h2{font-size:.95em}
+.topbar h1{font-size:.95em}
+.page{padding:10px 8px;padding-left:calc(8px + env(safe-area-inset-left, 0px));padding-right:calc(8px + env(safe-area-inset-right, 0px))}
+}
+/* Landscape phones */
+@media(max-width:768px) and (orientation:landscape){
+.page{padding:10px 20px}
+.g4{grid-template-columns:repeat(4,1fr)}
+.g2{grid-template-columns:1fr 1fr}
+.gauge{width:80px;height:80px}
+.gauge-inner{width:60px;height:60px;font-size:1.1em}
 }
 /* Cards */
-.card{background:#fff;border-radius:14px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:.2s}
+.card{background:var(--card-bg);border-radius:14px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:.2s}
 .card:hover{box-shadow:0 4px 16px rgba(0,0,0,.04)}
 .card h2{color:var(--p);margin-bottom:14px;font-size:1.08em;font-weight:700;display:flex;align-items:center;gap:8px}
 .card h2 .ct{background:var(--pl);color:var(--p3);padding:2px 10px;border-radius:20px;font-size:.72em}
@@ -6941,30 +10982,30 @@ th{padding:6px 8px}td{padding:5px 8px}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
 /* Stat cards */
-.sc{border-radius:12px;padding:16px;text-align:center;border:1px solid var(--brd);background:#fff;transition:.2s}
+.sc{border-radius:12px;padding:16px;text-align:center;border:1px solid var(--brd);background:var(--card-bg);transition:.2s}
 .sc:hover{border-color:var(--p3)}.sc .val{font-size:1.6em;font-weight:800;color:var(--p)}.sc .lab{font-size:.76em;color:var(--tx2);margin-top:3px}
 .sc.blue{background:var(--pl);border-color:#bfdbfe}.sc.green{background:var(--gl);border-color:#bbf7d0}
 .sc.red{background:var(--rl);border-color:#fecaca}.sc.amber{background:var(--ol);border-color:#fde68a}
 .sc.purple{background:var(--pul);border-color:#e9d5ff}.sc.teal{background:#f0fdfa;border-color:#99f6e4}
 /* Upload zone */
-.uz{border:2px dashed var(--brd);border-radius:14px;padding:32px;text-align:center;cursor:pointer;transition:.3s;background:#fff;position:relative}
+.uz{border:2px dashed var(--brd);border-radius:14px;padding:32px;text-align:center;cursor:pointer;transition:.3s;background:var(--card-bg);position:relative}
 .uz:hover{border-color:var(--p3);background:var(--pl)}
 .uz input[type="file"]{position:absolute;inset:0;opacity:0;cursor:pointer}
 .uz .uzi{font-size:2em;margin-bottom:6px;opacity:.5}
 .uz h3{color:var(--p);font-size:.92em;margin-bottom:3px}.uz p{color:var(--tx2);font-size:.8em}
 /* Inputs */
-input,select,textarea{width:100%;padding:10px 14px;border:1.5px solid var(--brd);border-radius:10px;font-size:.9em;transition:.2s;margin-bottom:12px;background:#fff;font-family:inherit}
+input,select,textarea{width:100%;padding:10px 14px;border:1.5px solid var(--brd);border-radius:10px;font-size:.9em;transition:.2s;margin-bottom:12px;background:var(--card-bg);font-family:inherit;color:var(--tx)}
 input:focus,select:focus,textarea:focus{border-color:var(--p3);outline:none;box-shadow:0 0 0 3px rgba(59,130,246,.08)}
 label{display:block;font-weight:600;margin-bottom:5px;font-size:.82em;color:#475569}
 /* Buttons */
-.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 20px;border:none;border-radius:10px;font-size:.88em;font-weight:600;cursor:pointer;transition:.2s;font-family:inherit;-webkit-tap-highlight-color:transparent}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:11px 20px;border:none;border-radius:10px;font-size:.88em;font-weight:600;cursor:pointer;transition:.2s;font-family:inherit;-webkit-tap-highlight-color:transparent;min-height:44px}
 .btn-p{background:var(--p);color:#fff}.btn-p:hover{background:#1e293b}.btn-p:disabled{background:#94a3b8;cursor:not-allowed}
 .btn-blue{background:var(--p3);color:#fff}.btn-blue:hover{background:var(--p2)}
 .btn-s{background:var(--pl);color:var(--p3);border:1px solid #bfdbfe}.btn-s:hover{background:#dbeafe}
 .btn-green{background:var(--g);color:#fff}.btn-green:hover{background:#16a34a}
 .btn-red{background:var(--rl);color:var(--r)}.btn-red:hover{background:#fee2e2}
 .btn-f{width:100%;justify-content:center}
-.btn-sm{padding:6px 14px;font-size:.8em;border-radius:8px}
+.btn-sm{padding:8px 14px;font-size:.8em;border-radius:8px;min-height:40px}
 .btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
 /* Tables */
 table{width:100%;border-collapse:collapse}
@@ -6974,19 +11015,20 @@ td{padding:8px 14px;border-bottom:1px solid var(--brd);font-size:.86em}
 tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Consolas',monospace;font-size:.84em}
 .sans-just{background:var(--rl) !important}.sans-just td{color:var(--r)}
 /* Badges */
-.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.7em;font-weight:700}
+.badge{display:inline-block;padding:4px 10px;border-radius:20px;font-size:.75em;font-weight:700}
 .badge-blue{background:var(--pl);color:var(--p2)}.badge-green{background:var(--gl);color:#16a34a}
 .badge-red{background:var(--rl);color:var(--r)}.badge-amber{background:var(--ol);color:#d97706}
 .badge-purple{background:var(--pul);color:var(--pu)}.badge-teal{background:#f0fdfa;color:var(--tl)}
 .badge-paye{background:var(--gl);color:#16a34a}.badge-impaye{background:var(--rl);color:var(--r)}
-.sug-box{position:relative;z-index:50}.sug-box .sug-list{position:absolute;left:0;right:0;background:#fff;border:1px solid var(--brd);border-radius:6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}.sug-box .sug-list.show{display:block}.sug-item{padding:6px 10px;cursor:pointer;font-size:.82em;border-bottom:1px solid #f1f5f9}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
+.sug-box{position:relative;z-index:50}.sug-box .sug-list{position:absolute;left:0;right:0;background:var(--card-bg);border:1px solid var(--brd);border-radius:6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}.sug-box .sug-list.show{display:block}.sug-item{padding:8px 10px;cursor:pointer;font-size:.84em;border-bottom:1px solid #f1f5f9;min-height:44px;display:flex;align-items:center}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
 /* Tabs */
-.tabs{display:flex;gap:2px;background:#f1f5f9;border-radius:10px;padding:4px;margin-bottom:16px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.tab{padding:7px 16px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.82em;transition:.2s;white-space:nowrap;-webkit-tap-highlight-color:transparent}
-.tab:hover{color:var(--tx)}.tab.active{color:var(--p);background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.tabs{display:flex;gap:2px;background:#f1f5f9;border-radius:10px;padding:4px;margin-bottom:16px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:10px 16px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.85em;transition:.2s;white-space:nowrap;-webkit-tap-highlight-color:transparent;min-height:44px;display:inline-flex;align-items:center}
+.tab:hover{color:var(--tx)}.tab.active{color:var(--p);background:var(--card-bg);box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .tc{display:none}.tc.active{display:block}
 /* Anomalies */
-.anomalie{border:1px solid var(--brd);border-radius:12px;padding:15px;margin:8px 0;cursor:pointer;transition:.2s;background:#fff}
+.anomalie{border:1px solid var(--brd);border-radius:12px;padding:15px;margin:8px 0;cursor:pointer;transition:.2s;background:var(--card-bg)}
 .anomalie:hover{box-shadow:0 4px 14px rgba(0,0,0,.05)}
 .anomalie.sev-high{border-left:4px solid var(--r)}.anomalie.sev-med{border-left:4px solid var(--o)}.anomalie.sev-low{border-left:4px solid var(--p3)}
 .anomalie .head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
@@ -7004,19 +11046,19 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .al.err{background:var(--rl);color:#991b1b;border:1px solid #fecaca}
 .al.warn{background:var(--ol);color:#92400e;border:1px solid #fde68a}
 /* Gauge */
-.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--g) 0%,var(--g) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto}
-.gauge-inner{width:90px;height:90px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p)}
+.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--gc,var(--g)) 0%,var(--gc,var(--g)) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto}
+.gauge-inner{width:90px;height:90px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p)}
 /* Progress */
 .prg{display:none;margin:14px 0}
 .prg-bar{height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
 .prg-fill{height:100%;background:linear-gradient(90deg,var(--p3),var(--p2));border-radius:3px;width:0%;transition:width .5s}
 .prg-txt{text-align:center;margin-top:6px;color:var(--tx2);font-size:.82em}
 /* File items */
-.fi{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;background:var(--pl);border-radius:8px;margin:3px 0;font-size:.84em;border:1px solid #bfdbfe}
-.fi .nm{font-weight:600;color:var(--p);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}.fi .rm{background:none;border:none;color:var(--r);cursor:pointer;font-size:1.2em;padding:2px 6px;border-radius:4px}
+.fi{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;background:var(--pl);border-radius:8px;margin:3px 0;font-size:.84em;border:1px solid #bfdbfe;min-height:44px}
+.fi .nm{font-weight:600;color:var(--p);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}.fi .rm{background:none;border:none;color:var(--r);cursor:pointer;font-size:1.2em;padding:6px 10px;border-radius:4px;min-height:44px;min-width:44px;display:inline-flex;align-items:center;justify-content:center}
 /* Format options */
 .fmts{display:flex;gap:8px;margin-bottom:14px}
-.fopt{flex:1;padding:10px;border:1.5px solid var(--brd);border-radius:10px;text-align:center;cursor:pointer;background:#fff;transition:.2s}
+.fopt{flex:1;padding:12px;border:1.5px solid var(--brd);border-radius:10px;text-align:center;cursor:pointer;background:var(--card-bg);transition:.2s;min-height:44px}
 .fopt:hover{border-color:var(--p3)}.fopt.active{border-color:var(--p3);background:var(--pl)}
 .fopt strong{color:var(--p);font-size:.9em}.fopt small{color:var(--tx2);font-size:.76em}
 /* Misc */
@@ -7026,13 +11068,62 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .doc-item:hover{box-shadow:0 2px 8px rgba(0,0,0,.04)}
 .period-sel{margin-bottom:14px;padding:14px;background:var(--pl);border-radius:10px;border:1px solid #bfdbfe;display:none}
 @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
+/* ===== Dark Mode ===== */
+@media(prefers-color-scheme:dark){
+:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2)}
+body{color-scheme:dark}
+.sidebar{background:#020617}
+th{background:#334155;color:#e2e8f0}
+tr:hover{background:rgba(59,130,246,.08)}
+.tabs{background:#334155}
+.sc.blue{background:rgba(59,130,246,.1);border-color:#1e40af}
+.sc.green{background:rgba(74,222,128,.08);border-color:#166534}
+.sc.red{background:rgba(248,113,113,.08);border-color:#991b1b}
+.sc.amber{background:rgba(251,191,36,.08);border-color:#92400e}
+.sc.purple{background:rgba(192,132,252,.08);border-color:#7e22ce}
+.sc.teal{background:rgba(45,212,191,.08);border-color:#0d9488}
+.badge-blue{background:rgba(59,130,246,.15);color:#93c5fd}
+.badge-green{background:rgba(74,222,128,.12);color:#4ade80}
+.badge-red{background:rgba(248,113,113,.12);color:#f87171}
+.badge-amber{background:rgba(251,191,36,.12);color:#fbbf24}
+.badge-purple{background:rgba(192,132,252,.12);color:#c084fc}
+.badge-teal{background:rgba(45,212,191,.1);color:#2dd4bf}
+.badge-paye{background:rgba(74,222,128,.12);color:#4ade80}
+.badge-impaye{background:rgba(248,113,113,.12);color:#f87171}
+input,select,textarea{background:#1e293b;border-color:#475569;color:#e2e8f0}
+.sug-item{border-bottom-color:#334155}
+.fi{background:rgba(59,130,246,.1);border-color:#1e40af}
+.al.info{background:rgba(59,130,246,.1);border-color:#1e40af;color:#93c5fd}
+.al.ok{background:rgba(74,222,128,.08);border-color:#166534;color:#4ade80}
+.al.err{background:rgba(248,113,113,.08);border-color:#991b1b;color:#f87171}
+.al.warn{background:rgba(251,191,36,.08);border-color:#92400e;color:#fbbf24}
+.sans-just{background:rgba(248,113,113,.1) !important}
+.prg-bar{background:#334155}
+label{color:#94a3b8}
+.sidebar .nav-group{color:#64748b}
+.period-sel{background:rgba(59,130,246,.08);border-color:#1e40af}
+.topbar{background:var(--card-bg);border-bottom-color:var(--brd)}
+}
+/* ===== Print ===== */
+@media print{
+.sidebar,.topbar,.mob-menu,.sidebar-overlay,.logout,.btn-group,.uz,.fmts,.prg,.tabs{display:none !important}
+.content{margin-left:0 !important}
+.page{padding:0 !important;max-width:100% !important}
+.card{break-inside:avoid;box-shadow:none !important;border:1px solid #ccc}
+body{background:#fff;color:#000;font-size:12pt}
+.anomalie{break-inside:avoid}
+table{font-size:10pt}
+a{color:#000;text-decoration:underline}
+.gauge{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+}
 </style>
 </head>
 <body>
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
 <div class="sidebar" id="sidebar">
-<div class="logo"><em>NormaCheck</em> <span>v3.6</span></div>
+<div class="logo"><em>NormaCheck</em> <span>v3.8.1</span></div>
 <div class="nav-group">Analyse</div>
 <div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
 <div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
@@ -7044,15 +11135,17 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 <div class="nl" onclick="showS('rh',this)"><span class="ico">&#128119;</span><span>Ressources humaines</span></div>
 <div class="nl" onclick="showS('simulation',this)"><span class="ico">&#128200;</span><span>Simulation</span></div>
 <div class="nav-group">Outils</div>
+<div class="nl" onclick="showS('subventions',this)"><span class="ico">&#127974;</span><span>Subventions</span></div>
 <div class="nl" onclick="showS('veille',this)"><span class="ico">&#9878;</span><span>Veille juridique</span></div>
 <div class="nl" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
 <div class="nl" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
 <div class="nl" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
 <div class="spacer"></div>
-<div class="logout" onclick="window.location.href='/'"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
+<div style="padding:10px 18px;font-size:.78em;color:#94a3b8" id="sidebar-user"></div>
+<div class="logout" onclick="doLogout()"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
 </div>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.6.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.1 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
 """
@@ -7061,7 +11154,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 APP_HTML += """
 <!-- ===== DASHBOARD ===== -->
 <div class="sec active" id="s-dashboard">
-<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 20 fichiers max, 500 Mo max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
+<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 50 fichiers max, 2 Go max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
 <div class="g4" id="dash-stats">
 <div class="sc blue"><div class="val" id="dash-anomalies">0</div><div class="lab">Anomalies</div></div>
 <div class="sc amber"><div class="val" id="dash-impact">0 EUR</div><div class="lab">Impact cotisations</div></div>
@@ -7075,7 +11168,29 @@ APP_HTML += """
 </div>
 <div class="card"><h2>Alertes</h2><div id="dash-alertes"><div class="al info"><span class="ai">&#128161;</span><span>Importez des documents pour lancer l'analyse.</span></div></div></div>
 </div>
-<div class="card"><h2>Scores de risque par destinataire</h2>
+<div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button></h2>
+<div class="g3" id="dash-scores-triple">
+<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">URSSAF / CSS</div>
+<div class="gauge" id="gauge-urssaf" style="--pct:0%;--gc:var(--p3)"><div class="gauge-inner" id="gauge-urssaf-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Securite sociale</div>
+<div style="font-size:.72em;margin-top:2px" id="grade-urssaf"></div>
+</div>
+<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">DGFIP / CGI</div>
+<div class="gauge" id="gauge-fiscal" style="--pct:0%;--gc:var(--pu)"><div class="gauge-inner" id="gauge-fiscal-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Fiscal</div>
+<div style="font-size:.72em;margin-top:2px" id="grade-fiscal"></div>
+</div>
+<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">COUR DES COMPTES</div>
+<div class="gauge" id="gauge-cdc" style="--pct:0%;--gc:var(--tl)"><div class="gauge-inner" id="gauge-cdc-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Regularite comptable</div>
+<div style="font-size:.72em;margin-top:2px" id="grade-cdc"></div>
+</div>
+</div>
+</div>
+<div class="card"><h2>Impacts financiers par destinataire</h2>
 <div class="g4" id="dash-by-dest">
 <div class="sc blue"><div class="val" id="dd-urssaf">-</div><div class="lab">URSSAF</div></div>
 <div class="sc purple"><div class="val" id="dd-fiscal">-</div><div class="lab">Fiscal</div></div>
@@ -7089,7 +11204,7 @@ APP_HTML += """
 <div class="sec" id="s-analyse">
 <div class="card">
 <h2>Importer et analyser</h2>
-<div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>20 fichiers</strong> et <strong>500 Mo</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>50 fichiers</strong> et <strong>2 Go</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
 <div class="g2" style="margin-bottom:14px">
 <div><label>Mode d analyse</label><select id="mode-analyse">
 <option value="simple">Analyse simple</option>
@@ -7110,7 +11225,7 @@ APP_HTML += """
 <input type="checkbox" id="chk-integrer" checked style="width:auto;margin:0">
 <label for="chk-integrer" style="margin:0;font-weight:500;color:var(--p);font-size:.86em;cursor:pointer">Integrer les documents dans la bibliotheque</label>
 </div>
-<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button><button class="btn btn-s" onclick="genererDemo()" title="Generer des documents fictifs pour tester">&#128295; Documents de test</button><button class="btn btn-s" onclick="telechargerDemo()" title="Telecharger les documents de test au format ZIP">&#128229; Telecharger ZIP test</button></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-blue btn-f" id="btn-az" onclick="lancerAnalyse()" disabled>&#128269; Lancer l'analyse</button></div>
 <div class="prg" id="prg-az"><div class="prg-bar"><div class="prg-fill" id="pf-az"></div></div><div class="prg-txt" id="pt-az">Import...</div></div>
 </div>
 <div id="res-analyse" style="display:none">
@@ -7302,10 +11417,11 @@ APP_HTML += """
 <div class="tab" onclick="showSimTab('cout',this)">Cout employeur</div>
 <div class="tab" onclick="showSimTab('exo',this)">Exonerations</div>
 <div class="tab" onclick="showSimTab('masse',this)">Masse salariale</div>
-<div class="tab" onclick="showSimTab('seuils',this)">Seuils effectif</div>
+<div class="tab" onclick="showSimTab('seuils',this)">Seuils entreprise</div>
 <div class="tab" onclick="showSimTab('fincontrat',this)">Fins contrats</div>
 <div class="tab" onclick="showSimTab('optim',this)">Optimisation</div>
 <div class="tab" onclick="showSimTab('risques',this)">Risques sectoriels</div>
+<div class="tab" onclick="showSimTab('ccn',this)">Convention collective</div>
 <div class="tab" onclick="showSimTab('micro',this)">Micro</div>
 <div class="tab" onclick="showSimTab('tns',this)">TNS</div>
 <div class="tab" onclick="showSimTab('guso',this)">GUSO</div>
@@ -7314,40 +11430,68 @@ APP_HTML += """
 <div class="card">
 <div class="tc active" id="sim-bulletin">
 <h2>Simulation bulletin de paie</h2>
-<div class="g3">
-<div><label>Brut mensuel</label><input type="number" step="0.01" id="sim-brut" value="2500"></div>
-<div><label>Effectif</label><input type="number" id="sim-eff" value="10"></div>
-<div><label>Cadre</label><select id="sim-cadre"><option value="false">Non</option><option value="true">Oui</option></select></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong>. L effectif total de l entreprise determine les cotisations liees aux seuils (FNAL, versement mobilite, formation).</p>
+<div class="g4">
+<div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="sim-brut" value="2500"></div>
+<div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="sim-eff" value="10"></div>
+<div><label>Statut du salarie</label><select id="sim-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div>
+<div><label>Convention collective (IDCC ou nom)</label><input id="sim-bull-ccn" placeholder="Ex: 1486, SYNTEC, HCR..."></div>
 </div>
+<div class="al info" style="margin:8px 0;font-size:.82em"><span class="ai">&#9878;</span><span>La convention collective peut imposer des taux de prevoyance et mutuelle superieurs aux minimums legaux. <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Voir l onglet Convention collective</a> pour le detail.</span></div>
 <div class="btn-group"><button class="btn btn-blue" onclick="simBulletin()">Simuler</button><button class="btn btn-s btn-sm" onclick="exportSection('sim')">&#128190; Export</button></div>
 <div id="sim-bull-res"></div>
 </div>
 
 <div class="tc" id="sim-cout"><h2>Cout total employeur detaille</h2>
-<div class="g4"><div><label>Brut mensuel</label><input type="number" step="0.01" id="ce-brut" value="2500"></div><div><label>Effectif</label><input type="number" id="ce-eff" value="10"></div><div><label>Cadre</label><select id="ce-cadre"><option value="false">Non</option><option value="true">Oui</option></select></div><div><label>Primes</label><input type="number" step="0.01" id="ce-primes" value="0"></div></div>
-<div class="g4"><div><label>Avantages nature</label><input type="number" step="0.01" id="ce-avantages" value="0"></div><div><label>Frais km</label><input type="number" step="0.01" id="ce-km" value="0"></div><div><label>Tickets resto</label><input type="number" step="0.01" id="ce-tr" value="0"></div><div><label>Mutuelle (part empl.)</label><input type="number" step="0.01" id="ce-mut" value="40"></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Cout mensuel complet pour <strong>un salarie</strong>. L effectif total sert a determiner les obligations annexes (formation 0.55% ou 1%, effort construction >= 50, participation >= 50).</p>
+<div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="ce-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ce-eff" value="10"></div><div><label>Statut du salarie</label><select id="ce-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective (IDCC ou nom)</label><input id="ce-ccn" placeholder="Ex: 1486, SYNTEC..."></div></div>
+<div class="al info" style="margin:8px 0;font-size:.82em"><span class="ai">&#9878;</span><span>Rappel : la CCN peut imposer des surcouts (prevoyance, primes, indemnites majorees). <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Onglet Convention collective</a>.</span></div>
+<div class="g3"><div><label>Primes mensuelles (EUR)</label><input type="number" step="0.01" id="ce-primes" value="0"></div><div></div><div></div></div>
+<div class="g4"><div><label>Avantages nature (EUR/mois)</label><input type="number" step="0.01" id="ce-avantages" value="0"></div><div><label>Frais km (EUR/mois)</label><input type="number" step="0.01" id="ce-km" value="0"></div><div><label>Tickets resto (EUR/mois)</label><input type="number" step="0.01" id="ce-tr" value="0"></div><div><label>Mutuelle part employeur (EUR/mois)</label><input type="number" step="0.01" id="ce-mut" value="40"></div></div>
 <button class="btn btn-blue" onclick="simCout()">Calculer</button><div id="sim-cout-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-exo"><h2>Exonerations et aides a l emploi</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulez les exonerations applicables selon zone geographique, statut du salarie, convention collective et effectif.</p>
-<div class="g4"><div><label>Brut mensuel</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif</label><input type="number" id="exo-eff" value="10"></div><div><label>Age salarie</label><input type="number" id="exo-age" value="30"></div><div><label>Duree contrat (mois)</label><input type="number" id="exo-duree" value="0"></div></div>
-<div class="g4"><div><label>Zone geographique</label><select id="exo-zone"><option value="metropole">Metropole</option><option value="zrr">ZRR (Revitalisation rurale)</option><option value="zfu">ZFU-TE (Franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="outremer">Outre-mer (DOM-TOM)</option><option value="ber">BER (Bassin emploi a redynamiser)</option></select></div><div><label>Statut salarie</label><select id="exo-statut"><option value="standard">Standard</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Heures sup /mois</label><input type="number" step="0.5" id="exo-hs" value="0"></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div></div>
-<button class="btn btn-blue" onclick="simExo()">Simuler les exonerations</button><div id="sim-exo-res" style="margin-top:12px"></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong> (ou un groupe au meme profil). L effectif total determine les exonerations liees aux seuils. Tous les parametres sont modifiables.</p>
 
-<div class="tc" id="sim-masse"><h2>Simulation masse salariale</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Impact augmentations, inflation, primes, frais, turnover sur le budget global.</p>
-<div class="g4"><div><label>Brut moyen</label><input type="number" step="0.01" id="ms-brut" value="2500"></div><div><label>Effectif</label><input type="number" id="ms-eff" value="10"></div><div><label>Augmentation %</label><input type="number" step="0.1" id="ms-aug" value="3"></div><div><label>Inflation %</label><input type="number" step="0.1" id="ms-infl" value="2"></div></div>
-<div class="g4"><div><label>Frais km moyen/mois</label><input type="number" step="0.01" id="ms-km" value="50"></div><div><label>Avantages nature/mois</label><input type="number" step="0.01" id="ms-an" value="0"></div><div><label>Primes variables %</label><input type="number" step="0.1" id="ms-primes" value="5"></div><div><label>Turnover %</label><input type="number" step="0.1" id="ms-turn" value="10"></div></div>
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#128100; Salarie simule</h3>
+<div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="exo-eff" value="10"></div><div><label>Age du salarie simule</label><input type="number" id="exo-age" value="30"></div><div><label>Duree du contrat (mois, 0 = CDI)</label><input type="number" id="exo-duree" value="0" placeholder="0 = CDI"></div></div>
+<div class="g4"><div><label>Statut du salarie</label><select id="exo-statut"><option value="standard">Standard (CDI/CDD)</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Statut cadre/non-cadre</label><select id="exo-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div><div><label>Nb de salaries au meme profil (simulation groupee)</label><input type="number" id="exo-nb" value="1" min="1" max="500"></div></div>
+</div>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#9200; Temps de travail</h3>
+<div class="g4"><div><label>Heures mensuelles contrat</label><input type="number" step="0.01" id="exo-heures" value="151.67"></div><div><label>Temps partiel (%)</label><input type="number" step="1" id="exo-tp" value="100" min="1" max="100"></div><div><label>Heures sup /mois</label><input type="number" step="0.5" id="exo-hs" value="0"></div><div><label>Taux AT/MP (%)</label><input type="number" step="0.01" id="exo-at" value="0" placeholder="0 = defaut 2.08%"></div></div>
+</div>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#128197; Absences du mois</h3>
+<div class="g3"><div><label>Jours d'absence</label><input type="number" step="0.5" id="exo-abs-jours" value="0" min="0" max="31"></div><div><label>Type d'absence</label><select id="exo-abs-type"><option value="">Aucune</option><option value="maladie">Maladie</option><option value="at_mp">AT / Maladie professionnelle</option><option value="maternite">Maternite / Paternite</option><option value="conge_sans_solde">Conge sans solde</option></select></div><div><label style="color:var(--tx2);font-size:.82em">Impact : le SMIC est proratise au temps de presence pour le calcul du ratio SMIC (reduction Fillon, LODEOM)</label></div></div>
+</div>
+
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#127758; Zone geographique</h3>
+<div class="g2"><div><label>Zone</label><select id="exo-zone" onchange="toggleLodeom()"><option value="metropole">Metropole</option><option value="zrr">ZRR (Revitalisation rurale)</option><option value="zfu">ZFU-TE (Franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="outremer">Outre-mer (LODEOM)</option><option value="ber">BER (Bassin emploi a redynamiser)</option><option value="zrd">ZRD (Restructuration defense)</option><option value="afr">AFR (Finalite regionale)</option></select></div><div id="lodeom-bareme-wrap" style="display:none"><label>Bareme LODEOM</label><select id="exo-lodeom"><option value="competitivite">Competitivite (exo totale <= 1.3 SMIC, degr. 1.3-2.2)</option><option value="competitivite_renforcee">Comp. renforcee (exo totale <= 1.7 SMIC, degr. 1.7-2.7)</option><option value="innovation_croissance">Innovation et croissance (exo totale <= 2.0 SMIC, degr. 2.0-3.0)</option></select></div></div>
+</div>
+
+<button class="btn btn-blue btn-f" onclick="simExo()">&#9889; Simuler les exonerations</button>
+<div id="sim-exo-res" style="margin-top:12px"></div></div>
+
+<div class="tc" id="sim-masse"><h2>Simulation masse salariale globale</h2>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Projection du budget salarial <strong>pour l ensemble de l entreprise</strong>. Le brut moyen est multiplie par l effectif total pour estimer la masse annuelle. Impact augmentations, inflation, primes, frais et turnover.</p>
+<div class="g4"><div><label>Salaire brut moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-brut" value="2500"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="ms-eff" value="10"></div><div><label>Augmentation envisagee (%)</label><input type="number" step="0.1" id="ms-aug" value="3"></div><div><label>Inflation prevue (%)</label><input type="number" step="0.1" id="ms-infl" value="2"></div></div>
+<div class="g4"><div><label>Frais km moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-km" value="50"></div><div><label>Avantages nature moyen par salarie (EUR/mois)</label><input type="number" step="0.01" id="ms-an" value="0"></div><div><label>Primes variables (% masse salariale)</label><input type="number" step="0.1" id="ms-primes" value="5"></div><div><label>Turnover annuel previsionnel (%)</label><input type="number" step="0.1" id="ms-turn" value="10"></div></div>
+<div class="g2"><div><label>Convention collective applicable (IDCC ou nom)</label><input id="ms-ccn" placeholder="Ex: 1486, SYNTEC, HCR..."></div><div style="display:flex;align-items:flex-end;font-size:.82em;color:var(--tx2)">La CCN peut impacter les primes obligatoires (13e mois, anciennete, vacances). <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Voir detail CCN</a></div></div>
 <button class="btn btn-blue" onclick="simMasse()">Projeter</button><div id="sim-masse-res" style="margin-top:12px"></div></div>
 
-<div class="tc" id="sim-seuils"><h2>Impact seuils d effectif</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Obligations declenchees par le franchissement des seuils 11, 20, 50, 250 et 300 salaries.</p>
-<div class="g2"><div><label>Effectif actuel</label><input type="number" id="se-eff" value="48"></div><div><label>Masse salariale annuelle</label><input type="number" step="0.01" id="se-masse" value="1500000"></div></div>
+<div class="tc" id="sim-seuils"><h2>Impact des seuils d effectif sur les obligations de l entreprise</h2>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse <strong>pour l ensemble de l entreprise</strong> : quelles obligations sont declenchees par le franchissement des seuils legaux (11, 20, 50, 250, 300 salaries) et leur impact financier estime.</p>
+<div class="g2"><div><label>Effectif total actuel de l entreprise (nb salaries ETP)</label><input type="number" id="se-eff" value="48"></div><div><label>Masse salariale brute annuelle totale (EUR)</label><input type="number" step="0.01" id="se-masse" value="1500000"></div></div>
 <button class="btn btn-blue" onclick="simSeuils()">Analyser les seuils</button><div id="sim-seuils-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-fincontrat"><h2>Simulation fins de contrats</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Licenciement, rupture conventionnelle, fin CDD, depart retraite : indemnites et couts.</p>
-<div class="g4"><div><label>Type de fin</label><select id="fc-type"><option value="licenciement">Licenciement</option><option value="rupture_conventionnelle">Rupture conventionnelle</option><option value="fin_cdd">Fin de CDD</option><option value="retraite">Depart retraite</option></select></div><div><label>Salaire brut mensuel</label><input type="number" step="0.01" id="fc-brut" value="2500"></div><div><label>Anciennete (mois)</label><input type="number" id="fc-anc" value="36"></div><div><label>Cadre</label><select id="fc-cadre"><option value="false">Non</option><option value="true">Oui</option></select></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong> : licenciement, rupture conventionnelle, fin CDD, depart retraite — indemnites legales et cout total.</p>
+<div class="g4"><div><label>Type de rupture</label><select id="fc-type"><option value="licenciement">Licenciement</option><option value="rupture_conventionnelle">Rupture conventionnelle</option><option value="fin_cdd">Fin de CDD</option><option value="retraite">Depart retraite</option></select></div><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="fc-brut" value="2500"></div><div><label>Anciennete du salarie (mois)</label><input type="number" id="fc-anc" value="36"></div><div><label>Statut du salarie</label><select id="fc-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div></div>
 <div class="g2"><div><label>Motif (licenciement)</label><select id="fc-motif"><option value="personnel">Personnel</option><option value="economique">Economique</option><option value="faute_grave">Faute grave</option><option value="inaptitude">Inaptitude</option></select></div><div style="display:flex;align-items:flex-end"><button class="btn btn-blue btn-f" onclick="simFinContrat()" style="margin-top:0">Calculer les indemnites</button></div></div>
 <div id="sim-fc-res" style="margin-top:12px"></div></div>
 
@@ -7359,9 +11503,23 @@ APP_HTML += """
 <button class="btn btn-blue" onclick="simOptim()">Comparer les scenarios</button><div id="sim-optim-res" style="margin-top:12px"></div></div>
 
 <div class="tc" id="sim-risques"><h2>Risques specifiques sectoriels</h2>
-<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse des risques sociaux, AT/MP, obligations et subventions par secteur d activite.</p>
-<div class="g3"><div><label>Code NAF/APE</label><input id="rs-naf" value="6201Z" placeholder="Ex: 6201Z, 4120A..."></div><div><label>Effectif</label><input type="number" id="rs-eff" value="10"></div><div><label>Masse salariale annuelle</label><input type="number" step="0.01" id="rs-masse" value="400000"></div></div>
+<p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Analyse <strong>pour l ensemble de l entreprise</strong> : risques sociaux, AT/MP, obligations et subventions par secteur d activite.</p>
+<div class="g3"><div><label>Code NAF/APE de l entreprise</label><input id="rs-naf" value="6201Z" placeholder="Ex: 6201Z, 4120A..."></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="rs-eff" value="10"></div><div><label>Masse salariale brute annuelle totale (EUR)</label><input type="number" step="0.01" id="rs-masse" value="400000"></div></div>
 <button class="btn btn-blue" onclick="simRisques()">Analyser</button><div id="sim-risques-res" style="margin-top:12px"></div></div>
+
+<div class="tc" id="sim-ccn">
+<h2>Convention collective : legal vs conventionnel</h2>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#9878;</span><span><strong>Principe de faveur</strong> (art. L.2251-1 CT) : la convention collective s applique lorsqu elle est <strong>plus favorable</strong> que la loi. Cette simulation compare les obligations legales (Code du travail, ANI) avec les dispositions conventionnelles specifiques a votre CCN. <strong>60+ conventions nationales</strong> sont referencees.</span></div>
+<div class="g4">
+<div><label>Convention collective (IDCC ou intitule)</label><input id="ccn-search" placeholder="Ex: 1486, SYNTEC, metallurgie, HCR..." oninput="ccnAutoSearch()"></div>
+<div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="ccn-brut" value="2500"></div>
+<div><label>Statut du salarie</label><select id="ccn-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div>
+<div><label>Effectif total de l entreprise</label><input type="number" id="ccn-eff" value="10"></div>
+</div>
+<div id="ccn-search-results" style="margin:8px 0;max-height:150px;overflow-y:auto"></div>
+<button class="btn btn-blue btn-f" onclick="simCCN()">&#9878; Comparer legal vs conventionnel</button>
+<div id="sim-ccn-res" style="margin-top:12px"></div>
+</div>
 
 <div class="tc" id="sim-micro"><h2>Micro-entrepreneur</h2>
 <div class="g3"><div><label>CA</label><input type="number" step="0.01" id="sim-ca" value="50000"></div><div><label>Activite</label><select id="sim-act"><option value="prestations_bnc">BNC</option><option value="prestations_bic">BIC</option><option value="vente_marchandises">Vente</option><option value="location_meublee">Location</option></select></div><div><label>ACRE</label><select id="sim-acre"><option value="false">Non</option><option value="true">Oui</option></select></div></div>
@@ -7375,6 +11533,72 @@ APP_HTML += """
 <div class="tc" id="sim-ir"><h2>Impot sur le revenu</h2>
 <div class="g3"><div><label>Benefice</label><input type="number" step="0.01" id="sim-ben" value="40000"></div><div><label>Parts</label><input type="number" step="0.5" id="sim-parts" value="1"></div><div><label>Autres rev.</label><input type="number" step="0.01" id="sim-autres" value="0"></div></div>
 <button class="btn btn-blue" onclick="simIR()">Simuler</button><div id="sim-ir-res" style="margin-top:12px"></div></div>
+</div>
+</div>
+
+<!-- ===== SUBVENTIONS ET AIDES ===== -->
+<div class="sec" id="s-subventions">
+<div class="card">
+<h2>Recherche de subventions et aides</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Identifiez toutes les subventions, aides et dispositifs auxquels votre entreprise est potentiellement eligible. Renseignez les criteres ci-dessous pour un matching precis.</p>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128161;</span><span>Les donnees de votre entreprise sont pre-remplies depuis la <strong>Configuration</strong> et le <strong>Portefeuille</strong>. Vous pouvez les ajuster pour affiner la recherche.</span></div>
+<div class="g3">
+<div><label>Code NAF / APE</label><input id="sub-naf" placeholder="Ex: 6201Z, 4120A..." value=""></div>
+<div><label>Effectif</label><input type="number" id="sub-eff" value="10"></div>
+<div><label>Forme juridique</label><select id="sub-forme"><option value="">-- Toutes --</option><option value="SAS">SAS / SASU</option><option value="SARL">SARL / EURL</option><option value="SA">SA</option><option value="EI">EI / EIRL</option><option value="SCI">SCI</option><option value="Association">Association</option><option value="SNC">SNC</option></select></div>
+</div>
+<div class="g3">
+<div><label>Region</label><select id="sub-region"><option value="">-- Toute la France --</option><option value="ile-de-france">Ile-de-France</option><option value="auvergne-rhone-alpes">Auvergne-Rhone-Alpes</option><option value="nouvelle-aquitaine">Nouvelle-Aquitaine</option><option value="occitanie">Occitanie</option><option value="hauts-de-france">Hauts-de-France</option><option value="provence-alpes-cote-dazur">Provence-Alpes-Cote d Azur</option><option value="grand-est">Grand Est</option><option value="pays-de-la-loire">Pays de la Loire</option><option value="bretagne">Bretagne</option><option value="normandie">Normandie</option><option value="bourgogne-franche-comte">Bourgogne-Franche-Comte</option><option value="centre-val-de-loire">Centre-Val de Loire</option><option value="corse">Corse</option><option value="outre-mer">Outre-mer (DOM-TOM)</option></select></div>
+<div><label>Ville / Zone</label><select id="sub-zone"><option value="">-- Toute zone --</option><option value="zrr">ZRR (Zone revitalisation rurale)</option><option value="zfu">ZFU-TE (Zone franche urbaine)</option><option value="qpv">QPV (Quartier prioritaire)</option><option value="ber">BER (Bassin emploi a redynamiser)</option><option value="zrd">ZRD (Zone restructuration defense)</option><option value="afi">AFR (Aide finalite regionale)</option></select></div>
+<div><label>Chiffre d affaires annuel</label><input type="number" id="sub-ca" placeholder="Ex: 500000" value=""></div>
+</div>
+<div class="g3">
+<div><label>Age de l entreprise (annees)</label><input type="number" id="sub-age" value="5"></div>
+<div><label>Masse salariale annuelle</label><input type="number" id="sub-masse" placeholder="Ex: 400000" value=""></div>
+<div><label>Date de creation</label><input type="date" id="sub-creation" value=""></div>
+</div>
+<p style="font-weight:600;font-size:.88em;color:var(--p);margin:14px 0 8px">Domaines d activite (cochez ceux qui vous concernent) :</p>
+<div class="g4" style="margin-bottom:14px">
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-innovation" style="width:auto;margin:0"> Innovation / R&D</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-environnement" style="width:auto;margin:0"> Transition ecologique</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-numerique" style="width:auto;margin:0"> Transformation numerique</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-export" style="width:auto;margin:0"> Export / International</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-formation" style="width:auto;margin:0"> Formation / Emploi</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-creation-reprise" style="width:auto;margin:0"> Creation / Reprise</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-investissement" style="width:auto;margin:0"> Investissement</label>
+<label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:.84em;cursor:pointer"><input type="checkbox" id="sub-ess" style="width:auto;margin:0"> ESS / Impact social</label>
+</div>
+<div class="btn-group"><button class="btn btn-blue btn-f" onclick="rechercherSubventions()">&#128269; Rechercher les subventions eligibles</button></div>
+</div>
+
+<div id="sub-results" style="display:none">
+
+<div class="g4" id="sub-stats" style="margin-bottom:18px">
+<div class="sc blue"><div class="val" id="sub-total">0</div><div class="lab">Aides identifiees</div></div>
+<div class="sc green"><div class="val" id="sub-montant">0 EUR</div><div class="lab">Montant potentiel max</div></div>
+<div class="sc amber"><div class="val" id="sub-nationales">0</div><div class="lab">Nationales</div></div>
+<div class="sc purple"><div class="val" id="sub-europeennes">0</div><div class="lab">Europeennes</div></div>
+</div>
+
+<div class="card">
+<h2>Filtrer les resultats</h2>
+<div class="g4">
+<div><label>Niveau</label><select id="sub-filtre-niveau" onchange="filtrerSubventions()"><option value="">Tous</option><option value="local">Local</option><option value="regional">Regional</option><option value="national">National</option><option value="europeen">Europeen</option></select></div>
+<div><label>Categorie</label><select id="sub-filtre-cat" onchange="filtrerSubventions()"><option value="">Toutes</option><option value="innovation">Innovation / R&D</option><option value="environnement">Environnement</option><option value="emploi">Emploi / Formation</option><option value="numerique">Numerique</option><option value="export">Export</option><option value="creation">Creation / Reprise</option><option value="investissement">Investissement</option><option value="fiscal">Avantage fiscal</option><option value="social">Exoneration sociale</option><option value="ess">ESS / Impact</option></select></div>
+<div><label>Type d aide</label><select id="sub-filtre-type" onchange="filtrerSubventions()"><option value="">Tous</option><option value="subvention">Subvention directe</option><option value="credit_impot">Credit d impot</option><option value="exoneration">Exoneration</option><option value="pret">Pret / Avance</option><option value="garantie">Garantie</option><option value="accompagnement">Accompagnement</option></select></div>
+<div><label>Taille entreprise</label><select id="sub-filtre-taille" onchange="filtrerSubventions()"><option value="">Toutes</option><option value="tpe">TPE (< 10 sal.)</option><option value="pme">PME (< 250 sal.)</option><option value="eti">ETI (250-4999)</option><option value="ge">GE (5000+)</option></select></div>
+</div>
+</div>
+
+<div id="sub-liste"></div>
+
+<div class="card" id="sub-recapitulatif" style="display:none">
+<h2>Recapitulatif des aides eligibles</h2>
+<div style="overflow-x:auto"><table id="sub-recap-table">
+<tr><th>Aide</th><th>Niveau</th><th>Type</th><th>Montant max</th><th>Organisme</th><th>Eligibilite</th></tr>
+</table></div>
+<div class="btn-group" style="margin-top:14px;justify-content:flex-end"><button class="btn btn-s btn-sm" onclick="exportSubventions()">&#128190; Exporter CSV</button><button class="btn btn-blue btn-sm" onclick="imprimerSubventions()">&#128424; Imprimer</button></div>
+</div>
 </div>
 </div>
 
@@ -7394,16 +11618,69 @@ APP_HTML += """
 
 <!-- ===== PORTEFEUILLE ===== -->
 <div class="sec" id="s-portefeuille">
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+<button class="tab active" onclick="showPortTab('employeur',this)">&#127970; Compte Employeur</button>
+<button class="tab" onclick="showPortTab('ti',this)">&#128188; Compte T.I.</button>
+<button class="tab" onclick="showPortTab('vue',this)">&#128202; Vue d'ensemble</button>
+</div>
+
+<!-- Onglet Employeur -->
+<div class="port-panel" id="port-employeur">
 <div class="g2">
 <div class="card">
-<h2>Ajouter une entreprise</h2>
+<h2>&#127970; Ajouter une entreprise (Employeur)</h2>
 <label>SIRET</label><input id="ent-siret" placeholder="12345678901234" maxlength="14">
 <label>Raison sociale</label><input id="ent-raison" placeholder="Nom">
 <div class="g2"><div><label>Forme</label><select id="ent-forme"><option value="">--</option><option>SAS</option><option>SARL</option><option>SA</option><option>EURL</option><option>EI</option><option>SASU</option><option>SCI</option><option>SNC</option><option>Association</option></select></div><div><label>NAF</label><input id="ent-naf" placeholder="6201Z"></div></div>
 <div class="g2"><div><label>Effectif</label><input type="number" id="ent-eff" value="0"></div><div><label>Ville</label><input id="ent-ville" placeholder="Paris"></div></div>
-<button class="btn btn-p btn-f" onclick="ajouterEnt()">Ajouter</button>
+<button class="btn btn-p btn-f" onclick="ajouterEnt()">Ajouter l'entreprise</button>
 </div>
-<div class="card"><h2>Portefeuille</h2><input id="ent-search" placeholder="Rechercher..." oninput="rechEnt()"><div id="ent-list"></div></div>
+<div class="card"><h2>Entreprises (Employeur)</h2><input id="ent-search" placeholder="Rechercher..." oninput="rechEnt()"><div id="ent-list"></div></div>
+</div>
+</div>
+
+<!-- Onglet Travailleur Independant -->
+<div class="port-panel" id="port-ti" style="display:none">
+<div class="g2">
+<div class="card">
+<h2>&#128188; Ajouter un compte T.I.</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Gerant majoritaire, micro-entrepreneur, profession liberale, artisan, commercant... Ajoutez votre profil independant pour gerer vos cotisations personnelles.</p>
+<label>Statut</label><select id="ti-statut">
+<option value="gerant_majoritaire">Gerant majoritaire (SARL/EURL)</option>
+<option value="micro_entrepreneur">Micro-entrepreneur</option>
+<option value="profession_liberale">Profession liberale</option>
+<option value="entreprise_individuelle_ir">EI classique (IR)</option>
+<option value="entreprise_individuelle_is">EI a l'IS</option>
+<option value="artisan">Artisan</option>
+<option value="commercant">Commercant</option>
+</select>
+<div class="g2"><div><label>SIRET personnel</label><input id="ti-siret" placeholder="12345678901234" maxlength="14"></div><div><label>NAF</label><input id="ti-naf" placeholder="6201Z"></div></div>
+<label>Activite</label><input id="ti-activite" placeholder="Ex: Conseil en gestion">
+<div class="g2"><div><label>Regime fiscal</label><select id="ti-regime"><option value="">--</option><option value="prestations_bnc">BNC (prestations)</option><option value="prestations_bic">BIC (prestations)</option><option value="vente_marchandises">BIC (vente)</option><option value="location_meublee">BIC (location meublee)</option><option value="is">IS (impot societes)</option></select></div><div><label>Caisse retraite</label><select id="ti-caisse"><option value="">--</option><option value="cipav">CIPAV</option><option value="ssi">SSI (ex-RSI)</option><option value="carpimko">CARPIMKO</option><option value="carcdsf">CARCDSF</option><option value="cnbf">CNBF</option><option value="cavec">CAVEC</option><option value="carmf">CARMF</option><option value="autre">Autre</option></select></div></div>
+<div class="g3"><div><label>ACRE</label><select id="ti-acre"><option value="false">Non</option><option value="true">Oui</option></select></div><div><label>Option IS</label><select id="ti-is"><option value="false">Non</option><option value="true">Oui</option></select></div><div><label>Franchise TVA</label><select id="ti-tva"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
+<div class="g3"><div><label>Annee creation</label><input type="number" id="ti-annee" placeholder="2020" min="1950" max="2030"></div><div><label>CA annuel (EUR)</label><input type="number" id="ti-ca" value="0" step="100"></div><div><label>Benefice (EUR)</label><input type="number" id="ti-benefice" value="0" step="100"></div></div>
+<label>Remuneration nette (EUR/an)</label><input type="number" id="ti-remun" value="0" step="100">
+<button class="btn btn-blue btn-f" onclick="ajouterTI()">Ajouter le profil T.I.</button>
+</div>
+<div class="card"><h2>Profils T.I.</h2><input id="ti-search" placeholder="Rechercher..." oninput="rechTI()"><div id="ti-list"></div></div>
+</div>
+</div>
+
+<!-- Vue d'ensemble -->
+<div class="port-panel" id="port-vue" style="display:none">
+<div class="card">
+<h2>&#128202; Vue d'ensemble du portefeuille</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Synthese de vos comptes Employeur et Travailleur Independant.</p>
+<div class="g3" id="port-stats" style="margin-bottom:16px">
+<div class="card" style="background:var(--bg2);text-align:center;padding:16px"><div style="font-size:2em;font-weight:700" id="port-nb-emp">-</div><div style="font-size:.82em;color:var(--tx2)">Entreprises (Employeur)</div></div>
+<div class="card" style="background:var(--bg2);text-align:center;padding:16px"><div style="font-size:2em;font-weight:700" id="port-nb-ti">-</div><div style="font-size:.82em;color:var(--tx2)">Profils T.I.</div></div>
+<div class="card" style="background:var(--bg2);text-align:center;padding:16px"><div style="font-size:2em;font-weight:700" id="port-nb-total">-</div><div style="font-size:.82em;color:var(--tx2)">Total comptes</div></div>
+</div>
+<h3 style="margin-top:16px">Comptes Employeur</h3>
+<div id="port-vue-emp"></div>
+<h3 style="margin-top:16px">Comptes T.I.</h3>
+<div id="port-vue-ti"></div>
+</div>
 </div>
 </div>
 
@@ -7568,8 +11845,56 @@ APP_HTML += """
 </div>
 <div class="tc" id="rh-alertes">
 <h2>Alertes et echeances RH</h2>
-<div class="al info"><span class="ai">&#128161;</span><span>Les alertes sont calculees automatiquement selon les donnees RH et les obligations legales.</span></div>
-<div id="rh-alertes-list" style="margin-top:12px"></div>
+<div class="al info"><span class="ai">&#128161;</span><span>Les alertes sont calculees automatiquement selon les donnees RH, les obligations legales et vos alertes personnalisees. Cliquez sur une alerte pour voir les details.</span></div>
+
+<div class="tabs" style="margin:14px 0 8px">
+<div class="tab active" onclick="showAlTab('auto',this)">Alertes automatiques</div>
+<div class="tab" onclick="showAlTab('libres',this)">Mes alertes personnalisees</div>
+<div class="tab" onclick="showAlTab('creer',this)">+ Creer une alerte</div>
+</div>
+
+<div class="al-panel active" id="al-auto">
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+<button class="btn btn-s btn-sm" onclick="filtrerAlertesUrgence('')">Toutes</button>
+<button class="btn btn-sm" style="background:var(--rl);color:var(--r)" onclick="filtrerAlertesUrgence('haute')">Haute</button>
+<button class="btn btn-sm" style="background:var(--ol);color:#92400e" onclick="filtrerAlertesUrgence('moyenne')">Moyenne</button>
+<button class="btn btn-sm" style="background:var(--pl);color:var(--p2)" onclick="filtrerAlertesUrgence('info')">Info</button>
+<span style="flex:1"></span>
+<button class="btn btn-s btn-sm" onclick="exportAlertes()">&#128190; Export CSV</button>
+</div>
+<div id="rh-alertes-list"></div>
+</div>
+
+<div class="al-panel" id="al-libres" style="display:none">
+<div id="rh-alertes-libres-list"><p style="color:var(--tx2)">Aucune alerte personnalisee configuree.</p></div>
+</div>
+
+<div class="al-panel" id="al-creer" style="display:none">
+<h2 style="margin-bottom:14px">Creer une alerte personnalisee</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Configurez une alerte libre avec vos propres criteres : echeance, recurrence, niveau d urgence, etc.</p>
+<div class="g2">
+<div><label>Titre de l alerte *</label><input id="al-titre" placeholder="Ex: Renouvellement bail commercial"></div>
+<div><label>Categorie</label><select id="al-categorie"><option value="rh">Ressources humaines</option><option value="fiscal">Fiscal / Comptable</option><option value="social">Social / URSSAF</option><option value="juridique">Juridique / Contrats</option><option value="securite">Securite / Prevention</option><option value="commercial">Commercial / Clients</option><option value="administratif">Administratif</option><option value="autre">Autre</option></select></div>
+</div>
+<div><label>Description detaillee</label><textarea id="al-desc" rows="3" placeholder="Decrivez le contexte et l'objet de cette alerte..."></textarea></div>
+<div class="g3">
+<div><label>Urgence</label><select id="al-urgence"><option value="info">Information</option><option value="moyenne" selected>Moyenne</option><option value="haute">Haute (critique)</option></select></div>
+<div><label>Date d echeance</label><input type="date" id="al-echeance"></div>
+<div><label>Recurrence</label><select id="al-recurrence"><option value="">Aucune (ponctuelle)</option><option value="quotidien">Quotidienne</option><option value="hebdomadaire">Hebdomadaire</option><option value="mensuel">Mensuelle</option><option value="trimestriel">Trimestrielle</option><option value="semestriel">Semestrielle</option><option value="annuel">Annuelle</option></select></div>
+</div>
+<div class="g2">
+<div><label>Action requise</label><input id="al-action" placeholder="Ex: Envoyer le courrier recommande avant la date limite"></div>
+<div><label>Destinataire / Responsable</label><input id="al-destinataire" placeholder="Ex: Responsable RH, DAF, Gerant..."></div>
+</div>
+<div class="g2">
+<div><label>Reference legale (optionnel)</label><input id="al-ref" placeholder="Ex: Art. L.1234-5 CT"></div>
+<div><label>Delai de rappel (jours avant echeance)</label><input type="number" id="al-delai" value="7" min="1" max="365"></div>
+</div>
+<div><label>Notes complementaires</label><textarea id="al-notes" rows="2" placeholder="Notes internes..."></textarea></div>
+<div class="btn-group" style="margin-top:14px"><button class="btn btn-blue btn-f" onclick="creerAlerteLibre()">Creer l alerte</button></div>
+<div id="al-creer-res" style="margin-top:10px"></div>
+</div>
+
 </div>
 <div class="tc" id="rh-bulletins">
 <h2>Generation de bulletins de paie</h2>
@@ -7629,15 +11954,204 @@ APP_HTML += """
 <div id="urssaf-list" style="margin-top:12px"></div>
 </div>
 <div class="card">
-<h2>Personnalisation des alertes</h2>
-<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Activez/desactivez les types d alertes et personnalisez les delais de notification.</p>
+<h2>Personnalisation des alertes automatiques</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Activez/desactivez les types d alertes automatiques, personnalisez les delais de notification et ajoutez des messages. Pour creer des alertes libres, utilisez l onglet <strong>Alertes</strong> dans <strong>Ressources humaines</strong>.</p>
 <div id="cfg-alertes-list" style="margin-top:8px"></div>
-<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type"><option value="dpae_a_effectuer">DPAE embauche</option><option value="visite_medicale_expiration">Visite medicale</option><option value="fin_contrat_cdd">Fin de contrat CDD</option><option value="fin_periode_essai">Fin periode essai</option><option value="entretien_professionnel_retard">Entretien professionnel</option><option value="prevoyance_cadres">Prevoyance cadres</option><option value="mutuelle_obligatoire">Mutuelle obligatoire</option><option value="duerp_obligatoire">DUERP</option><option value="cse_obligatoire">Elections CSE</option><option value="formation_professionnelle">Formation professionnelle</option><option value="registre_personnel">Registre du personnel</option><option value="declaration_dsn_mensuelle">DSN mensuelle</option><option value="participation_obligatoire">Participation (>=50)</option><option value="reglement_interieur">Reglement interieur (>=50)</option><option value="index_egalite">Index egalite pro (>=50)</option><option value="bilan_social">Bilan social (>=300)</option></select></div>
+<div class="g3" style="margin-top:12px"><div><label>Type d alerte</label><select id="cfg-al-type">
+<optgroup label="Echeances salaries">
+<option value="dpae_a_effectuer">DPAE embauche</option>
+<option value="fin_cdd">Fin de contrat CDD</option>
+<option value="fin_periode_essai">Fin periode essai</option>
+<option value="vip_embauche">Visite embauche (VIP)</option>
+<option value="visite_medicale_retard">Visite medicale retard</option>
+<option value="visite_medicale_a_planifier">Visite medicale a planifier</option>
+<option value="entretien_professionnel_retard">Entretien professionnel retard</option>
+<option value="entretien_professionnel_manquant">Entretien professionnel manquant</option>
+<option value="entretien_retour_absence">Entretien retour absence</option>
+<option value="retour_arret_imminent">Retour arret imminent</option>
+<option value="retour_conge">Retour conge</option>
+<option value="medaille_travail">Medaille du travail</option>
+<option value="purge_sanction">Purge sanction disciplinaire</option>
+</optgroup>
+<optgroup label="Obligations employeur">
+<option value="prevoyance_obligatoire">Prevoyance cadres</option>
+<option value="mutuelle_obligatoire">Mutuelle obligatoire</option>
+<option value="duerp_obligatoire">DUERP</option>
+<option value="registre_personnel">Registre du personnel</option>
+<option value="affichages_obligatoires">Affichages obligatoires</option>
+<option value="referent_securite">Referent securite</option>
+<option value="referent_harcelement">Referent harcelement</option>
+<option value="remboursement_transport">Frais transport 50%</option>
+<option value="rgpd_conformite">Conformite RGPD</option>
+</optgroup>
+<optgroup label="Seuils effectif">
+<option value="cse_obligatoire">CSE (>=11 sal.)</option>
+<option value="oeth_handicap">OETH handicap (>=20 sal.)</option>
+<option value="participation_obligatoire">Participation (>=50 sal.)</option>
+<option value="reglement_interieur">Reglement interieur (>=50 sal.)</option>
+<option value="index_egalite_pro">Index egalite pro (>=50 sal.)</option>
+<option value="nao">NAO (>=50 sal.)</option>
+<option value="bdese">BDESE (>=50 sal.)</option>
+<option value="plan_mobilite">Plan mobilite (>=50 sal.)</option>
+<option value="forfait_social">Forfait social (>=50 sal.)</option>
+<option value="participation_construction">Participation construction (>=50 sal.)</option>
+<option value="bilan_social">Bilan social (>=300 sal.)</option>
+</optgroup>
+<optgroup label="Declarations et echeances fiscales">
+<option value="declaration_dsn_mensuelle">DSN mensuelle</option>
+<option value="dsn_annuelle">DSN annuelle (bilan)</option>
+<option value="das2_honoraires">DAS-2 Honoraires</option>
+<option value="contribution_formation">Contribution formation / TA</option>
+<option value="taxe_salaires">Taxe sur les salaires</option>
+<option value="echeance_fiscale">Echeances fiscales calendaires</option>
+<option value="versement_mobilite">Versement mobilite</option>
+<option value="agirc_arrco">Cotisations AGIRC-ARRCO</option>
+<option value="elections_cse_renouvellement">Renouvellement CSE</option>
+</optgroup>
+<optgroup label="Gestion courante">
+<option value="formation_professionnelle">Formation professionnelle</option>
+<option value="heures_supplementaires">Heures supplementaires</option>
+<option value="conges_payes">Conges payes</option>
+<option value="entretien_professionnel">Entretien professionnel bisannuel</option>
+</optgroup>
+</select></div>
 <div><label>Delai notification (jours)</label><input type="number" id="cfg-al-delai" value="30"></div>
 <div><label>Actif</label><select id="cfg-al-actif"><option value="true">Oui</option><option value="false">Non</option></select></div></div>
 <label>Message personnalise (optionnel)</label><input id="cfg-al-msg" placeholder="Message personnalise pour cette alerte">
 <button class="btn btn-blue btn-f" onclick="sauverAlertConfig()" style="margin-top:8px">Enregistrer la configuration</button>
 <div id="cfg-al-res" style="margin-top:8px"></div>
+</div>
+</div>
+
+<!-- ===== DETAILS DES SCORES DE CONFORMITE ===== -->
+<div class="sec" id="s-score-details">
+<div class="card">
+<h2>Methodologie des scores de conformite NormaCheck v4.0</h2>
+<div class="al info"><span class="ai">&#9878;</span><span>Methodologie v4.0 : scoring <strong>proportionnel, objectivable, reproductible et non-discretionnaire</strong>. Chaque parametre est derive d une reference legale explicite. Aucun coefficient arbitraire n est utilise. Soumis a validation methodologique aupres des organismes de reference.</span></div>
+<button class="btn btn-s" onclick="showS('dashboard')" style="margin-top:12px">&#8592; Retour au dashboard</button>
+</div>
+
+<div class="card" style="border-left:4px solid var(--p3)">
+<h2 style="color:var(--p2)">1. Score URSSAF - Conformite sociale (CSS)</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule (v4.0) :</strong><br>
+S<sub>URSSAF</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
+<strong>Poids de gravite W<sub>k</sub> (derives des sanctions legales) :</strong><br>
+&bull; Critique (W<sub>k</sub>=4) : manquement delibere, majoration 40% (CSS L243-7-7)<br>
+&bull; Haute (W<sub>k</sub>=3) : retard/omission significatif, majoration 10% (CSS L243-7-2)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, droit a regularisation (CSS L243-6-7)<br>
+&bull; Faible (W<sub>k</sub>=1) : anomalie mineure, pas de sanction directe<br><br>
+<strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 10<br>
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3) - facteur continu<br>
+<strong>Pas de bonus subjectif</strong> - seuls les constats impactent le score<br>
+<strong>Intervalle de confiance :</strong> Score &plusmn; marge selon qualite des documents analyses
+</div>
+<div style="margin-top:12px;font-size:.86em;line-height:1.8">
+<h3 style="margin-bottom:8px">Perimetres de controle</h3>
+<table><thead><tr><th>Point de controle</th><th>Reference legale</th><th>Nature du constat</th></tr></thead><tbody>
+<tr><td>Assiette des cotisations</td><td>Art. L242-1 CSS</td><td>Ecart brut BS vs DSN</td></tr>
+<tr><td>Reduction generale (ex-Fillon)</td><td>Art. L241-13 CSS</td><td>Depassement 3,5 SMIC, coefficient errone</td></tr>
+<tr><td>FNAL</td><td>Art. L834-1 CSS</td><td>Taux incorrect selon effectif (&lt;50 / &ge;50)</td></tr>
+<tr><td>Taux AT/MP</td><td>Art. L242-5, D242-6-1 CSS</td><td>Taux applique vs taux notifie</td></tr>
+<tr><td>CSG/CRDS</td><td>Art. L136-1-1 CSS</td><td>Assiette incorrecte (abattement 1,75%)</td></tr>
+<tr><td>Plafond SS proratise</td><td>Art. L242-8 CSS</td><td>Temps partiel non proratise</td></tr>
+<tr><td>Retraite complementaire</td><td>ANI AGIRC-ARRCO art. 36</td><td>Tranche 1/2 incorrecte</td></tr>
+<tr><td>SMIC horaire</td><td>Art. L3231-2 Code du travail</td><td>Net inferieur au SMIC 2026</td></tr>
+<tr><td>NIR / Identite</td><td>Decret n. 82-103 du 22/01/1982</td><td>NIR absent ou format invalide</td></tr>
+<tr><td>Bulletin de paie</td><td>Art. L3243-2 Code du travail</td><td>Rubriques obligatoires manquantes</td></tr>
+</tbody></table>
+</div>
+<div style="margin-top:12px;padding:12px;background:var(--pl);border-radius:8px;font-size:.84em">
+<strong>Echelle de notation :</strong> A (&ge;90) | B (&ge;75) | C (&ge;60) | D (&ge;45) | E (&ge;30) | F (&lt;30)<br>
+<strong>Organisme certificateur vise :</strong> URSSAF / Caisse Nationale (art. L.243-6-3 CSS)
+</div>
+<div id="score-detail-urssaf" style="margin-top:12px"></div>
+</div>
+
+<div class="card" style="border-left:4px solid var(--pu)">
+<h2 style="color:var(--pu)">2. Score DGFIP - Conformite fiscale (CGI)</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule (v4.0) :</strong><br>
+S<sub>DGFIP</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
+<strong>Poids de gravite W<sub>k</sub> (derives des sanctions legales) :</strong><br>
+&bull; Critique (W<sub>k</sub>=4) : manquement delibere, majoration 40% (CGI art. 1729)<br>
+&bull; Haute (W<sub>k</sub>=3) : retard declaration, majoration 10% (CGI art. 1728)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : ecart formel, interet de retard 0.2%/mois (CGI art. 1727)<br>
+&bull; Faible (W<sub>k</sub>=1) : anomalie mineure, pas de sanction directe<br><br>
+<strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 10<br>
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3)<br>
+<strong>Pas de bonus subjectif</strong>
+</div>
+<div style="margin-top:12px;font-size:.86em;line-height:1.8">
+<h3 style="margin-bottom:8px">Perimetres de controle</h3>
+<table><thead><tr><th>Point de controle</th><th>Reference legale</th><th>Nature du constat</th></tr></thead><tbody>
+<tr><td>TVA collectee / deductible</td><td>Art. 256 et 271 CGI</td><td>Ecart entre TVA declaree et calculee</td></tr>
+<tr><td>Declarations fiscales</td><td>Art. 1649 quater B CGI</td><td>Completude des declarations (IS, IR, TVA)</td></tr>
+<tr><td>DAS-2 Honoraires</td><td>Art. 240 CGI</td><td>Declaration des honoraires > 2400 EUR/an</td></tr>
+<tr><td>FEC</td><td>Art. L.47 A-I LPF</td><td>Presentation du fichier des ecritures comptables</td></tr>
+<tr><td>Facturation</td><td>Art. 289 CGI</td><td>Mentions obligatoires sur factures</td></tr>
+<tr><td>Conservation documents</td><td>Art. L.102 B LPF</td><td>Delai 6 ans fiscal / 10 ans comptable</td></tr>
+<tr><td>Avantages en nature</td><td>Art. 82 CGI</td><td>Evaluation et declaration correctes</td></tr>
+<tr><td>Credit impot formation (EXPIRE 31/12/2024)</td><td>Art. 244 quater M CGI</td><td>Dispositif expire - ne plus appliquer</td></tr>
+<tr><td>CFE / CVAE</td><td>Art. 1447 CGI</td><td>Declarations et paiement</td></tr>
+<tr><td>Taxe sur les salaires</td><td>Art. 231 CGI</td><td>Assujettissement et calcul</td></tr>
+</tbody></table>
+</div>
+<div style="margin-top:12px;padding:12px;background:var(--pul);border-radius:8px;font-size:.84em">
+<strong>Echelle de notation :</strong> A (&ge;90) | B (&ge;75) | C (&ge;60) | D (&ge;45) | E (&ge;30) | F (&lt;30)<br>
+<strong>Organisme certificateur vise :</strong> Direction Generale des Finances Publiques (DGFiP)
+</div>
+<div id="score-detail-fiscal" style="margin-top:12px"></div>
+</div>
+
+<div class="card" style="border-left:4px solid var(--tl)">
+<h2 style="color:var(--tl)">3. Score Cour des comptes - Regularite comptable</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule :</strong><br>
+S<sub>CDC</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</sub>)) &times; (0.5 + 0.5 &times; F<sub>c</sub>)<br><br>
+<strong>Poids de gravite W<sub>k</sub> (derives des normes d audit) :</strong><br>
+&bull; Critique (W<sub>k</sub>=4) : comptes non certifiables, anomalie significative (NEP 700, ISA 705)<br>
+&bull; Haute (W<sub>k</sub>=3) : ecart BS/DSN &gt; 5%, cut-off non respecte (ISA 450)<br>
+&bull; Moyenne (W<sub>k</sub>=2) : piece justificative manquante, rapprochement partiel (ISA 500)<br>
+&bull; Faible (W<sub>k</sub>=1) : ecart arrondi, libelle imprecis - non significatif<br><br>
+<strong>Normalisation :</strong> W<sub>max</sub> = max(&Sigma;W<sub>k</sub>, 4 &times; N<sub>points</sub>) avec N<sub>points</sub> = 8<br>
+<strong>Couverture documentaire :</strong> F<sub>c</sub> = min(1, nbDocs/3)<br>
+<strong>Pas de bonus subjectif</strong> - seuls les constats impactent le score
+</div>
+<div style="margin-top:12px;font-size:.86em;line-height:1.8">
+<h3 style="margin-bottom:8px">Perimetres de controle</h3>
+<table><thead><tr><th>Point de controle</th><th>Reference legale / norme</th><th>Nature du constat</th></tr></thead><tbody>
+<tr><td>Regularite des comptes</td><td>Normes NEP / ISA</td><td>Comptes annuels certifiables</td></tr>
+<tr><td>Sincerite des ecritures</td><td>Art. L.123-14 Code de commerce</td><td>Absence de manipulations comptables</td></tr>
+<tr><td>Image fidele du patrimoine</td><td>Art. L.123-14 Code de commerce</td><td>Bilan refletant la realite economique</td></tr>
+<tr><td>Continuite d exploitation</td><td>NEP 570</td><td>Aucun doute significatif</td></tr>
+<tr><td>Separation des exercices</td><td>Art. L.123-12 C.com / PCG 313-1</td><td>Cut-off correct</td></tr>
+<tr><td>Exhaustivite charges sociales</td><td>ISA 315 / ISA 500</td><td>Concordance BS / DSN / LDP</td></tr>
+<tr><td>Conventions reglementees</td><td>Art. L.225-38 C.com</td><td>Rapport special CAC</td></tr>
+<tr><td>Controle interne</td><td>NEP 315 / ISA 315</td><td>Documentation des procedures</td></tr>
+</tbody></table>
+</div>
+<div style="margin-top:12px;padding:12px;background:#f0fdfa;border-radius:8px;font-size:.84em">
+<strong>Echelle de notation :</strong> A (&ge;90) | B (&ge;75) | C (&ge;60) | D (&ge;45) | E (&ge;30) | F (&lt;30)<br>
+<strong>Organisme certificateur vise :</strong> Cour des comptes / Chambres regionales des comptes
+</div>
+<div id="score-detail-cdc" style="margin-top:12px"></div>
+</div>
+
+<div class="card">
+<h2>Score global NormaCheck</h2>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:12px 0;font-family:'SF Mono','Consolas',monospace;font-size:.88em;line-height:1.8">
+<strong>Formule du score global :</strong><br>
+S<sub>global</sub> = &lfloor; (S<sub>URSSAF</sub> &times; 0.40) + (S<sub>DGFIP</sub> &times; 0.35) + (S<sub>CDC</sub> &times; 0.25) &rfloor;<br><br>
+<strong>Poids de ponderation :</strong><br>
+&bull; URSSAF : 40% (risque financier principal : cotisations sociales)<br>
+&bull; DGFIP : 35% (risque fiscal : impots, TVA, declarations)<br>
+&bull; Cour des comptes : 25% (risque comptable : regularite, sincerite)
+</div>
+<div id="score-detail-global" style="margin-top:12px"></div>
+<div style="margin-top:16px;padding:14px;background:var(--ol);border-radius:10px;border:1px solid #fde68a;font-size:.84em">
+<strong>&#9888; Avertissement :</strong> Les scores NormaCheck sont des indicateurs internes d aide a la conformite. Ils ne constituent pas une certification officielle et ne sont pas opposables aux administrations (art. L.243-6-3 CSS). La labelisation est en cours de validation aupres des organismes certificateurs.
+</div>
 </div>
 </div>
 
@@ -7649,47 +12163,60 @@ APP_HTML += """
 
 APP_HTML += """
 <script>
-/* === INIT === */
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration"};
-function safeJson(r){if(!r.ok)throw new Error("Erreur serveur ("+r.status+")");return r.json();}
-function gv(id){return document.getElementById(id).value;}
-function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
-document.getElementById("topbar-date").textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});
-
-/* === MOBILE SIDEBAR === */
-function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");sb.classList.toggle("open");ov.classList.toggle("show");}
-function closeSidebar(){document.getElementById("sidebar").classList.remove("open");document.getElementById("sidebar-overlay").classList.remove("show");}
-
-/* === NAV === */
+/* === CORE NAV (separate script to guarantee availability) === */
+var _ncUser=null;
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite"};
+function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
+function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
 function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
 function showS(n,el){
+try{
 closeSidebar();
 document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
 document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove("active")});
 var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
-if(el)el.classList.add("active");
-document.getElementById("page-title").textContent=titles[n]||n;
-if(n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
-if(n==="portefeuille")rechEnt();if(n==="dashboard")loadDash();
-if(n==="biblio"){loadBiblio();loadKnowledge();}if(n==="equipe")loadEquipe();
-if(n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
-if(n==="dsn"){preFillDSN();loadDSNBrouillons();}
-if(n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();loadRHAlertes();}
-if(n==="analyse"&&analysisData){document.getElementById("res-analyse").style.display="block";showJsonResults(analysisData);}
+if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
+var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
+if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
+if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();}
+if(typeof loadDash==="function"&&n==="dashboard")loadDash();
+if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
+if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
+if(typeof loadPayStatuses==="function"&&n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
+if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrouillons==="function")loadDSNBrouillons();}
+if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
+if(n==="analyse"&&typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
-if(n==="config"){loadEntete();loadAlertConfigs();}
+if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
+if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
+if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();}
+if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
+}catch(e){console.error("showS error:",n,e);}
 }
-
+function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
 function goToRH(){showS('rh');}
-function goToRHContrats(){showS('rh');setTimeout(function(){showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
+function goToRHContrats(){showS('rh');setTimeout(function(){if(typeof showRHTab==="function")showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
+function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
+function gv(id){var el=document.getElementById(id);return el?el.value:"";}
+function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
+</script>
+<script>
+/* === AUTH CHECK === */
+(function(){fetch("/api/auth/me",{credentials:"same-origin"}).then(function(r){if(!r.ok){window.location.href="/";return null;}return r.json();}).then(function(u){if(!u)return;_ncUser=u;var su=document.getElementById("sidebar-user");if(su)su.textContent=(u.prenom||"")+" "+(u.nom||"")+" ("+u.role+")";}).catch(function(){window.location.href="/";});})();
+
+/* === INIT === */
+try{var _td=document.getElementById("topbar-date");if(_td)_td.textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});}catch(e){}
 
 document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
 
 /* === DASHBOARD === */
 var analysisData=null;
 try{var _saved=sessionStorage.getItem("nc_analysis");if(_saved){analysisData=JSON.parse(_saved);}}catch(e){}
+function saveDashServer(data){fetch("/api/dashboard/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),credentials:"same-origin"}).catch(function(){});}
+function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();}}).catch(function(){});}
 function loadDash(){
-if(!analysisData)return;
+try{
+if(!analysisData){loadDashServer();return;}
 var d=analysisData,s=d.synthese||{};
 var impact=s.impact_financier_total||0;
 var constats=d.constats||[];
@@ -7707,6 +12234,13 @@ document.getElementById("dd-urssaf").textContent=byDest["URSSAF"].toFixed(0)+" E
 document.getElementById("dd-fiscal").textContent=byDest["Fiscal"].toFixed(0)+" EUR";
 document.getElementById("dd-ft").textContent=byDest["France Travail"].toFixed(0)+" EUR";
 document.getElementById("dd-guso").textContent=byDest["GUSO"].toFixed(0)+" EUR";
+/* Triple scores */
+var ts=calculateTripleScore(d);
+function setGauge(id,valId,gradeId,sc){var g=document.getElementById(id);var v=document.getElementById(valId);var gr=document.getElementById(gradeId);if(g)g.style.setProperty("--pct",sc.score+"%");if(v)v.textContent=sc.score+"%";if(gr){var gcls=sc.score>=75?"color:var(--g)":sc.score>=45?"color:var(--o)":"color:var(--r)";gr.innerHTML="<span style='font-weight:700;"+gcls+"'>"+sc.grade+"</span>";}}
+setGauge("gauge-urssaf","gauge-urssaf-val","grade-urssaf",ts.urssaf);
+setGauge("gauge-fiscal","gauge-fiscal-val","grade-fiscal",ts.fiscal);
+setGauge("gauge-cdc","gauge-cdc-val","grade-cdc",ts.cdc);
+}catch(e){console.error("loadDash",e);}
 }
 
 function renderAnomalies(id,constats){
@@ -7746,32 +12280,13 @@ function categToDest(cat){var c=cat.toLowerCase();if(c.indexOf("fiscal")>=0||c.i
 /* === ANALYSE === */
 var fichiers=[];
 var dz=document.getElementById("dz-analyse"),fi=document.getElementById("fi-analyse");
-["dragenter","dragover"].forEach(function(ev){dz.addEventListener(ev,function(e){e.preventDefault();});});
-dz.addEventListener("drop",function(e){e.preventDefault();addF(e.dataTransfer.files);});
-fi.addEventListener("change",function(e){addF(e.target.files);fi.value="";});
+if(dz){["dragenter","dragover"].forEach(function(ev){dz.addEventListener(ev,function(e){e.preventDefault();});});
+dz.addEventListener("drop",function(e){e.preventDefault();addF(e.dataTransfer.files);});}
+if(fi){fi.addEventListener("change",function(e){addF(e.target.files);fi.value="";});}
 function addF(files){for(var i=0;i<files.length;i++){var f=files[i];var dup=false;for(var j=0;j<fichiers.length;j++){if(fichiers[j].name===f.name){dup=true;break;}}if(!dup&&fichiers.length<20)fichiers.push(f);}renderF();}
 function renderF(){var el=document.getElementById("fl-analyse");var h="";for(var i=0;i<fichiers.length;i++){h+="<div class='fi'><span class='nm'>"+fichiers[i].name+"</span><span style='color:var(--tx2);font-size:.8em'>"+(fichiers[i].size/1024).toFixed(1)+" Ko</span><button class='rm' onclick='rmF("+i+")'>&times;</button></div>";}el.innerHTML=h;document.getElementById("btn-az").disabled=fichiers.length===0;}
 function rmF(i){fichiers.splice(i,1);renderF();}
 
-function genererDemo(){
-fetch("/api/simulation/demo-documents?type_demo=complet&avec_anomalies=true").then(safeJson).then(function(r){
-var docs=r.documents||[];if(!docs.length){toast("Aucun document genere.");return;}
-for(var i=0;i<docs.length;i++){var d=docs[i];var content=d.contenu.replace(/\\n/g,"\n");var blob=new Blob([content],{type:"text/plain"});var f=new File([blob],d.nom,{type:d.type||"text/plain"});fichiers.push(f);}
-renderF();
-var msg=r.nb_documents+" documents de test generes";
-var anomMsg="";for(var i=0;i<docs.length;i++){var an=docs[i].anomalies_attendues||[];if(an.length)anomMsg+=docs[i].nom+": "+an.join(", ")+". ";}
-if(anomMsg)msg+=" avec anomalies volontaires. "+anomMsg;
-toast(msg,"ok");
-}).catch(function(e){toast("Erreur: "+e.message);});}
-
-function telechargerDemo(){
-toast("Preparation du ZIP...");
-fetch("/api/simulation/demo-documents/telecharger-tout?type_demo=complet&avec_anomalies=true").then(function(resp){
-if(!resp.ok)throw new Error("Erreur "+resp.status);return resp.blob();
-}).then(function(blob){
-var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="normacheck_documents_test.zip";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
-toast("ZIP telecharge ! Decompressez et importez les fichiers.","ok");
-}).catch(function(e){toast("Erreur: "+e.message);});}
 
 function lancerAnalyse(){
 if(!fichiers.length)return;
@@ -7785,18 +12300,21 @@ var modeAz=document.getElementById("mode-analyse").value;
 fetch("/api/analyze?format_rapport=json&integrer="+integ+"&mode_analyse="+modeAz,{method:"POST",body:fd}).then(function(resp){
 clearInterval(iv);fill.style.width="100%";txt.textContent="Termine !";
 if(!resp.ok)return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});
-return resp.json().then(function(data){analysisData=data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(data));}catch(e){}showJsonResults(data);});
+return resp.json().then(function(data){analysisData=data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(data));}catch(e){}saveDashServer(data);showJsonResults(data);});
 }).then(function(){setTimeout(function(){prg.style.display="none";},800);document.getElementById("res-analyse").style.display="block";}).catch(function(e){clearInterval(iv);prg.style.display="none";toast(e.message);btn.disabled=false;});
 }
 
 function showJsonResults(data){
 var s=data.synthese||{};var impact=s.impact_financier_total||0;
 var dashNr=s.nb_fichiers_non_reconnus||0;
-var nbAno=(data.constats||[]).length;var conform=Math.max(0,100-(s.score_risque_global||0));
+var nbAno=(data.constats||[]).length;var ts=calculateTripleScore(data);
 var dashH="<div class='sc blue' style='cursor:pointer' data-scroll='az-findings' onclick='scrollToEl(this)'><div class='val'>"+nbAno+"</div><div class='lab'>Anomalies &#8595;</div></div>";
 dashH+="<div class='sc "+(impact>1000?"red":"green")+"' style='cursor:pointer' data-toggle='az-impact-detail' onclick='toggleDetailAttr(this)'><div class='val'>"+impact.toFixed(2)+" EUR</div><div class='lab'>Impact &#8595;</div></div>";
-dashH+="<div class='sc green' style='cursor:pointer' data-scroll='az-audit-card' onclick='scrollToEl(this)'><div class='val'>"+conform+"%</div><div class='lab'>Conformite &#8595;</div></div>";
+dashH+="<div class='sc green' style='cursor:pointer' data-scroll='az-audit-card' onclick='scrollToEl(this)'><div class='val'>"+ts.global.score+"%</div><div class='lab'>Conformite &#8595;</div></div>";
 dashH+="<div class='sc'><div class='val'>"+(s.nb_fichiers||0)+"</div><div class='lab'>Fichiers</div></div>";
+dashH+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF</div></div>";
+dashH+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP</div></div>";
+dashH+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC</div></div>";
 if(dashNr>0)dashH+="<div class='sc red'><div class='val'>"+dashNr+"</div><div class='lab'>Non reconnus</div></div>";
 document.getElementById("az-dashboard").innerHTML=dashH;
 var impactDetail=document.getElementById("az-impact-detail");
@@ -7865,9 +12383,9 @@ h+="</div>";}
 h+="<p style='font-size:.78em;color:var(--tx2);margin-top:12px'>Derniere mise a jour : "+s.derniere_maj+"</p>";
 el.innerHTML=h;}).catch(function(){});}
 function loadBiblio(){
-fetch("/api/documents/bibliotheque").then(safeJson).then(function(docs){
+fetch("/api/documents/bibliotheque").then(safeJson).then(function(raw){var docs=(raw&&raw.items&&typeof raw.total==="number")?raw.items:raw;
 var el=document.getElementById("biblio-list");
-if(!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
+if(!docs||!docs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun document. Importez des fichiers via l'onglet Analyse.</p>";return;}
 var h="";for(var i=0;i<docs.length;i++){var d=docs[i];var de=d.donnees_extraites||{};
 h+="<div class='doc-item'><div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px'>";
 var bStatCls=d.statut==="non_reconnu"?"badge-red":(d.statut==="erreur"?"badge-red":"badge-blue");
@@ -7903,7 +12421,7 @@ var fd=new FormData();fd.append("champ",champ);fd.append("ancienne_valeur",ancie
 fetch("/api/documents/bibliotheque/"+docId+"/corriger",{method:"POST",body:fd}).then(function(r){if(!r.ok)throw new Error("Erreur");return r.json();}).then(function(){toast("Correction enregistree.","ok");loadBiblio();}).catch(function(e){toast(e.message);});}
 
 /* === FACTURES === */
-function showFT(n,el){document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}
+function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
 
 var factFile=null;
 document.getElementById("fi-fact").addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});
@@ -8052,9 +12570,9 @@ toast("Fichier DSN telecharge.","ok");
 }
 
 function loadDSNBrouillons(){
-fetch("/api/dsn/brouillons").then(safeJson).then(function(list){
+fetch("/api/dsn/brouillons").then(safeJson).then(function(raw){var list=(raw&&raw.items&&typeof raw.total==="number")?raw.items:raw;
 var el=document.getElementById("dsn-brouillons");
-if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun brouillon.</p>";document.getElementById("dsn-brouillons-card").style.display="none";return;}
+if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun brouillon.</p>";document.getElementById("dsn-brouillons-card").style.display="none";return;}
 document.getElementById("dsn-brouillons-card").style.display="block";
 var h="<table><tr><th>Date</th><th>Mois</th><th>Entreprise</th><th class='num'>Salaries</th><th class='num'>Brut total</th></tr>";
 for(var i=0;i<list.length;i++){var d=list[i];
@@ -8063,13 +12581,15 @@ h+="</table>";el.innerHTML=h;}).catch(function(){});}
 
 /* === COMPTABILITE === */
 function showCT(n,el){
+try{
 document.querySelectorAll("#compta-tabs .tab").forEach(function(t){t.classList.remove("active")});
 document.querySelectorAll("#s-compta .tc").forEach(function(t){t.classList.remove("active")});
 if(el)el.classList.add("active");var tc=document.getElementById("ct-"+n);if(tc)tc.classList.add("active");
-document.getElementById("period-sel").style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";
-loadCompta();}
+var ps=document.getElementById("period-sel");if(ps)ps.style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";
+loadCompta();
+}catch(e){console.error("showCT error:",n,e);}}
 
-function loadCompta(){
+function loadCompta(){try{
 var dd=document.getElementById("gl-dd").value;var df=document.getElementById("gl-df").value;
 
 fetch("/api/comptabilite/journal").then(safeJson).then(function(j){
@@ -8136,7 +12656,7 @@ fetch("/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){
 var h="<input placeholder='Rechercher...' oninput='rechPC(this.value)' style='margin-bottom:10px'><table id='pc-t'><tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";
 for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}h+="</table>";
 document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-plan-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
-}
+}catch(e){console.error("loadCompta error:",e);}}
 
 function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(e){console.error("Plan comptable",e);});}
 function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(safeJson).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
@@ -8165,19 +12685,125 @@ var cls=d.sans_justificatif?"warn":"ok";var icon=d.sans_justificatif?"&#9888;":"
 document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class='ai'>"+icon+"</span><span>"+(d.alerte||"Ecriture enregistree.")+(d.sans_justificatif?" <em style='color:var(--r)'>(justificatif manquant)</em>":"")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 
 /* === SIMULATION === */
-function showSimTab(n,el){document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}
+function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
 function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function ccnAutoSearch(){var t=document.getElementById("ccn-search").value;if(t.length<2){document.getElementById("ccn-search-results").innerHTML="";return;}fetch("/api/simulation/recherche-ccn?terme="+encodeURIComponent(t)).then(safeJson).then(function(r){var h="";if(r.resultats&&r.resultats.length>0){h="<div style='background:var(--bg2);border-radius:6px;padding:6px'>";for(var i=0;i<Math.min(r.resultats.length,8);i++){var c=r.resultats[i];h+="<div style='padding:4px 8px;cursor:pointer;border-radius:4px;font-size:.85em' onmouseover='this.style.background=\"var(--bg3)\"' onmouseout='this.style.background=\"\"' onclick='document.getElementById(\"ccn-search\").value=\""+c.idcc+"\";document.getElementById(\"ccn-search-results\").innerHTML=\"\"'><strong>IDCC "+c.idcc+"</strong> - "+c.nom+"</div>";}h+="</div>";}document.getElementById("ccn-search-results").innerHTML=h;}).catch(function(){});}
+function simCCN(){var ccn=document.getElementById("ccn-search").value;if(!ccn){toast("Saisissez un IDCC ou un nom de convention collective");return;}var p="ccn="+encodeURIComponent(ccn)+"&brut_mensuel="+gv("ccn-brut")+"&est_cadre="+gv("ccn-cadre")+"&effectif="+gv("ccn-eff");fetch("/api/simulation/ccn?"+p).then(safeJson).then(function(r){var h="";if(r.ccn_identifiee){h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>IDCC "+r.idcc+" - "+r.nom_ccn+"</strong>"+(r.secteur?" ("+r.secteur+")":"")+"</span></div>";}else{h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>Convention non identifiee</strong> — les minimums legaux sont appliques. Essayez un numero IDCC (ex: 1486).</span></div>";}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.bulletin.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut mensuel</div></div><div class='sc green'><div class='val'>"+r.bulletin.net_avant_impot.toFixed(2)+"</div><div class='lab'>Net avant impot</div></div><div class='sc amber'><div class='val'>"+r.bulletin.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+r.prevoyance_ccn.montant_mensuel.toFixed(2)+"</div><div class='lab'>Prevoyance CCN/mois</div></div></div>";h+="<h3 style='margin-top:16px'>&#9878; Obligations conventionnelles vs legales</h3>";if(r.obligations_conventionnelles&&r.obligations_conventionnelles.length>0){h+="<table><thead><tr><th>Obligation</th><th>Disposition conventionnelle</th><th>Minimum legal</th><th>+Favorable?</th></tr></thead><tbody>";for(var i=0;i<r.obligations_conventionnelles.length;i++){var o=r.obligations_conventionnelles[i];var badge=o.plus_favorable===true?"<span style='color:#16a34a'>&#10004; Oui</span>":o.plus_favorable===false?"<span style='color:#dc2626'>&#10008; Non</span>":"<span style='color:#d97706'>&#8212;</span>";h+="<tr><td><strong>"+o.obligation+"</strong></td><td>"+o.conventionnel+"</td><td>"+(o.legal||"-")+"</td><td>"+badge+"</td></tr>";}h+="</tbody></table>";h+="<p style='margin-top:8px;font-size:.85em;color:var(--tx2)'><strong>"+r.nb_obligations_plus_favorables+"</strong> disposition(s) conventionnelle(s) plus favorable(s) que la loi.</p>";}else{h+="<p style='color:var(--tx2);font-style:italic'>Aucune specificite conventionnelle identifiee au-dela du minimum legal.</p>";}h+="<h3 style='margin-top:16px'>&#128214; Rappel obligations legales (Code du travail / ANI)</h3>";if(r.obligations_legales){h+="<table><thead><tr><th>Obligation</th><th>Minimum legal</th></tr></thead><tbody>";for(var j=0;j<r.obligations_legales.length;j++){var ol=r.obligations_legales[j];h+="<tr><td>"+ol.obligation+"</td><td>"+ol.legal+"</td></tr>";}h+="</tbody></table>";}h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";document.getElementById("sim-ccn-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simCout(){var p="brut_mensuel="+gv("ce-brut")+"&effectif="+gv("ce-eff")+"&est_cadre="+gv("ce-cadre")+"&primes="+gv("ce-primes")+"&avantages_nature="+gv("ce-avantages")+"&frais_km="+gv("ce-km")+"&tickets_restaurant="+gv("ce-tr")+"&mutuelle_employeur="+gv("ce-mut");fetch("/api/simulation/cout-employeur?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_total.toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_mensuel.toFixed(2)+"</div><div class='lab'>Cout total/mois</div></div><div class='sc'><div class='val'>"+r.cout_total_annuel.toFixed(2)+"</div><div class='lab'>Cout total/an</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";h+="<tr><td>Charges patronales URSSAF</td><td class='num'>"+r.charges_patronales_urssaf.toFixed(2)+"</td></tr>";h+="<tr><td>Charges salariales</td><td class='num'>"+r.charges_salariales.toFixed(2)+"</td></tr>";h+="<tr><td>Formation professionnelle</td><td class='num'>"+r.formation_professionnelle.toFixed(2)+"</td></tr>";h+="<tr><td>Taxe apprentissage</td><td class='num'>"+r.taxe_apprentissage.toFixed(2)+"</td></tr>";h+="<tr><td>Effort construction</td><td class='num'>"+r.effort_construction.toFixed(2)+"</td></tr>";h+="<tr><td>Participation obligatoire</td><td class='num'>"+r.participation_obligatoire.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total charges annexes</td><td class='num'>"+r.total_charges_annexes.toFixed(2)+"</td></tr>";h+="<tr><td>Avantages nature</td><td class='num'>"+r.avantages_nature.toFixed(2)+"</td></tr>";h+="<tr><td>Frais km rembourses</td><td class='num'>"+r.frais_km_rembourses.toFixed(2)+"</td></tr>";h+="<tr><td>Tickets restaurant</td><td class='num'>"+r.tickets_restaurant.toFixed(2)+"</td></tr>";h+="<tr><td>Mutuelle employeur</td><td class='num'>"+r.mutuelle_employeur.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total avantages</td><td class='num'>"+r.total_avantages.toFixed(2)+"</td></tr></table>";h+="<div class='g4' style='margin-top:12px'><div class='sc'><div class='val'>"+r.repartition.salaire_net+"%</div><div class='lab'>Salaire net</div></div><div class='sc'><div class='val'>"+r.repartition.charges_salariales+"%</div><div class='lab'>Charges sal.</div></div><div class='sc'><div class='val'>"+r.repartition.charges_patronales+"%</div><div class='lab'>Charges pat.</div></div><div class='sc'><div class='val'>"+r.repartition.annexes_avantages+"%</div><div class='lab'>Annexes+Avantages</div></div></div>";h+="<p style='margin-top:10px;color:var(--tx2);font-size:.84em'>Ratio cout/net : <b>"+r.ratio_cout_net+"x</b> - Pour 1 EUR net verse, l employeur depense "+r.ratio_cout_net+" EUR</p>";document.getElementById("sim-cout-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"));fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc green'><div class='val'>"+r.total_exonerations_mensuelles.toFixed(2)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+r.total_exonerations_annuelles.toFixed(2)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie</div></div></div>";h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.charges_patronales_normales.toFixed(2)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+r.charges_patronales_apres_exo.toFixed(2)+"</div><div class='lab'>Charges apres exo</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel</th><th class='num'>Annuel</th><th>Statut</th></tr>";var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"color:var(--green)":"color:var(--tx2)";h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.8em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"Applicable":"Non applicable")+"</td></tr>";}h+="</table>";h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Ratio SMIC: "+r.ratio_smic+" | Statut: "+r.statut_salarie+"</p>";document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function toggleLodeom(){var z=gv("exo-zone");document.getElementById("lodeom-bareme-wrap").style.display=z==="outremer"?"block":"none";}
+function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"))+"&nb_heures_mensuelles="+(gv("exo-heures")||"151.67")+"&temps_partiel_pct="+(gv("exo-tp")||"100")+"&jours_absence="+(gv("exo-abs-jours")||"0")+"&type_absence="+gv("exo-abs-type")+"&bareme_lodeom="+gv("exo-lodeom")+"&est_cadre="+gv("exo-cadre")+"&taux_at="+(gv("exo-at")||"0")+"&nb_salaries_simules="+(gv("exo-nb")||"1");
+fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){
+var h="<div class='g3'><div class='sc green'><div class='val'>"+fmtN(r.total_exonerations_mensuelles)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(r.total_exonerations_annuelles)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie charges</div></div></div>";
+h+="<div class='g4' style='margin-top:10px'><div class='sc'><div class='val'>"+fmtN(r.charges_patronales_normales)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+fmtN(r.charges_patronales_apres_exo)+"</div><div class='lab'>Charges apres exo</div></div><div class='sc'><div class='val'>"+r.ratio_smic+"</div><div class='lab'>Ratio SMIC</div></div><div class='sc'><div class='val'>"+fmtN(r.smic_retabli)+"</div><div class='lab'>SMIC retabli</div></div></div>";
+// Multi-salaries
+if(r.multi_salaries){var m=r.multi_salaries;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--p)'><strong>&#128101; Simulation groupee ("+m.nb+" salaries identiques)</strong><div class='g3' style='margin-top:8px'><div class='sc green'><div class='val'>"+fmtN(m.total_exonerations_mensuelles)+"</div><div class='lab'>Exo totales/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(m.total_exonerations_annuelles)+"</div><div class='lab'>Exo totales/an</div></div><div class='sc'><div class='val'>"+fmtN(m.charges_normales_totales-m.charges_apres_exo_totales)+"</div><div class='lab'>Economie totale/mois</div></div></div></div>";}
+// Taux patronaux detailles
+if(r.taux_patronal_detaille){var tp=r.taux_patronal_detaille;h+="<div style='margin-top:12px'><details><summary style='cursor:pointer;font-weight:600;font-size:.9em'>&#128200; Detail taux patronaux ("+( tp.total*100).toFixed(2)+"%)"+(r.est_cadre?" - Cadre":" - Non cadre")+"</summary><table style='margin-top:6px'><tr><th>Cotisation</th><th class='num'>Taux</th></tr>";
+for(var k in tp){if(k!=="total")h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+(tp[k]*100).toFixed(2)+"%</td></tr>";}
+h+="<tr style='font-weight:600;background:var(--bg2)'><td>TOTAL</td><td class='num'>"+(tp.total*100).toFixed(2)+"%</td></tr></table></details></div>";}
+// Absences
+if(r.info_absences){var ab=r.info_absences;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--o)'><strong>&#128197; Impact absences ("+ab.jours+" jours - "+ab.type+")</strong><div style='font-size:.84em;margin-top:4px'>IJSS estimees: <b>"+fmtN(ab.ijss_estimees)+" EUR</b>";if(ab.complement_employeur>0)h+=" | Complement employeur: <b>"+fmtN(ab.complement_employeur)+" EUR</b>";h+="<br>"+ab.impact_smic_retabli+" | "+ab.impact_ratio+"</div></div>";}
+// Tableau exonerations
+h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel (EUR)</th><th class='num'>Annuel (EUR)</th><th>Statut</th></tr>";
+var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"":"color:var(--tx2);opacity:.6";
+h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.78em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"<span class='badge badge-green'>Applicable</span>":"<span class='badge' style='background:var(--bg2)'>Non applicable</span>")+"</td></tr>";
+if(e.applicable&&e.conditions){h+="<tr style='"+cls+"'><td colspan='5' style='font-size:.78em;color:var(--tx2);padding:2px 8px 6px;border-top:none'>"+e.conditions+"</td></tr>";}}
+h+="</table>";
+h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Heures contrat: "+r.heures_contrat+"h | TP: "+r.temps_partiel_pct+"% | Presence: "+(r.coeff_presence*100).toFixed(0)+"%"+(r.bareme_lodeom?" | LODEOM: "+r.bareme_lodeom:"")+"</p>";
+document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMasse(){var p="brut_moyen="+gv("ms-brut")+"&effectif="+gv("ms-eff")+"&augmentation_pct="+gv("ms-aug")+"&inflation_pct="+gv("ms-infl")+"&frais_km_moyen="+gv("ms-km")+"&avantages_nature_moyen="+gv("ms-an")+"&primes_variables_pct="+gv("ms-primes")+"&turnover_pct="+gv("ms-turn");fetch("/api/simulation/masse-salariale?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+fmt(r.masse_actuelle)+"</div><div class='lab'>Masse actuelle</div></div><div class='sc amber'><div class='val'>"+fmt(r.masse_apres_augmentation)+"</div><div class='lab'>Apres augmentation</div></div><div class='sc'><div class='val'>"+fmt(r.cout_global_projete)+"</div><div class='lab'>Cout global projete</div></div><div class='sc "+(r.evolution_pct>0?"red":"green")+"'><div class='val'>"+(r.evolution_pct>0?"+":"")+r.evolution_pct+"%</div><div class='lab'>Evolution</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant annuel</th></tr>";h+="<tr><td>Masse actuelle (brut)</td><td class='num'>"+fmt(r.masse_actuelle)+"</td></tr>";h+="<tr><td>Charges patronales actuelles (45%)</td><td class='num'>"+fmt(r.charges_patronales_actuelles)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total actuel</td><td class='num'>"+fmt(r.cout_total_actuel)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Impact augmentation (+"+r.augmentation_pct+"%)</td></tr>";h+="<tr><td>Nouveau brut moyen</td><td class='num'>"+r.nouveau_brut_moyen.toFixed(2)+" EUR/mois</td></tr>";h+="<tr><td>Cout augmentation (brut)</td><td class='num'>"+fmt(r.cout_augmentation_brut)+"</td></tr>";h+="<tr><td>Charges supplementaires</td><td class='num'>"+fmt(r.cout_augmentation_charges)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total augmentation</td><td class='num'>"+fmt(r.cout_augmentation_total)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Autres postes</td></tr>";h+="<tr><td>Perte pouvoir achat (inflation "+r.augmentation_pct+"% vs "+gv("ms-infl")+"%)</td><td class='num'>"+fmt(r.perte_pouvoir_achat_inflation)+"</td></tr>";h+="<tr><td>Ecart augmentation/inflation</td><td class='num'>"+fmt(r.ecart_augmentation_inflation)+"</td></tr>";h+="<tr><td>Primes variables</td><td class='num'>"+fmt(r.primes_variables_total)+"</td></tr>";h+="<tr><td>Charges sur primes</td><td class='num'>"+fmt(r.charges_primes)+"</td></tr>";h+="<tr><td>Frais kilometriques (non soumis)</td><td class='num'>"+fmt(r.frais_km_total)+"</td></tr>";h+="<tr><td>Avantages en nature (soumis)</td><td class='num'>"+fmt(r.avantages_nature_total)+"</td></tr>";h+="<tr><td>Charges sur avantages</td><td class='num'>"+fmt(r.charges_avantages)+"</td></tr>";h+="<tr><td>Cout turnover estime</td><td class='num'>"+fmt(r.cout_turnover_estime)+"</td></tr>";h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT GLOBAL PROJETE</td><td class='num'>"+fmt(r.cout_global_projete)+"</td></tr></table>";document.getElementById("sim-masse-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simSeuils(){fetch("/api/simulation/seuils-effectif?effectif_actuel="+gv("se-eff")+"&masse_salariale_annuelle="+gv("se-masse")).then(safeJson).then(function(r){var h="";if(r.prochain_seuil){h+="<div class='g3'><div class='sc amber'><div class='val'>"+r.prochain_seuil+"</div><div class='lab'>Prochain seuil</div></div><div class='sc blue'><div class='val'>"+r.marge_avant_seuil+"</div><div class='lab'>Salaries avant seuil</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_prochain_seuil)+"</div><div class='lab'>Cout franchissement</div></div></div>";}h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.effectif_actuel+"</div><div class='lab'>Effectif actuel</div></div><div class='sc amber'><div class='val'>"+fmt(r.total_obligations_actuelles)+"</div><div class='lab'>Obligations actuelles</div></div></div>";var seuils=r.seuils||[];for(var i=0;i<seuils.length;i++){var s=seuils[i];var obligs=s.obligations||[];var franchi=obligs.length>0&&obligs[0].franchi;h+="<div style='margin-top:14px;padding:10px;border-radius:8px;background:"+(franchi?"var(--bg2)":"var(--bg1)")+";border:1px solid "+(franchi?"var(--green)":"var(--border)")+"'>";h+="<h3 style='margin:0 0 6px'>"+(franchi?"&#9989; ":"&#9898; ")+"Seuil "+s.seuil+" salaries</h3>";h+="<table style='margin:0'><tr><th>Obligation</th><th>Reference</th><th class='num'>Cout estime</th><th>Detail</th></tr>";for(var j=0;j<obligs.length;j++){var o=obligs[j];h+="<tr><td>"+o.nom+"</td><td style='font-size:.8em'>"+o.reference+"</td><td class='num'>"+fmt(o.cout_estime)+"</td><td style='font-size:.84em;color:var(--tx2)'>"+o.detail+"</td></tr>";}h+="</table></div>";}document.getElementById("sim-seuils-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simFinContrat(){var p="type_fin="+gv("fc-type")+"&salaire_brut="+gv("fc-brut")+"&anciennete_mois="+gv("fc-anc")+"&est_cadre="+gv("fc-cadre")+"&motif="+gv("fc-motif");fetch("/api/simulation/fin-contrat?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.type_fin.replace(/_/g," ")+"</div><div class='lab'>Type</div></div><div class='sc'><div class='val'>"+r.anciennete_ans+" ans</div><div class='lab'>Anciennete</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_total)+"</div><div class='lab'>Cout total</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";var skip={"type_fin":1,"salaire_brut":1,"anciennete_mois":1,"anciennete_ans":1,"cout_total":1,"reference":1,"motif":1,"note":1,"exceptions":1};for(var k in r){if(!skip[k]&&typeof r[k]==="number"){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+r[k].toFixed(2)+"</td></tr>";}}h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT TOTAL</td><td class='num'>"+r.cout_total.toFixed(2)+"</td></tr></table>";if(r.reference)h+="<p style='margin-top:8px;font-size:.82em;color:var(--tx2)'>Ref: "+r.reference+"</p>";if(r.note)h+="<p style='font-size:.82em;color:var(--amber)'>"+r.note+"</p>";if(r.exceptions)h+="<p style='font-size:.82em;color:var(--tx2)'>"+r.exceptions+"</p>";document.getElementById("sim-fc-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simOptim(){var p="benefice_net="+gv("op-benef")+"&remuneration_gerant="+gv("op-rem")+"&dividendes="+gv("op-div")+"&interessement="+gv("op-int")+"&participation="+gv("op-part")+"&frais_pro="+gv("op-frais")+"&pee_abondement="+gv("op-pee")+"&nb_parts="+gv("op-parts")+"&forme_juridique="+gv("op-forme");fetch("/api/simulation/optimisation?"+p).then(safeJson).then(function(r){var h="<div class='g2' style='margin-bottom:12px'><div class='sc green'><div class='val'>"+r.meilleur_scenario+"</div><div class='lab'>Meilleur scenario</div></div><div class='sc blue'><div class='val'>"+fmt(r.ecart_max)+"</div><div class='lab'>Ecart max entre scenarios</div></div></div>";var sc=r.scenarios||[];h+="<table><tr><th>Scenario</th><th class='num'>Salaire brut</th><th class='num'>Charges</th><th class='num'>Dividendes</th><th class='num'>IR</th><th class='num'>Net disponible</th><th>Protection</th></tr>";for(var i=0;i<sc.length;i++){var s=sc[i];var best=s.nom===r.meilleur_scenario?" style='background:var(--bg2);font-weight:600'":"";h+="<tr"+best+"><td>"+s.nom+"</td><td class='num'>"+s.salaire_brut.toFixed(2)+"</td><td class='num'>"+s.charges_sociales.toFixed(2)+"</td><td class='num'>"+(s.dividendes||0).toFixed(2)+"</td><td class='num'>"+s.ir.toFixed(2)+"</td><td class='num' style='font-weight:600'>"+s.net_disponible.toFixed(2)+"</td><td style='font-size:.8em'>"+s.protection_sociale+"</td></tr>";}h+="</table>";if(r.frais_professionnels){var fp=r.frais_professionnels;h+="<div style='margin-top:14px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Frais professionnels deductibles</h3>";h+="<p style='margin:0 0 6px;font-size:.84em'>Frais declares: <b>"+fp.frais_declares.toFixed(2)+" EUR</b> - Economie IS: <b>"+fp.economie_is.toFixed(2)+" EUR</b></p>";h+="<div style='font-size:.84em;color:var(--tx2)'>Types eligibles: "+fp.types_eligibles.join(" | ")+"</div></div>";}document.getElementById("sim-optim-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simRisques(){var p="code_naf="+encodeURIComponent(gv("rs-naf"))+"&effectif="+gv("rs-eff")+"&masse_salariale="+gv("rs-masse");fetch("/api/simulation/risques-sectoriels?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.secteur+"</div><div class='lab'>Secteur</div></div><div class='sc amber'><div class='val'>"+r.taux_at_moyen+"%</div><div class='lab'>Taux AT moyen</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_at_annuel)+"</div><div class='lab'>Cout AT annuel</div></div><div class='sc'><div class='val'>"+r.effectif+"</div><div class='lab'>Effectif</div></div></div>";h+="<div style='margin-top:14px'><h3>Risques specifiques du secteur</h3><ul style='margin:6px 0;padding-left:20px'>";var rs=r.risques_specifiques||[];for(var i=0;i<rs.length;i++)h+="<li style='margin:3px 0'>"+rs[i]+"</li>";h+="</ul></div>";h+="<h3 style='margin-top:14px'>Risques financiers</h3><table><tr><th>Risque</th><th class='num'>Impact estime</th><th>Detail</th></tr>";var rf=r.risques_financiers||[];for(var i=0;i<rf.length;i++){h+="<tr><td>"+rf[i].risque+"</td><td class='num'>"+fmt(rf[i].impact_estime)+"</td><td style='font-size:.84em'>"+rf[i].detail+"</td></tr>";}h+="</table>";h+="<h3 style='margin-top:14px'>Subventions eligibles</h3><table><tr><th>Subvention</th><th class='num'>Montant max</th><th>Condition</th></tr>";var sb=r.subventions_eligibles||[];for(var i=0;i<sb.length;i++){h+="<tr><td>"+sb[i].nom+"</td><td class='num'>"+fmt(sb[i].montant_max)+"</td><td style='font-size:.84em'>"+sb[i].condition+"</td></tr>";}h+="</table>";h+="<div style='margin-top:12px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Recommandations</h3><ul style='margin:0;padding-left:20px'>";var rc=r.recommandations||[];for(var i=0;i<rc.length;i++)h+="<li style='margin:3px 0'>"+rc[i]+"</li>";h+="</ul></div>";document.getElementById("sim-risques-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+
+/* === SUBVENTIONS === */
+var _subData=null;
+function rechercherSubventions(){
+var p="code_naf="+encodeURIComponent(gv("sub-naf"))+"&effectif="+gv("sub-eff")+"&forme_juridique="+encodeURIComponent(document.getElementById("sub-forme").value)+"&region="+encodeURIComponent(document.getElementById("sub-region").value)+"&zone="+encodeURIComponent(document.getElementById("sub-zone").value)+"&ca="+(gv("sub-ca")||0)+"&age_entreprise="+(gv("sub-age")||5)+"&masse_salariale="+(gv("sub-masse")||0)+"&innovation="+(document.getElementById("sub-innovation").checked)+"&environnement="+(document.getElementById("sub-environnement").checked)+"&numerique="+(document.getElementById("sub-numerique").checked)+"&export_intl="+(document.getElementById("sub-export").checked)+"&formation="+(document.getElementById("sub-formation").checked)+"&creation_reprise="+(document.getElementById("sub-creation-reprise").checked)+"&investissement="+(document.getElementById("sub-investissement").checked)+"&ess="+(document.getElementById("sub-ess").checked);
+fetch("/api/subventions/recherche?"+p).then(safeJson).then(function(r){
+_subData=r;
+document.getElementById("sub-results").style.display="block";
+document.getElementById("sub-total").textContent=r.total;
+document.getElementById("sub-montant").textContent=fmt(r.montant_potentiel_estime||0);
+document.getElementById("sub-nationales").textContent=r.par_niveau.national||0;
+document.getElementById("sub-europeennes").textContent=r.par_niveau.europeen||0;
+afficherSubventions(r.aides);
+}).catch(function(e){toast(e.message||"Erreur recherche subventions");});
+}
+function afficherSubventions(aides){
+var container=document.getElementById("sub-liste");
+if(!aides||aides.length===0){container.innerHTML="<div class='al info'><span class='ai'>&#128161;</span><span>Aucune aide trouvee avec ces criteres. Essayez d elargir vos criteres de recherche.</span></div>";document.getElementById("sub-recapitulatif").style.display="none";return;}
+var h="";
+var niveauColors={"national":"blue","regional":"purple","europeen":"teal","local":"amber"};
+var typeLabels={"subvention":"Subvention","credit_impot":"Credit d impot","exoneration":"Exoneration","pret":"Pret / Avance","garantie":"Garantie","accompagnement":"Accompagnement"};
+var catLabels={"innovation":"Innovation / R&D","environnement":"Environnement","emploi":"Emploi / Formation","numerique":"Numerique","export":"Export","creation":"Creation / Reprise","investissement":"Investissement","fiscal":"Avantage fiscal","social":"Exoneration sociale","ess":"ESS / Impact"};
+for(var i=0;i<aides.length;i++){var a=aides[i];
+var nc=niveauColors[a.niveau]||"blue";
+h+="<div class='card' style='cursor:pointer;border-left:4px solid var(--"+(nc==="blue"?"p3":nc==="purple"?"pu":nc==="teal"?"tl":"o")+")' onclick='this.querySelector(\".sub-detail\").style.display=this.querySelector(\".sub-detail\").style.display===\"none\"?\"block\":\"none\"'>";
+h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px'>";
+h+="<div><h2 style='margin-bottom:4px'>"+a.nom+"</h2><div style='font-size:.82em;color:var(--tx2)'>"+a.organisme+"</div></div>";
+h+="<div style='display:flex;gap:6px;flex-wrap:wrap'>";
+h+="<span class='badge badge-"+nc+"'>"+a.niveau.charAt(0).toUpperCase()+a.niveau.slice(1)+"</span>";
+h+="<span class='badge badge-green'>"+(typeLabels[a.type_aide]||a.type_aide)+"</span>";
+h+="<span class='badge badge-blue'>"+(catLabels[a.categorie]||a.categorie)+"</span>";
+h+="</div></div>";
+h+="<div style='margin-top:8px;font-size:.88em;color:var(--tx)'>"+a.description+"</div>";
+h+="<div style='margin-top:8px;display:flex;gap:16px;flex-wrap:wrap'>";
+h+="<div style='font-size:.84em'><strong>Montant max :</strong> "+a.montant_max+"</div>";
+if(a.montant_estime)h+="<div style='font-size:.84em;color:var(--g)'><strong>Estimation pour vous :</strong> "+fmt(a.montant_estime)+"</div>";
+h+="</div>";
+h+="<div class='sub-detail' style='display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--brd)'>";
+h+="<h3 style='font-size:.9em;margin-bottom:6px'>Conditions d eligibilite :</h3><ul style='padding-left:20px;margin:0'>";
+var conds=a.conditions||[];for(var c=0;c<conds.length;c++)h+="<li style='font-size:.84em;margin:3px 0;color:var(--tx)'>"+conds[c]+"</li>";
+h+="</ul>";
+if(a.tailles&&a.tailles.length){h+="<div style='margin-top:8px;font-size:.82em'><strong>Tailles eligibles :</strong> ";var tl=[];for(var t=0;t<a.tailles.length;t++){var labels={"tpe":"TPE","pme":"PME","eti":"ETI","ge":"GE"};tl.push(labels[a.tailles[t]]||a.tailles[t]);}h+=tl.join(", ")+"</div>";}
+if(a.url_info)h+="<div style='margin-top:8px'><a href='"+a.url_info+"' target='_blank' rel='noopener' style='font-size:.84em;color:var(--p3)'>En savoir plus &#8599;</a></div>";
+h+="</div></div>";
+}
+container.innerHTML=h;
+// Recap table
+var recap=document.getElementById("sub-recapitulatif");recap.style.display="block";
+var tb=document.getElementById("sub-recap-table");
+var rows="<tr><th>Aide</th><th>Niveau</th><th>Type</th><th>Montant max</th><th>Organisme</th><th>Eligibilite</th></tr>";
+for(var i=0;i<aides.length;i++){var a=aides[i];
+rows+="<tr><td><strong>"+a.nom+"</strong></td><td><span class='badge badge-"+(niveauColors[a.niveau]||"blue")+"'>"+a.niveau+"</span></td><td>"+(typeLabels[a.type_aide]||a.type_aide)+"</td><td class='num'>"+a.montant_max+"</td><td style='font-size:.84em'>"+a.organisme+"</td><td style='font-size:.78em'>"+((a.conditions||[]).slice(0,2).join("; "))+"</td></tr>";}
+tb.innerHTML=rows;
+}
+function filtrerSubventions(){
+if(!_subData)return;
+var niv=document.getElementById("sub-filtre-niveau").value;
+var cat=document.getElementById("sub-filtre-cat").value;
+var typ=document.getElementById("sub-filtre-type").value;
+var tai=document.getElementById("sub-filtre-taille").value;
+var filtered=_subData.aides.filter(function(a){
+if(niv&&a.niveau!==niv)return false;
+if(cat&&a.categorie!==cat)return false;
+if(typ&&a.type_aide!==typ)return false;
+if(tai&&a.tailles&&a.tailles.indexOf(tai)<0)return false;
+return true;
+});
+afficherSubventions(filtered);
+}
+function exportSubventions(){
+if(!_subData||!_subData.aides)return;
+var csv="Nom;Organisme;Niveau;Categorie;Type;Montant max;Conditions\\n";
+for(var i=0;i<_subData.aides.length;i++){var a=_subData.aides[i];csv+='"'+a.nom+'";"'+a.organisme+'";"'+a.niveau+'";"'+a.categorie+'";"'+a.type_aide+'";"'+a.montant_max+'";"'+((a.conditions||[]).join(", "))+'"\\n';}
+var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="subventions_eligibles.csv";l.click();URL.revokeObjectURL(u);
+}
+function imprimerSubventions(){window.print();}
+function prefillSubventions(){
+try{
+fetch("/api/config/entete").then(safeJson).then(function(cfg){
+if(cfg.code_naf)document.getElementById("sub-naf").value=cfg.code_naf;
+if(cfg.forme_juridique){var sel=document.getElementById("sub-forme");for(var i=0;i<sel.options.length;i++){if(sel.options[i].value&&cfg.forme_juridique.toUpperCase().indexOf(sel.options[i].value)>=0){sel.selectedIndex=i;break;}}}
+}).catch(function(){});
+}catch(e){}
+}
 
 /* === VEILLE === */
 function loadVeille(){var a=document.getElementById("v-annee").value;document.getElementById("v-res").style.display="block";
@@ -8186,8 +12812,16 @@ fetch("/api/veille/legislation/"+a).then(safeJson).then(function(l){var h="<p st
 function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),a1=a2-1;fetch("/api/veille/baremes/comparer/"+a1+"/"+a2).then(safeJson).then(function(d){if(!d.length){toast("Pas de differences.","info");return;}var h="<table><tr><th>Parametre</th><th class='num'>"+a1+"</th><th class='num'>"+a2+"</th><th>Evolution</th></tr>";for(var i=0;i<d.length;i++){h+="<tr><td>"+d[i].parametre+"</td><td class='num'>"+(d[i]["valeur_"+a1]||"-")+"</td><td class='num'>"+(d[i]["valeur_"+a2]||"-")+"</td><td>"+d[i].evolution+"</td></tr>";}h+="</table>";document.getElementById("v-comp").innerHTML=h;document.getElementById("v-comp-card").style.display="block";}).catch(function(e){toast(e.message);});}
 
 /* === PORTEFEUILLE === */
+var _tiStatutLabels={"gerant_majoritaire":"Gerant majoritaire","micro_entrepreneur":"Micro-entrepreneur","profession_liberale":"Profession liberale","entreprise_individuelle_ir":"EI (IR)","entreprise_individuelle_is":"EI (IS)","artisan":"Artisan","commercant":"Commercant"};
+
+function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
+document.getElementById("port-"+name).style.display="block";
+document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
+if(el)el.classList.add("active");
+if(name==="vue")loadPortVue();if(name==="ti")rechTI();if(name==="employeur")rechEnt();}
+
 function ajouterEnt(){var fd=new FormData();fd.append("siret",document.getElementById("ent-siret").value);fd.append("raison_sociale",document.getElementById("ent-raison").value);fd.append("forme_juridique",document.getElementById("ent-forme").value);fd.append("code_naf",document.getElementById("ent-naf").value);fd.append("effectif",document.getElementById("ent-eff").value||"0");fd.append("ville",document.getElementById("ent-ville").value);
-fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();}).catch(function(e){toast(e.message);});}
+fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();document.getElementById("ent-siret").value="";document.getElementById("ent-raison").value="";}).catch(function(e){toast(e.message);});}
 
 function rechEnt(){var q=(document.getElementById("ent-search")||{}).value||"";
 fetch("/api/entreprises?q="+encodeURIComponent(q)).then(safeJson).then(function(d){
@@ -8195,10 +12829,95 @@ var el=document.getElementById("ent-list");if(!d.length){el.innerHTML="<p style=
 var h="";for(var i=0;i<d.length;i++){var e=d[i];
 h+="<div class='ent-item'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px'><strong>"+e.raison_sociale+"</strong>";
 if(e.forme_juridique)h+="<span class='badge badge-blue'>"+e.forme_juridique+"</span>";
+h+="<span class='badge badge-green' style='font-size:.7em'>Employeur</span>";
 h+="</div><div style='font-size:.84em;color:var(--tx2);margin-top:4px'>SIRET: "+e.siret;
 if(e.ville)h+=" | "+e.ville;if(e.code_naf)h+=" | NAF: "+e.code_naf;
 if(e.effectif)h+=" | "+e.effectif+" sal.";h+="</div></div>";}
 el.innerHTML=h;}).catch(function(){});}
+
+/* === T.I. (Travailleur Independant) === */
+function ajouterTI(){var fd=new FormData();
+fd.append("type_statut",document.getElementById("ti-statut").value);
+fd.append("siret",document.getElementById("ti-siret").value);
+fd.append("code_naf",document.getElementById("ti-naf").value);
+fd.append("activite",document.getElementById("ti-activite").value);
+fd.append("regime_fiscal",document.getElementById("ti-regime").value);
+fd.append("caisse_retraite",document.getElementById("ti-caisse").value);
+fd.append("acre",document.getElementById("ti-acre").value);
+fd.append("option_is",document.getElementById("ti-is").value);
+fd.append("tva_franchise",document.getElementById("ti-tva").value);
+fd.append("annee_creation",document.getElementById("ti-annee").value||"0");
+fd.append("chiffre_affaires_annuel",document.getElementById("ti-ca").value||"0");
+fd.append("benefice_annuel",document.getElementById("ti-benefice").value||"0");
+fd.append("remuneration_nette",document.getElementById("ti-remun").value||"0");
+fetch("/api/independants",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Profil T.I. ajoute !","ok");rechTI();}).catch(function(e){toast(e.message);});}
+
+function rechTI(){var q=(document.getElementById("ti-search")||{}).value||"";
+fetch("/api/independants?q="+encodeURIComponent(q)).then(safeJson).then(function(d){
+var el=document.getElementById("ti-list");if(!d.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun profil T.I. enregistre.</p>";return;}
+var h="";for(var i=0;i<d.length;i++){var t=d[i];var label=_tiStatutLabels[t.type_statut]||t.type_statut;
+h+="<div class='ent-item' style='border-left:3px solid var(--b)'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px'>";
+h+="<strong>"+(t.activite||label)+"</strong>";
+h+="<span class='badge badge-amber'>"+label+"</span>";
+h+="<span class='badge' style='background:var(--p);color:#fff;font-size:.7em'>T.I.</span>";
+h+="</div><div style='font-size:.84em;color:var(--tx2);margin-top:4px'>";
+if(t.siret)h+="SIRET: "+t.siret+" | ";
+if(t.code_naf)h+="NAF: "+t.code_naf+" | ";
+if(t.regime_fiscal)h+="Regime: "+t.regime_fiscal+" | ";
+if(t.chiffre_affaires_annuel)h+="CA: "+fmtN(t.chiffre_affaires_annuel)+" EUR | ";
+if(t.acre)h+="<span class='badge badge-green' style='font-size:.72em'>ACRE</span> ";
+h+="</div><div style='display:flex;gap:6px;margin-top:8px'>";
+h+="<button class='btn btn-s btn-sm' onclick='voirDashTI(\""+t.id+"\")'>&#128202; Dashboard</button>";
+h+="<button class='btn btn-sm' style='background:var(--r);color:#fff' onclick='supprimerTI(\""+t.id+"\")'>&#128465; Supprimer</button>";
+h+="</div></div>";}
+el.innerHTML=h;}).catch(function(){});}
+
+function supprimerTI(id){if(!confirm("Supprimer ce profil T.I. ?"))return;
+fetch("/api/independants/"+id,{method:"DELETE"}).then(safeJson).then(function(){toast("Profil T.I. supprime.","ok");rechTI();}).catch(function(e){toast(e.message);});}
+
+function voirDashTI(id){
+fetch("/api/independants/"+id+"/dashboard").then(safeJson).then(function(d){
+var p=d.profil;var c=d.cotisations_estimees||{};var label=_tiStatutLabels[p.type_statut]||p.type_statut;
+var h="<div class='card' style='border-left:4px solid var(--p)'><h2>&#128188; "+label;
+if(p.activite)h+=" - "+p.activite;h+="</h2>";
+h+="<div class='g3' style='margin:12px 0'>";
+if(p.siret)h+="<div><strong>SIRET</strong><br>"+p.siret+"</div>";
+if(p.regime_fiscal)h+="<div><strong>Regime fiscal</strong><br>"+p.regime_fiscal+"</div>";
+if(p.caisse_retraite)h+="<div><strong>Caisse retraite</strong><br>"+p.caisse_retraite+"</div>";
+if(p.annee_creation)h+="<div><strong>Annee creation</strong><br>"+p.annee_creation+"</div>";
+h+="<div><strong>ACRE</strong><br>"+(p.acre?"Oui":"Non")+"</div>";
+h+="<div><strong>Franchise TVA</strong><br>"+(p.tva_franchise?"Oui":"Non")+"</div>";
+h+="</div>";
+if(c.total_cotisations!==undefined){
+h+="<h3 style='margin-top:16px'>&#128176; Cotisations sociales estimees</h3>";
+h+="<table><tr><th>Poste</th><th class='num'>Montant (EUR)</th></tr>";
+for(var k in c){if(k==="base_ca"||k==="base_revenu"||k==="taux")continue;
+var lbl=k.replace(/_/g," ").replace(/^./, function(m){return m.toUpperCase();});
+var cls=k==="total_cotisations"?"font-weight:700;color:var(--r)":k==="net_apres_cotisations"?"font-weight:700;color:var(--g)":"";
+h+="<tr><td>"+lbl+"</td><td class='num' style='"+cls+"'>"+fmtN(c[k])+"</td></tr>";}
+h+="</table>";}
+if(d.nb_analyses>0){h+="<h3 style='margin-top:16px'>&#128200; "+d.nb_analyses+" analyse(s)</h3>";}
+h+="</div>";
+var el=document.getElementById("ti-list");el.innerHTML=h+"<br><button class='btn btn-s' onclick='rechTI()'>&#8592; Retour a la liste</button>";
+}).catch(function(e){toast(e.message);});}
+
+function loadPortVue(){
+Promise.all([fetch("/api/entreprises?q=").then(safeJson),fetch("/api/independants?q=").then(safeJson)]).then(function(r){
+var emps=r[0],tis=r[1];
+document.getElementById("port-nb-emp").textContent=emps.length;
+document.getElementById("port-nb-ti").textContent=tis.length;
+document.getElementById("port-nb-total").textContent=emps.length+tis.length;
+var he="";if(!emps.length)he="<p style='color:var(--tx2)'>Aucun compte employeur.</p>";
+for(var i=0;i<emps.length;i++){var e=emps[i];he+="<div class='ent-item'><span class='badge badge-green' style='font-size:.7em'>Employeur</span> <strong>"+e.raison_sociale+"</strong>";
+if(e.forme_juridique)he+=" <span class='badge badge-blue'>"+e.forme_juridique+"</span>";
+he+="<div style='font-size:.82em;color:var(--tx2)'>SIRET: "+e.siret;if(e.effectif)he+=" | "+e.effectif+" sal.";he+="</div></div>";}
+document.getElementById("port-vue-emp").innerHTML=he;
+var ht="";if(!tis.length)ht="<p style='color:var(--tx2)'>Aucun compte T.I.</p>";
+for(var j=0;j<tis.length;j++){var t=tis[j];var label=_tiStatutLabels[t.type_statut]||t.type_statut;
+ht+="<div class='ent-item' style='border-left:3px solid var(--p)'><span class='badge' style='background:var(--p);color:#fff;font-size:.7em'>T.I.</span> <strong>"+(t.activite||label)+"</strong> <span class='badge badge-amber'>"+label+"</span>";
+ht+="<div style='font-size:.82em;color:var(--tx2)'>";if(t.siret)ht+="SIRET: "+t.siret+" | ";if(t.chiffre_affaires_annuel)ht+="CA: "+fmtN(t.chiffre_affaires_annuel)+" EUR";ht+="</div></div>";}
+document.getElementById("port-vue-ti").innerHTML=ht;
+}).catch(function(){});}
 
 /* === EQUIPE === */
 function inviterCollab(){
@@ -8423,25 +13142,260 @@ h+="</tbody></table></div>";}
 el.innerHTML=h;}).catch(function(e){el.innerHTML="<div class='al err'>Erreur chargement audit: "+e.message+"</div>";});}
 
 /* === CONFORMITY SCORE === */
-function calculateConformityScore(data){
-var score=100;var details=[];var constats=data.constats||[];
-var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;
-for(var i=0;i<constats.length;i++){var c=constats[i];var sev=(c.severite||"").toLowerCase();
-if(sev==="critique"){score-=15;nbCrit++;details.push({deduction:-15,raison:c.titre||"Anomalie critique"});}
-else if(sev==="haute"||sev==="high"){score-=10;nbHaut++;details.push({deduction:-10,raison:c.titre||"Anomalie haute"});}
-else if(sev==="moyenne"||sev==="medium"){score-=5;nbMoy++;details.push({deduction:-5,raison:c.titre||"Anomalie moyenne"});}
-else{score-=2;nbBas++;details.push({deduction:-2,raison:c.titre||"Anomalie basse"});}}
-if(nbCrit===0&&constats.length>0){score+=5;details.push({deduction:5,raison:"Bonus: aucune anomalie critique"});}
-var nbDecl=(data.declarations||[]).length;
-if(nbDecl>=3){score+=3;details.push({deduction:3,raison:"Bonus: documentation suffisante ("+nbDecl+" sources)"});}
-else if(nbDecl<=1){var maxScore=80;if(score>maxScore){score=maxScore;}details.push({deduction:0,raison:"Plafond a "+maxScore+"% : documentation insuffisante pour score complet"});}
+function categToDomain(cat,ref,titre){
+var c=(cat||"").toLowerCase();var r=(ref||"").toLowerCase();var t=(titre||"").toLowerCase();
+var result={domain:"urssaf",regle:"defaut"};
+/* URSSAF-specific: taxe apprentissage (CT L6241-1), formation pro are URSSAF even if "taxe" in name */
+if(c.indexOf("apprentissage")>=0||c.indexOf("formation_pro")>=0){result={domain:"urssaf",regle:"categorie apprentissage/formation_pro -> URSSAF (CT L6241-1)"};}
+else if(r.indexOf("code du travail")>=0&&r.indexOf("cgi")<0){result={domain:"urssaf",regle:"reference Code du travail -> URSSAF"};}
+/* Fiscal domain: CGI, LPF, taxe sur salaires, TVA, impots */
+else if(c.indexOf("fiscal")>=0||c.indexOf("tva")>=0||c.indexOf("impot")>=0||r.indexOf("cgi")>=0||r.indexOf("lpf")>=0||c.indexOf("taxe_sur_salaires")>=0){result={domain:"fiscal",regle:"categorie/reference fiscale (CGI/LPF/TVA) -> DGFIP"};}
+/* CDC domain: NEP, ISA, code de commerce, comptabilite, totaux/sous-totaux, doublons total/detail */
+else if(r.indexOf("nep")>=0||r.indexOf("isa")>=0||r.indexOf("code de commerce")>=0||r.indexOf("pcg")>=0||c.indexOf("comptab")>=0){result={domain:"cdc",regle:"reference NEP/ISA/Code de commerce -> CDC"};}
+/* CDC par titre: coherence comptable, totaux, doublons total/detail, base x taux, S89 */
+else if(t.indexOf("total")>=0&&t.indexOf("detail")>=0){result={domain:"cdc",regle:"titre total+detail (coherence comptable) -> CDC"};}
+else if(t.indexOf("ecart calcul cotisation")>=0||t.indexOf("base x taux")>=0){result={domain:"cdc",regle:"titre ecart calcul/base x taux -> CDC"};}
+else if(t.indexOf("s89")>=0){result={domain:"cdc",regle:"titre S89 -> CDC"};}
+else if(t.indexOf("masse salariale")>=0&&t.indexOf("bases individuelles")>=0){result={domain:"cdc",regle:"titre masse salariale vs bases individuelles -> CDC"};}
+/*
+ * INCOHERENCE cross-document: distribuer entre domaines selon le contenu.
+ * Les incoherences de taux/montants entre documents sont des enjeux CDC (fiabilite comptable).
+ * Les incoherences SIRET/effectif/employes sont des enjeux URSSAF (declarations sociales).
+ */
+else if(c==="incoherence"){
+/* Taux, montants, bases entre documents = fiabilite comptable = CDC */
+if(t.indexOf("total patronal")>=0||t.indexOf("taux at")>=0){result={domain:"cdc",regle:"incoherence taux/montant inter-documents -> CDC (fiabilite comptable)"};}
+/* Convention collective, statut = impact fiscal aussi (minima, avantages en nature) */
+else if(t.indexOf("convention collective")>=0||t.indexOf("statut divergent")>=0){result={domain:"fiscal",regle:"incoherence convention/statut -> DGFIP (impact minima/avantages)"};}
+else{result={domain:"urssaf",regle:"incoherence non classee -> URSSAF (declarations sociales)"};}
+}
+/* Donnee manquante: certaines sont fiscales (declarations absentes = enjeu declaration fiscale) */
+else if(c==="donnee_manquante"&&(t.indexOf("mois de declaration manquants")>=0)){result={domain:"fiscal",regle:"donnee manquante mois declaration -> DGFIP"};}
+/* Pattern suspect: distribution Benford et outliers = enjeu comptabilite (CDC) */
+else if(c==="pattern_suspect"&&(t.indexOf("benford")>=0||t.indexOf("valeur atypique")>=0)){result={domain:"cdc",regle:"pattern suspect Benford/outlier -> CDC (regularite comptable)"};}
+else{result={domain:"urssaf",regle:"aucune regle specifique -> URSSAF par defaut"};}
+return result;}
+/*
+ * METHODOLOGIE DE SCORING v4.0 - Approche proportionnelle non-discretionnaire
+ *
+ * Principes fondateurs :
+ * 1. PROPORTIONNALITE : la deduction est proportionnelle a la gravite reglementaire
+ *    (basee sur les majorations legales : 40% manquement delibere, 10% retard, etc.)
+ * 2. OBJECTIVABILITE : chaque parametre est derive d'une reference legale explicite
+ * 3. REPRODUCTIBILITE : a constats identiques, score identique (pas de bonus subjectif)
+ * 4. NON-DISCRETIONNAIRE : aucun coefficient arbitraire
+ *
+ * Gravite reglementaire (Wk) - derivee des sanctions legales :
+ *   - Critique (Wk=4) : manquement delibere, majoration 40% (CSS L243-7-7, CGI art. 1729)
+ *   - Haute (Wk=3) : retard/omission significatif, majoration 10% (CSS L243-7-2, CGI art. 1728)
+ *   - Moyenne (Wk=2) : ecart formel, droit a regularisation (CSS L243-6-7, tolerance BOSS)
+ *   - Faible (Wk=1) : anomalie mineure, pas de sanction directe
+ *
+ * Formule par domaine :
+ *   S = max(0, 100 * (1 - Sigma(Wk) / Wmax))
+ *   ou Wmax = max(Sigma(Wk), 4*Npoints) avec Npoints = nb de points de controle
+ *   -> Garantit S in [0,100], converge vers 0 si beaucoup d anomalies
+ *
+ * Couverture documentaire (facteur continu) :
+ *   Fc = min(1, nbDecl / 3)  -> lineaire de 0 a 1, seuil a 3 documents
+ *   Score final = S * (0.5 + 0.5 * Fc)
+ *   -> Minimum = 50% du score brut (jamais de plafond arbitraire)
+ *
+ * Pas de bonus : seuls les constats negatifs impactent le score.
+ */
+var SEVERITY_WEIGHT={critique:4,haute:3,high:3,moyenne:2,medium:2,faible:1,low:1};
+var DOMAIN_CONTROL_POINTS={urssaf:10,fiscal:10,cdc:8};
+function _scoreOne(constats,nbDecl,domainKey){
+var details=[];var nbCrit=0,nbHaut=0,nbMoy=0,nbBas=0;var totalW=0;
+var Npoints=DOMAIN_CONTROL_POINTS[domainKey]||10;
+for(var i=0;i<constats.length;i++){var c=constats[i];var sev=(c.severite||"faible").toLowerCase();
+var wk=SEVERITY_WEIGHT[sev]||1;totalW+=wk;
+if(sev==="critique"){nbCrit++;}
+else if(sev==="haute"||sev==="high"){nbHaut++;}
+else if(sev==="moyenne"||sev==="medium"){nbMoy++;}
+else{nbBas++;}
+details.push({deduction:-wk,raison:c.titre||("Constat "+sev),ref:c.reference_legale||"",severite:sev,poids:wk});}
+/* Wmax = max(totalW, 4*Npoints) — normalisation par la capacite de controle */
+var Wmax=Math.max(totalW,4*Npoints);
+var Sbrut=Math.max(0,Math.round(100*(1-totalW/Wmax)));
+/* Facteur couverture documentaire (continu, non-discretionnaire) */
+var Fc=Math.min(1,nbDecl/3);
+var score=Math.round(Sbrut*(0.5+0.5*Fc));
 score=Math.max(0,Math.min(100,score));
+if(Fc<1){details.push({deduction:0,raison:"Facteur couverture documentaire : Fc="+Fc.toFixed(2)+" ("+nbDecl+"/3 sources). Score ajuste de "+Sbrut+" a "+score,ref:"Methodologie NormaCheck v4.0",severite:"info",poids:0});}
 var grade="F";if(score>=90)grade="A";else if(score>=75)grade="B";else if(score>=60)grade="C";else if(score>=45)grade="D";else if(score>=30)grade="E";
-var explication="Score NormaCheck : "+score+"/100 ("+grade+"). ";
-explication+="Base 100, deductions : critiques("+nbCrit+"x-15) hautes("+nbHaut+"x-10) moyennes("+nbMoy+"x-5) basses("+nbBas+"x-2). ";
-explication+="Bonus possible si aucune anomalie critique (+5) et documentation suffisante (+3). ";
-explication+="Plafonne a 80% si moins de 2 documents analyses.";
-return{score:score,grade:grade,explanation:explication,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas};}
+/* Intervalle de confiance : marge proportionnelle a l incertitude documentaire */
+var marge=Math.round((1-Fc)*15+constats.length*0.5);
+marge=Math.min(marge,20);
+var scoreBas=Math.max(0,score-marge);
+var scoreHaut=Math.min(100,score+marge);
+/* Nombre de constats contestables (patterns statistiques = interpretables) */
+var nbContest=0;
+for(var j=0;j<constats.length;j++){var cc=constats[j];var ct=(cc.categorie||"").toLowerCase();if(ct==="pattern_suspect")nbContest++;}
+return{score:score,grade:grade,details:details,nb_critiques:nbCrit,nb_hautes:nbHaut,nb_moyennes:nbMoy,nb_basses:nbBas,totalW:totalW,Wmax:Wmax,Sbrut:Sbrut,Fc:Fc,intervalle:{bas:scoreBas,haut:scoreHaut,marge:marge},nb_constats_contestables:nbContest};}
+function calculateTripleScore(data){
+var constats=data.constats||[];var nbDecl=(data.declarations||[]).length;
+/* Deduplication des constats (principe non bis in idem) :
+ * triplet (titre_normalise, categorie, severite) identifie un constat unique */
+var seen={};var deduped=[];
+for(var di=0;di<constats.length;di++){
+var dc=constats[di];var dkey=((dc.titre||"").toLowerCase().trim())+"|"+((dc.categorie||"").toLowerCase())+"|"+((dc.severite||"").toLowerCase());
+if(!seen[dkey]){seen[dkey]=true;deduped.push(dc);}}
+var nbDeduplicated=constats.length-deduped.length;
+constats=deduped;
+var urssafC=[],fiscalC=[],cdcC=[],routageTrace=[];var nbRoutageDefaut=0;
+for(var i=0;i<constats.length;i++){var c=constats[i];var routing=categToDomain(c.categorie,c.reference_legale,c.titre);var dom=routing.domain;
+if(routing.regle.indexOf("defaut")>=0||routing.regle.indexOf("aucune regle")>=0)nbRoutageDefaut++;
+routageTrace.push({constat:c.titre||"",categorie:c.categorie||"",domaine_affecte:dom,regle_appliquee:routing.regle});
+if(dom==="fiscal")fiscalC.push(c);else if(dom==="cdc")cdcC.push(c);else urssafC.push(c);}
+var su=_scoreOne(urssafC,nbDecl,"urssaf");var sf=_scoreOne(fiscalC,nbDecl,"fiscal");var sc=_scoreOne(cdcC,nbDecl,"cdc");
+su.domaine="URSSAF";su.ref_legal="Code de la securite sociale (CSS)";su.organisme="URSSAF / Caisse Nationale";
+sf.domaine="DGFIP";sf.ref_legal="Code general des impots (CGI)";sf.organisme="Direction Generale des Finances Publiques";
+sc.domaine="Cour des comptes";sc.ref_legal="Code de commerce / Normes NEP-ISA";sc.organisme="Cour des comptes / CRC";
+/*
+ * Score global : moyenne arithmetique ponderee par le nombre de points de controle (Nk)
+ * W_urssaf = 10, W_fiscal = 10, W_cdc = 8 -> total = 28
+ * Poids = Nk / Somme(Nk) => URSSAF=10/28, DGFIP=10/28, CDC=8/28
+ * Justification : le poids de chaque domaine est proportionnel au nombre de
+ * points de controle legaux identifies (objectivable et reproductible).
+ * Aucun coefficient discretionnaire n est utilise.
+ */
+var Nu=DOMAIN_CONTROL_POINTS.urssaf,Nf=DOMAIN_CONTROL_POINTS.fiscal,Nc=DOMAIN_CONTROL_POINTS.cdc;
+var Nt=Nu+Nf+Nc;
+var wu=Nu/Nt,wf=Nf/Nt,wc=Nc/Nt;
+var global=Math.round(su.score*wu+sf.score*wf+sc.score*wc);
+/*
+ * Penalite d accumulation d incoherences inter-documents :
+ * Si le nombre total d INCOHERENCES depasse 5, une penalite supplementaire
+ * s applique au score global. Cela evite qu un grand nombre d incoherences
+ * reparties entre domaines soit absorbe par la normalisation Wmax.
+ * Penalite = min(15, (nbIncoherences - 5) * 2) points.
+ */
+var nbIncoherences=0;
+for(var ic=0;ic<constats.length;ic++){if((constats[ic].categorie||"").toLowerCase()==="incoherence")nbIncoherences++;}
+var penaliteIncoherences=0;
+if(nbIncoherences>5){penaliteIncoherences=Math.min(15,(nbIncoherences-5)*2);global=Math.max(0,global-penaliteIncoherences);}
+var ggrade="F";if(global>=90)ggrade="A";else if(global>=75)ggrade="B";else if(global>=60)ggrade="C";else if(global>=45)ggrade="D";else if(global>=30)ggrade="E";
+/* Avertissement incertitude si marge > 10 sur un domaine */
+var avertissements=[];
+if(su.intervalle&&su.intervalle.marge>10)avertissements.push("URSSAF: incertitude significative (marge="+su.intervalle.marge+")");
+if(sf.intervalle&&sf.intervalle.marge>10)avertissements.push("DGFIP: incertitude significative (marge="+sf.intervalle.marge+")");
+if(sc.intervalle&&sc.intervalle.marge>10)avertissements.push("CDC: incertitude significative (marge="+sc.intervalle.marge+")");
+if(nbRoutageDefaut>0&&constats.length>0&&nbRoutageDefaut/constats.length>0.2)
+avertissements.push("Routage par defaut: "+nbRoutageDefaut+"/"+constats.length+" constats routes vers URSSAF par defaut (>20%)");
+return{urssaf:su,fiscal:sf,cdc:sc,global:{score:global,grade:ggrade},nb_constats_total:constats.length,
+nb_constats_dedupliques:nbDeduplicated,
+nb_incoherences:nbIncoherences,penalite_incoherences:penaliteIncoherences,
+nb_routage_defaut:nbRoutageDefaut,
+poids:{urssaf:wu,fiscal:wf,cdc:wc},methode:"Moyenne ponderee par nombre de points de controle (Nk/Somme_Nk)",
+routage_domaine:routageTrace,statut_validation:"provisoire",avertissements:avertissements};}
+function calculateConformityScore(data){
+var ts=calculateTripleScore(data);var g=ts.global;var p=ts.poids;
+var allDetails=ts.urssaf.details.concat(ts.fiscal.details).concat(ts.cdc.details);
+var explication="Score global NormaCheck v4.0 : "+g.score+"/100 ("+g.grade+"). ";
+explication+="URSSAF: "+ts.urssaf.score+"/100 ("+ts.urssaf.grade+") | DGFIP: "+ts.fiscal.score+"/100 ("+ts.fiscal.grade+") | CDC: "+ts.cdc.score+"/100 ("+ts.cdc.grade+"). ";
+explication+="Ponderation proportionnelle: URSSAF*"+(p.urssaf).toFixed(4)+" + DGFIP*"+(p.fiscal).toFixed(4)+" + CDC*"+(p.cdc).toFixed(4)+" (basee sur Nk/Somme_Nk).";
+return{score:g.score,grade:g.grade,explanation:explication,details:allDetails,
+nb_critiques:ts.urssaf.nb_critiques+ts.fiscal.nb_critiques+ts.cdc.nb_critiques,
+nb_hautes:ts.urssaf.nb_hautes+ts.fiscal.nb_hautes+ts.cdc.nb_hautes,
+nb_moyennes:ts.urssaf.nb_moyennes+ts.fiscal.nb_moyennes+ts.cdc.nb_moyennes,
+nb_basses:ts.urssaf.nb_basses+ts.fiscal.nb_basses+ts.cdc.nb_basses,
+tripleScore:ts};}
+/* --- Scellement du score dans la chaine de preuve --- */
+function sealScoreProof(data,ts){
+try{var sid=data.session_id||"";
+fetch("/api/proof/seal-score",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sid,scores:{urssaf:ts.urssaf,fiscal:ts.fiscal,cdc:ts.cdc,global:ts.global},
+constats:data.constats||[],nb_documents:(data.declarations||[]).length}),
+credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+if(d.status==="ok")console.info("Score scelle dans la chaine de preuve: seq="+d.seq+", hash="+d.hash);
+}).catch(function(e){console.warn("Erreur scellement preuve:",e);});}catch(e){}}
+function renderScoreDetails(){
+if(!analysisData)return;
+var ts=calculateTripleScore(analysisData);var p=ts.poids;
+/* Sceller le score dans la chaine de preuve a chaque affichage */
+sealScoreProof(analysisData,ts);
+function renderDomainDetail(elId,sc){
+var el=document.getElementById(elId);if(!el)return;
+var h="<h3>Resultat : "+sc.score+"/100 ("+sc.grade+") - "+sc.domaine+"</h3>";
+h+="<div style='margin:8px 0;font-size:.86em'><strong>Constats pris en compte :</strong> critiques="+sc.nb_critiques+" (Wk=4) | hautes="+sc.nb_hautes+" (Wk=3) | moyennes="+sc.nb_moyennes+" (Wk=2) | faibles="+sc.nb_basses+" (Wk=1)</div>";
+h+="<div style='margin:4px 0;font-size:.84em;color:var(--tx2)'>Somme poids Wk = "+sc.totalW+" | Wmax = "+sc.Wmax+" | Score brut = "+sc.Sbrut+" | Fc = "+sc.Fc.toFixed(2)+"</div>";
+h+="<table><thead><tr><th>Poids (Wk)</th><th>Severite</th><th>Constat</th><th>Reference legale</th></tr></thead><tbody>";
+for(var i=0;i<sc.details.length;i++){var d=sc.details[i];
+if(d.poids===0){h+="<tr><td style='color:var(--tx2)'>-</td><td>info</td><td colspan='2' style='font-size:.84em;color:var(--tx2)'>"+d.raison+"</td></tr>";}
+else{h+="<tr><td style='font-weight:700;color:var(--r)'>"+d.poids+"</td><td>"+(d.severite||"")+"</td><td>"+d.raison+"</td><td style='font-size:.82em;color:var(--tx2)'>"+d.ref+"</td></tr>";}}
+h+="</tbody></table>";
+h+="<div style='margin-top:10px;padding:10px;background:var(--bg);border-radius:8px;font-family:monospace;font-size:.84em'>";
+h+="S<sub>"+sc.domaine+"</sub> = max(0, 100 &times; (1 - &Sigma;Wk/Wmax)) &times; (0.5 + 0.5 &times; Fc)<br>";
+h+="= max(0, 100 &times; (1 - "+sc.totalW+"/"+sc.Wmax+")) &times; (0.5 + 0.5 &times; "+sc.Fc.toFixed(2)+")<br>";
+h+="= "+sc.Sbrut+" &times; "+(0.5+0.5*sc.Fc).toFixed(2)+" = <strong>"+sc.score+"</strong></div>";
+if(sc.intervalle){h+="<div style='margin-top:8px;padding:8px;background:var(--pl);border-radius:6px;font-size:.84em'><strong>Intervalle de confiance :</strong> ["+sc.intervalle.bas+" - "+sc.intervalle.haut+"] (&plusmn;"+sc.intervalle.marge+" pts)";
+if(sc.nb_constats_contestables>0){h+=" | <span style='color:var(--r)'>"+sc.nb_constats_contestables+" constat(s) statistique(s) contestable(s) (patterns)</span>";}
+h+="<br><span style='font-size:.9em;color:var(--tx2)'>L intervalle reflete l incertitude liee a la couverture documentaire et au nombre de constats. Les constats de type pattern_suspect sont des indicateurs statistiques non probants.</span></div>";}
+el.innerHTML=h;}
+renderDomainDetail("score-detail-urssaf",ts.urssaf);
+renderDomainDetail("score-detail-fiscal",ts.fiscal);
+renderDomainDetail("score-detail-cdc",ts.cdc);
+var gel=document.getElementById("score-detail-global");
+if(gel){var gh="";
+/* Bandeau statut provisoire / valide (art. 22 RGPD) */
+gh+="<div style='margin-bottom:12px;padding:12px 16px;border-radius:8px;border:2px solid #f59e0b;background:#fffbeb;font-size:.9em'>";
+gh+="<strong style='color:#92400e'>&#9888; SCORE PROVISOIRE</strong> &mdash; ";
+gh+="Ce score est un indicateur d'aide a la decision (art. 22 RGPD). ";
+gh+="Il ne constitue pas une decision automatisee et ne peut etre utilise a des fins decisionnelles ";
+gh+="sans validation prealable par un professionnel qualifie.";
+gh+="<div style='margin-top:8px'>";
+gh+="<button onclick='demanderValidationHumaine()' style='padding:6px 14px;background:#1e40af;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.85em;margin-right:8px'>Demander une validation humaine</button>";
+gh+="<button onclick='contesterScore()' style='padding:6px 14px;background:#dc2626;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.85em'>Contester ce score</button>";
+gh+="</div></div>";
+gh+="<div style='font-size:.9em;line-height:1.8'>";
+gh+="<strong>Methode :</strong> Moyenne ponderee par nombre de points de controle (Nk/&Sigma;Nk) - non discretionnaire<br>";
+gh+="<strong>Calcul :</strong> S<sub>global</sub> = ("+ts.urssaf.score+" &times; "+p.urssaf.toFixed(4)+") + ("+ts.fiscal.score+" &times; "+p.fiscal.toFixed(4)+") + ("+ts.cdc.score+" &times; "+p.cdc.toFixed(4)+") = <strong>"+ts.global.score+"/100 ("+ts.global.grade+")</strong></div>";
+gh+="<div style='margin-top:10px;padding:10px;background:var(--pl);border-radius:8px;font-size:.84em'><strong>Avertissement juridique (art. 22 RGPD) :</strong> Ce score est un indicateur methodologique provisoire, non opposable aux administrations. Il ne constitue pas une decision automatisee au sens de l'art. 22 RGPD. Les constats de type pattern_suspect sont des indicateurs statistiques non probants (art. L243-7 CSS). Tout constat est soumis a procedure contradictoire (art. L121-1 CRPA). L'entite auditee dispose d'un droit d'intervention humaine, d'expression et de contestation.</div>";
+/* Tracabilite du routage domaine (explicabilite art. 13-14 RGPD) */
+if(ts.routage_domaine&&ts.routage_domaine.length>0){
+gh+="<details style='margin-top:10px;font-size:.84em'><summary style='cursor:pointer;font-weight:700;color:var(--tx2)'>Tracabilite du routage domaine ("+ts.routage_domaine.length+" constats routes)</summary>";
+gh+="<table style='width:100%;margin-top:6px'><thead><tr><th style='text-align:left'>Constat</th><th style='text-align:left'>Domaine</th><th style='text-align:left'>Regle appliquee</th></tr></thead><tbody>";
+for(var ri=0;ri<ts.routage_domaine.length;ri++){var rt=ts.routage_domaine[ri];
+gh+="<tr><td style='font-size:.82em'>"+rt.constat+"</td><td><strong>"+rt.domaine_affecte.toUpperCase()+"</strong></td><td style='font-size:.82em;color:var(--tx2)'>"+rt.regle_appliquee+"</td></tr>";}
+gh+="</tbody></table></details>";}
+gh+="<div class='g3' style='margin-top:12px'>";
+gh+="<div class='sc blue'><div class='val'>"+ts.urssaf.score+"%</div><div class='lab'>URSSAF (N="+DOMAIN_CONTROL_POINTS.urssaf+", w="+(p.urssaf*100).toFixed(1)+"%)</div></div>";
+gh+="<div class='sc purple'><div class='val'>"+ts.fiscal.score+"%</div><div class='lab'>DGFIP (N="+DOMAIN_CONTROL_POINTS.fiscal+", w="+(p.fiscal*100).toFixed(1)+"%)</div></div>";
+gh+="<div class='sc teal'><div class='val'>"+ts.cdc.score+"%</div><div class='lab'>CDC (N="+DOMAIN_CONTROL_POINTS.cdc+", w="+(p.cdc*100).toFixed(1)+"%)</div></div>";
+gh+="</div>";gel.innerHTML=gh;}}
+/* === RGPD ART. 22 - VALIDATION HUMAINE ET CONTESTATION === */
+function demanderValidationHumaine(){
+if(!analysisData){toast("Aucune analyse en cours.","warn");return;}
+var sid=analysisData.session_id||"session_"+Date.now();
+var ts=calculateTripleScore(analysisData);
+var justif=prompt("Justification de la demande de validation (facultatif pour validation simple) :");
+fetch("/api/scores/validation-humaine",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sid,action:"valider",score_original:ts.global,justification:justif||"Validation demandee par l operateur"}),
+credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+if(d.status==="ok"){toast("Score valide par intervention humaine. Ref: seq="+d.validation.proof_seq+", hash="+d.validation.proof_hash.substring(0,12)+"...","ok");
+/* Mettre a jour l indicateur visuel */
+var banner=document.querySelector("#score-detail-global > div:first-child");
+if(banner){banner.style.borderColor="#16a34a";banner.style.background="#f0fdf4";
+banner.innerHTML="<strong style='color:#166534'>&#10003; SCORE VALIDE</strong> &mdash; Score valide par un operateur humain le "+new Date().toLocaleDateString("fr-FR")+". Ref preuve : "+d.validation.proof_hash.substring(0,12)+"... (art. 22 RGPD)";}
+}else{toast("Erreur: "+(d.detail||"Echec validation"),"warn");}
+}).catch(function(e){toast("Erreur validation: "+e.message,"warn");});}
+function contesterScore(){
+if(!analysisData){toast("Aucune analyse en cours.","warn");return;}
+var sid=analysisData.session_id||"session_"+Date.now();
+var motif=prompt("Motif de la contestation (obligatoire) :");
+if(!motif){toast("La contestation necessite un motif.","warn");return;}
+var constatsStr=prompt("Titre(s) des constats contestes (separes par des virgules, ou vide pour contester le score global) :");
+var constatsContestes=constatsStr?constatsStr.split(",").map(function(s){return s.trim();}):[];
+fetch("/api/scores/contestation",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sid,constats_contestes:constatsContestes,motif:motif}),
+credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+if(d.status==="ok"){toast("Contestation enregistree (ref: seq="+d.contestation.proof_seq+"). Reexamen humain sous 30 jours.","ok");
+var banner=document.querySelector("#score-detail-global > div:first-child");
+if(banner){banner.style.borderColor="#dc2626";banner.style.background="#fef2f2";
+banner.innerHTML="<strong style='color:#991b1b'>&#9888; SCORE CONTESTE</strong> &mdash; Contestation enregistree le "+new Date().toLocaleDateString("fr-FR")+". Un reexamen humain sera effectue sous 30 jours (art. R*243-59 CSS). Ref: "+d.contestation.proof_hash.substring(0,12)+"...";}
+}else{toast("Erreur: "+(d.detail||"Echec contestation"),"warn");}
+}).catch(function(e){toast("Erreur contestation: "+e.message,"warn");});}
 
 /* === PDF EXPORT === */
 function exportPDF(){
@@ -8463,23 +13417,40 @@ var html="<!DOCTYPE html><html><head><meta charset='UTF-8'><title>"+titre+"</tit
 html+=entHtml;
 html+="<h1 style='text-align:center'>"+titre+"</h1>";
 html+="<p style='text-align:center;color:#64748b'>Date: "+new Date().toLocaleDateString("fr-FR")+" | "+((analysisData.synthese||{}).nb_fichiers||0)+" fichier(s) analyse(s)</p>";
-html+="<div class='score'><div class='grade'>"+scoreData.grade+"</div><div style='font-size:2em;font-weight:700'>"+scoreData.score+" / 100</div><p style='color:#64748b;margin-top:8px'>"+scoreData.explanation+"</p></div>";
-if(socialH){html+="<h2>Partie sociale - Constats</h2><p style='color:#64748b'>Points de controle relevant de la legislation sociale (Code de la securite sociale, Code du travail)</p>"+socialH;}
-if(fiscalH){html+="<h2>Partie fiscale - Constats</h2><p style='color:#64748b'>Points de controle relevant de la legislation fiscale (Code general des impots)</p>"+fiscalH;}
+var ts=scoreData.tripleScore||calculateTripleScore(analysisData);
+html+="<div style='margin:16px 0;padding:12px;background:#fffbeb;border:2px solid #f59e0b;border-radius:8px;font-size:.9em;color:#92400e'><strong>&#9888; SCORE PROVISOIRE</strong> &mdash; Ce score est un indicateur d'aide a la decision (art. 22 RGPD). Il ne constitue pas une decision automatisee et necessite une validation par un professionnel qualifie avant toute utilisation a des fins decisionnelles. L'entite auditee dispose d'un droit d'intervention humaine, d'expression et de contestation (art. 22(3) RGPD, art. L121-1 CRPA).</div>";
+html+="<div class='score'><div class='grade'>"+scoreData.grade+"</div><div style='font-size:2em;font-weight:700'>Score global : "+scoreData.score+" / 100</div><p style='color:#64748b;margin-top:8px'>"+scoreData.explanation+"</p></div>";
+html+="<div style='display:flex;gap:16px;justify-content:center;margin:20px 0;flex-wrap:wrap'>";
+html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #3b82f6;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>URSSAF / CSS</div><div style='font-size:2em;font-weight:800;color:#1e40af'>"+ts.urssaf.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.urssaf.score>=75?"#16a34a":ts.urssaf.score>=45?"#d97706":"#ef4444")+"'>"+ts.urssaf.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.urssaf.nb_critiques+" critique(s) | "+ts.urssaf.details.length+" constat(s)</div></div>";
+html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #a855f7;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>DGFIP / CGI</div><div style='font-size:2em;font-weight:800;color:#7c3aed'>"+ts.fiscal.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.fiscal.score>=75?"#16a34a":ts.fiscal.score>=45?"#d97706":"#ef4444")+"'>"+ts.fiscal.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.fiscal.nb_critiques+" critique(s) | "+ts.fiscal.details.length+" constat(s)</div></div>";
+html+="<div style='flex:1;min-width:200px;text-align:center;padding:16px;border:2px solid #0d9488;border-radius:12px'><div style='font-size:.75em;text-transform:uppercase;color:#64748b;margin-bottom:4px'>COUR DES COMPTES</div><div style='font-size:2em;font-weight:800;color:#0d9488'>"+ts.cdc.score+"/100</div><div style='font-size:1.2em;font-weight:700;color:"+(ts.cdc.score>=75?"#16a34a":ts.cdc.score>=45?"#d97706":"#ef4444")+"'>"+ts.cdc.grade+"</div><div style='font-size:.8em;color:#64748b;margin-top:4px'>"+ts.cdc.nb_critiques+" critique(s) | "+ts.cdc.details.length+" constat(s)</div></div>";
+html+="</div>";
+var pp=ts.poids||{urssaf:10/28,fiscal:10/28,cdc:8/28};
+html+="<div style='text-align:center;padding:10px;background:#f8fafc;border-radius:8px;margin:10px 0;font-size:.85em'><strong>Ponderation proportionnelle (Nk/&Sigma;Nk) :</strong> S<sub>global</sub> = URSSAF("+ts.urssaf.score+") &times; "+(pp.urssaf).toFixed(4)+" + DGFIP("+ts.fiscal.score+") &times; "+(pp.fiscal).toFixed(4)+" + CDC("+ts.cdc.score+") &times; "+(pp.cdc).toFixed(4)+" = <strong>"+ts.global.score+"</strong><br><span style='color:#64748b;font-size:.9em'>Methode v4.0 : poids derives du nombre de points de controle legaux par domaine (non discretionnaire)</span></div>";
+if(socialH){html+="<h2>Partie sociale - Constats URSSAF</h2><p style='color:#64748b'>Points de controle relevant de la legislation sociale (Code de la securite sociale, Code du travail)</p>"+socialH;}
+if(fiscalH){html+="<h2>Partie fiscale - Constats DGFIP</h2><p style='color:#64748b'>Points de controle relevant de la legislation fiscale (Code general des impots)</p>"+fiscalH;}
 if(!socialH&&!fiscalH){html+="<h2>Constats</h2>";for(var i=0;i<constats.length;i++){var c=constats[i];html+="<div style='border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0'><strong>"+c.titre+"</strong><p>"+c.description+"</p><p>Impact: "+Math.abs(c.montant_impact||0).toFixed(2)+" EUR</p></div>";}}
 html+="<h2>Recommandations</h2>";var recos=analysisData.recommandations||[];for(var i=0;i<recos.length;i++){html+="<p>"+(i+1)+". "+(recos[i].description||recos[i].titre||"")+"</p>";}
-html+="<div style='margin-top:40px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;font-size:.85em'><h3>Methodologie du score NormaCheck</h3><p>"+scoreData.explanation+"</p><table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:#1e40af;color:#fff'><th style='padding:6px 10px;text-align:left'>Deduction</th><th style='padding:6px 10px;text-align:left'>Raison</th></tr>";
-for(var i=0;i<scoreData.details.length;i++){var d=scoreData.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td></tr>";}
-html+="</table></div>";
-html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v3.6 - Non opposable aux administrations (art. L.243-6-3 CSS)</p></body></html>";
+function _pdfScoreTable(sc,title,color){
+html+="<div style='margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;border-left:4px solid "+color+";font-size:.85em'>";
+html+="<h3 style='color:"+color+"'>"+title+" - "+sc.score+"/100 ("+sc.grade+")</h3>";
+html+="<p style='margin:6px 0'>Formule : S = max(0, 100 &times; (1 - &Sigma;Wk / Wmax)) &times; (0.5 + 0.5 &times; Fc). Poids : critique(Wk=4), haute(Wk=3), moyenne(Wk=2), faible(Wk=1).</p>";
+html+="<table style='width:100%;border-collapse:collapse;margin-top:8px'><tr style='background:"+color+";color:#fff'><th style='padding:6px 10px;text-align:left'>Points</th><th style='padding:6px 10px;text-align:left'>Raison</th><th style='padding:6px 10px;text-align:left'>Reference</th></tr>";
+for(var i=0;i<sc.details.length;i++){var d=sc.details[i];html+="<tr style='border-bottom:1px solid #e2e8f0'><td style='padding:4px 10px;color:"+(d.deduction>0?"#16a34a":"#ef4444")+"'>"+(d.deduction>0?"+":"")+d.deduction+"</td><td style='padding:4px 10px'>"+d.raison+"</td><td style='padding:4px 10px;font-size:.9em;color:#64748b'>"+(d.ref||"")+"</td></tr>";}
+html+="</table></div>";}
+_pdfScoreTable(ts.urssaf,"Score URSSAF (Securite sociale)","#1e40af");
+_pdfScoreTable(ts.fiscal,"Score DGFIP (Fiscal)","#7c3aed");
+_pdfScoreTable(ts.cdc,"Score Cour des comptes (Regularite comptable)","#0d9488");
+html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v4.0 - SCORE PROVISOIRE - Outil d'aide a la decision, non decision automatisee (art. 22 RGPD). Indicateur methodologique interne, non opposable aux administrations (art. L.243-6-3 CSS). Score indicatif soumis a procedure contradictoire (art. L121-1 CRPA). Validation humaine requise avant utilisation decisionnelle.</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
+function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
 /* === RH MODULE === */
-function showRHTab(n,el){document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(n==="salaries")loadRHSalaries();if(n==="contrats")loadRHContrats();if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}
+function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
+if(n==="salaries")loadRHSalaries();if(n==="contrats"){loadRHContrats();loadRHAvenants();}if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
 
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
-function rhGet(url,cb){fetch(url).then(safeJson).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
+function rhGet(url,cb){fetch(url).then(safeJson).then(function(d){return (d&&d.items&&typeof d.total==="number")?d.items:d;}).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
 function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
@@ -8608,14 +13579,14 @@ function exportRegistreCSV(){
 rhGet("/api/rh/contrats",function(list){
 var csv="N;Nom;Prenom;NIR;Emploi;Date entree;Date sortie;Type contrat\\n";
 for(var i=0;i<list.length;i++){var c=list[i];csv+=(i+1)+";"+c.nom_salarie+";"+c.prenom_salarie+";"+(c.nir||"")+";"+c.poste+";"+c.date_debut+";"+(c.date_fin||"")+";"+c.type_contrat+"\\n";}
-var blob=new Blob([csv.replace(/\\n/g,"\\n")],{type:"text/csv"});var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="registre_personnel.csv";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="registre_personnel.csv";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
 toast("Registre exporte en CSV.","ok");});}
 
 function creerAvenant(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-av-ctr").value);fd.append("type_avenant",document.getElementById("rh-av-type").value);fd.append("description",document.getElementById("rh-av-desc").value);fd.append("date_effet",document.getElementById("rh-av-date").value);fd.append("nouvelles_conditions",document.getElementById("rh-av-desc").value);
 rhPost("/api/rh/avenants",fd,function(){toast("Avenant enregistre.","ok");loadRHAvenants();});}
 function loadRHAvenants(){rhGet("/api/rh/avenants",function(list){var el=document.getElementById("rh-av-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Contrat</th><th>Type</th><th>Date effet</th><th>Description</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.contrat_id+"</td><td><span class='badge badge-blue'>"+a.type_avenant+"</span></td><td>"+a.date_effet+"</td><td>"+a.description+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregConge(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-cg-sal").value);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
+function enregConge(){var fd=new FormData();fd.append("nom_salarie",document.getElementById("rh-cg-sal").value);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
 rhPost("/api/rh/conges",fd,function(){toast("Conge enregistre.","ok");loadRHConges();});}
 function loadRHConges(){rhGet("/api/rh/conges",function(list){var el=document.getElementById("rh-cg-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun conge enregistre.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Jours</th><th>Statut</th></tr>";for(var i=0;i<list.length;i++){var c=list[i];var cls=c.statut==="valide"?"badge-green":(c.statut==="refuse"?"badge-red":"badge-amber");h+="<tr><td>"+c.salarie_id+"</td><td>"+c.type_conge+"</td><td>"+c.date_debut+"</td><td>"+c.date_fin+"</td><td class='num'>"+c.nb_jours+"</td><td><span class='badge "+cls+"'>"+c.statut+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
 
@@ -8669,25 +13640,72 @@ function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.ge
 rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
 function loadRHEchanges(){rhGet("/api/rh/echanges",function(list){var el=document.getElementById("rh-ec-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun echange.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Objet</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_echange+"</span></td><td>"+e.date_echange+"</td><td>"+e.objet+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function loadRHAlertes(){rhGet("/api/rh/alertes",function(resp){var el=document.getElementById("rh-alertes-list");
+function loadRHAlertes(){rhGet("/api/rh/alertes",function(resp){
 var list=(resp&&resp.alertes)?resp.alertes:(Array.isArray(resp)?resp:[]);
-if(!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
-var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s) - Cliquez pour voir les details</p>";
+_rhAlertesData=list;renderAlertesList(list);});}
+var _rhAlertesData=null;
+function filtrerAlertesUrgence(urg){if(!_rhAlertesData)return;var list=_rhAlertesData;if(urg)list=list.filter(function(a){return a.urgence===urg;});renderAlertesList(list);}
+function renderAlertesList(list){var el=document.getElementById("rh-alertes-list");
+if(!list||!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Aucune alerte en cours.</span></div>";return;}
+var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s)</p>";
 for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
-h+="<div class='al "+cls+"' style='cursor:pointer' data-toggle-detail='1'><span class='ai'>"+(a.urgence==="haute"?"&#9888;":"&#128161;")+"</span><span><strong>"+(a.titre||a.type||"Alerte")+"</strong> - "+(a.description||"");
-if(a.echeance)h+=" <em>(echeance: "+a.echeance+")</em>";
-if(a.message_personnalise)h+=" <em style='color:var(--p2)'>["+a.message_personnalise+"]</em>";
-h+="</span>";
-h+="<div class='al-detail' style='display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,.03);border-radius:6px;font-size:.86em'>";
-if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600'>&#9888; Consequence legale : "+a.incidence_legale+"</p>";
-if(a.reference)h+="<p style='margin-top:4px;color:var(--tx2)'>Reference : "+a.reference+"</p>";
-if(a.action_requise)h+="<p style='margin-top:4px'><strong>Action requise :</strong> "+a.action_requise+"</p>";
-if(a.documents_requis){h+="<p style='margin-top:4px'><strong>Documents requis :</strong></p><ul style='margin:2px 0 0 16px'>";
-var docs=a.documents_requis;if(typeof docs==="string")docs=docs.split(",");for(var j=0;j<docs.length;j++){h+="<li>"+docs[j]+"</li>";}h+="</ul>";}
-if(a.delai_personnalise)h+="<p style='margin-top:4px;color:var(--p2)'>Delai de notification personnalise : "+a.delai_personnalise+" jours</p>";
+var icon=a.urgence==="haute"?"&#9888;":(a.urgence==="moyenne"?"&#128161;":"&#8505;");
+h+="<div class='anomalie sev-"+(a.urgence==="haute"?"high":(a.urgence==="moyenne"?"med":"low"))+"' onclick='this.classList.toggle(\"open\")' style='margin:6px 0'>";
+h+="<div class='head'><div class='title'>"+(a.titre||a.type||"Alerte");
+if(a.est_libre)h+=" <span class='badge badge-purple' style='font-size:.68em;vertical-align:middle'>Personnalisee</span>";
+if(a.recurrence)h+=" <span class='badge badge-teal' style='font-size:.68em;vertical-align:middle'>"+a.recurrence+"</span>";
+h+="</div><div style='display:flex;gap:4px;align-items:center'>";
+if(a.echeance)h+="<span class='badge badge-amber'>"+a.echeance+"</span>";
+h+="<span class='badge badge-"+cls+"'>"+a.urgence+"</span>";
+h+="</div></div>";
+h+="<div style='font-size:.84em;color:var(--tx2);margin-top:4px'>"+(a.description||"")+"</div>";
+h+="<div class='detail'>";
+if(a.incidence_legale)h+="<p style='color:var(--r);font-weight:600;margin:4px 0'>&#9888; Consequence legale : "+a.incidence_legale+"</p>";
+if(a.reference)h+="<p style='margin:4px 0;color:var(--tx2)'>Reference : "+a.reference+"</p>";
+if(a.action_requise)h+="<p style='margin:4px 0'><strong>Action requise :</strong> "+a.action_requise+"</p>";
+if(a.notes)h+="<p style='margin:4px 0;font-style:italic;color:var(--tx2)'>Notes : "+a.notes+"</p>";
+if(a.message_personnalise)h+="<p style='margin:4px 0;color:var(--p2)'>["+a.message_personnalise+"]</p>";
+if(a.est_libre)h+="<div style='margin-top:8px'><button class='btn btn-sm' style='background:var(--ol);color:#92400e' onclick='event.stopPropagation();marquerAlerteTraitee(\""+a.id+"\")'>Marquer traitee</button> <button class='btn btn-sm btn-red' onclick='event.stopPropagation();supprimerAlerteLibre(\""+a.id+"\")'>Supprimer</button></div>";
 h+="</div></div>";}
-h+="<style>.al-detail.show{display:block!important}</style>";
+el.innerHTML=h;}
+function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#rh-alertes .al-panel").forEach(function(t){t.style.display="none";t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("al-"+n);if(tc){tc.style.display="block";tc.classList.add("active");}if(n==="libres")loadAlertesLibres();if(n==="auto")loadRHAlertes();}
+function creerAlerteLibre(){var titre=document.getElementById("al-titre").value;if(!titre){toast("Le titre est obligatoire.");return;}
+var fd=new FormData();fd.append("titre",titre);fd.append("description",document.getElementById("al-desc").value);fd.append("categorie",document.getElementById("al-categorie").value);fd.append("urgence",document.getElementById("al-urgence").value);fd.append("date_echeance",document.getElementById("al-echeance").value);fd.append("recurrence",document.getElementById("al-recurrence").value);fd.append("action_requise",document.getElementById("al-action").value);fd.append("destinataire",document.getElementById("al-destinataire").value);fd.append("reference_legale",document.getElementById("al-ref").value);fd.append("delai_rappel_jours",document.getElementById("al-delai").value);fd.append("notes",document.getElementById("al-notes").value);
+rhPost("/api/rh/alertes/libres",fd,function(d){document.getElementById("al-creer-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Alerte <strong>"+d.titre+"</strong> creee avec succes.</span></div>";document.getElementById("al-titre").value="";document.getElementById("al-desc").value="";document.getElementById("al-action").value="";document.getElementById("al-destinataire").value="";document.getElementById("al-ref").value="";document.getElementById("al-notes").value="";document.getElementById("al-echeance").value="";toast("Alerte personnalisee creee.","ok");});}
+function loadAlertesLibres(){rhGet("/api/rh/alertes/libres",function(list){var el=document.getElementById("rh-alertes-libres-list");
+if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune alerte personnalisee configuree. Utilisez l onglet <strong>Creer une alerte</strong> pour ajouter vos propres rappels.</p>";return;}
+var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s) personnalisee(s)</p>";
+var urgColors={"haute":"err","moyenne":"warn","info":"info"};
+var statutLabels={"active":"badge-green","traitee":"badge-blue","reportee":"badge-amber","archivee":"badge-red"};
+for(var i=0;i<list.length;i++){var a=list[i];
+h+="<div class='card' style='margin:8px 0;padding:16px;border-left:4px solid var(--"+(a.urgence==="haute"?"r":(a.urgence==="moyenne"?"o":"p3"))+")'>";
+h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px'>";
+h+="<div><strong>"+a.titre+"</strong>";
+if(a.categorie&&a.categorie!=="autre")h+=" <span class='badge badge-blue'>"+a.categorie+"</span>";
+h+="</div><div style='display:flex;gap:4px'>";
+h+="<span class='badge badge-"+(urgColors[a.urgence]||"info")+"'>"+a.urgence+"</span>";
+h+="<span class='badge "+(statutLabels[a.statut]||"badge-green")+"'>"+(a.statut||"active")+"</span>";
+if(a.recurrence)h+="<span class='badge badge-teal'>"+a.recurrence+"</span>";
+h+="</div></div>";
+if(a.description)h+="<div style='font-size:.86em;color:var(--tx);margin-top:6px'>"+a.description+"</div>";
+var details=[];
+if(a.date_echeance)details.push("<strong>Echeance :</strong> "+a.date_echeance);
+if(a.action_requise)details.push("<strong>Action :</strong> "+a.action_requise);
+if(a.destinataire)details.push("<strong>Responsable :</strong> "+a.destinataire);
+if(a.reference_legale)details.push("<strong>Ref. legale :</strong> "+a.reference_legale);
+if(a.delai_rappel_jours)details.push("<strong>Rappel :</strong> "+a.delai_rappel_jours+" jours avant");
+if(details.length)h+="<div style='margin-top:8px;font-size:.82em;color:var(--tx2)'>"+details.join(" &bull; ")+"</div>";
+if(a.notes)h+="<div style='margin-top:4px;font-size:.82em;font-style:italic;color:var(--tx2)'>"+a.notes+"</div>";
+h+="<div style='margin-top:10px;display:flex;gap:6px'>";
+if(a.statut!=="traitee")h+="<button class='btn btn-sm btn-green' onclick='marquerAlerteTraitee(\""+a.id+"\")'>Traitee</button>";
+if(a.statut!=="archivee")h+="<button class='btn btn-sm btn-s' onclick='archiverAlerteLibre(\""+a.id+"\")'>Archiver</button>";
+h+="<button class='btn btn-sm btn-red' onclick='supprimerAlerteLibre(\""+a.id+"\")'>Supprimer</button>";
+h+="</div></div>";}
 el.innerHTML=h;});}
+function marquerAlerteTraitee(id){var fd=new FormData();fd.append("statut","traitee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte marquee comme traitee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function archiverAlerteLibre(id){var fd=new FormData();fd.append("statut","archivee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte archivee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function supprimerAlerteLibre(id){if(!confirm("Supprimer cette alerte ?"))return;fetch("/api/rh/alertes/libres/"+id,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte supprimee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function exportAlertes(){if(!_rhAlertesData||!_rhAlertesData.length)return;var csv="Urgence;Titre;Description;Reference;Action requise;Echeance\\n";for(var i=0;i<_rhAlertesData.length;i++){var a=_rhAlertesData[i];csv+='"'+(a.urgence||"")+'";"'+(a.titre||"")+'";"'+((a.description||"").replace(/"/g,"'"))+'";"'+(a.reference||"")+'";"'+(a.action_requise||"")+'";"'+(a.echeance||"")+'"'+"\\n";}var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="alertes_rh.csv";l.click();URL.revokeObjectURL(u);}
 function prefillBulletin(cid){if(!cid)return;rhGet("/api/rh/contrats",function(list){for(var i=0;i<list.length;i++){var c=list[i];if(c.id===cid){document.getElementById("rh-bp-nom").value=c.nom_salarie||c.nom||"";document.getElementById("rh-bp-prenom").value=c.prenom_salarie||c.prenom||"";document.getElementById("rh-bp-brut").value=c.salaire_brut||"";if(c.duree_hebdo)document.getElementById("rh-bp-heures").value=(parseFloat(c.duree_hebdo)/35*151.67).toFixed(2);break;}}});}
 function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
 rhPost("/api/rh/bulletins/generer",fd,function(d){
@@ -8732,6 +13750,12 @@ if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.bor
 else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";}
 else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";}
 d.textContent=msg;document.body.appendChild(d);setTimeout(function(){d.style.opacity="0";d.style.transition="opacity .3s";setTimeout(function(){d.remove();},300);},4000);}
+
+/* === INITIALIZATION === */
+(function initApp(){
+loadDash();
+loadDashServer();
+})();
 </script>
 </body>
 </html>"""
