@@ -11793,20 +11793,20 @@ body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;backgroun
 .layout{display:flex;min-height:100vh;min-height:100dvh}
 :focus-visible{outline:2px solid var(--p3);outline-offset:2px;border-radius:4px}:focus:not(:focus-visible){outline:none}
 /* Sidebar desktop */
-.sidebar{width:var(--sidebar-w);background:var(--p);color:#fff;display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;transition:transform .3s;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.15) transparent}
-.sidebar::-webkit-scrollbar{width:5px}.sidebar::-webkit-scrollbar-track{background:transparent}.sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}.sidebar::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.25)}
-.sidebar .logo{padding:22px 24px;font-size:1.3em;font-weight:800;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px}
+.sidebar{width:var(--sidebar-w);background:var(--p);color:#fff;display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;transition:transform .3s;overflow:hidden}
+.sidebar .logo{padding:22px 24px;font-size:1.3em;font-weight:800;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px;flex-shrink:0}
 .sidebar .logo em{font-style:normal;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .sidebar .logo span{font-size:.48em;background:rgba(96,165,250,.2);color:#93c5fd;padding:2px 8px;border-radius:12px;font-weight:600;letter-spacing:.5px}
 .sidebar .logo-shield{width:28px;height:28px;flex-shrink:0}
+.sidebar-nav{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.15) transparent;padding-bottom:8px}
+.sidebar-nav::-webkit-scrollbar{width:5px}.sidebar-nav::-webkit-scrollbar-track{background:transparent}.sidebar-nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}.sidebar-nav::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.25)}
 .sidebar .nav-group{padding:16px 12px 4px;font-size:.62em;text-transform:uppercase;letter-spacing:2px;color:rgba(148,163,184,.6);font-weight:700}
 .sidebar .nl{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;color:rgba(255,255,255,.55);transition:all .2s ease;border-radius:10px;margin:1px 10px;font-size:.84em;-webkit-tap-highlight-color:transparent;min-height:42px;font-weight:500}
 .sidebar .nl:hover{background:rgba(255,255,255,.06);color:rgba(255,255,255,.9);transform:translateX(2px)}
 .sidebar .nl.active{background:linear-gradient(135deg,rgba(37,99,235,.2),rgba(96,165,250,.15));color:#93c5fd;font-weight:600;box-shadow:inset 3px 0 0 #60a5fa}
 .sidebar .nl .ico{width:22px;text-align:center;font-size:1em;flex-shrink:0;display:flex;align-items:center;justify-content:center}
 .sidebar .nl .ico svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-.sidebar .spacer{flex:1;min-height:8px}
-.sidebar .logout{padding:14px 18px;cursor:pointer;color:rgba(255,255,255,.35);font-size:.82em;border-top:1px solid rgba(255,255,255,.05);transition:.2s;display:flex;align-items:center;gap:8px;min-height:44px;padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px))}
+.sidebar .logout{padding:14px 18px;cursor:pointer;color:rgba(255,255,255,.35);font-size:.82em;border-top:1px solid rgba(255,255,255,.05);transition:.2s;display:flex;align-items:center;gap:8px;min-height:44px;flex-shrink:0;padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px))}
 .sidebar .logout:hover{color:#fca5a5;background:rgba(239,68,68,.1)}
 .content{margin-left:var(--sidebar-w);flex:1;min-height:100vh;min-height:100dvh}
 /* Topbar */
@@ -11880,21 +11880,24 @@ input,select,textarea{font-size:16px;padding:12px 14px}
 .gauge-inner{width:60px;height:60px;font-size:1.1em}
 }
 /* Cards */
-.card{background:var(--card-bg);border-radius:16px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:all .25s ease;box-shadow:0 1px 2px rgba(15,23,42,.04)}
-.card:hover{box-shadow:0 4px 20px rgba(15,23,42,.06);border-color:#93c5fd}
-.card h2{color:var(--p);margin-bottom:14px;font-size:1.05em;font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:-.02em}
-.card h2 .ct{background:var(--pl);color:var(--p3);padding:2px 10px;border-radius:20px;font-size:.72em;font-weight:600}
+.card{background:var(--card-bg);border-radius:16px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:all .25s ease;box-shadow:0 1px 3px rgba(15,23,42,.06)}
+.card:hover{box-shadow:0 6px 24px rgba(15,23,42,.08);border-color:rgba(37,99,235,.25)}
+.card h2{color:var(--p);margin-bottom:14px;font-size:1.05em;font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:-.02em;padding-bottom:12px;border-bottom:1px solid var(--brd)}
+.card h2 .ct{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;padding:2px 10px;border-radius:20px;font-size:.72em;font-weight:600}
 /* Grids */
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
 /* Stat cards */
-.sc{border-radius:14px;padding:18px 16px;text-align:center;border:1px solid var(--brd);background:var(--card-bg);transition:all .25s ease;position:relative;overflow:hidden}
-.sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--p3),var(--pu));opacity:0;transition:.25s}.sc:hover::before{opacity:1}
-.sc:hover{border-color:var(--p3);box-shadow:0 4px 12px rgba(37,99,235,.08)}.sc .val{font-size:1.5em;font-weight:800;color:var(--p);letter-spacing:-.03em}.sc .lab{font-size:.74em;color:var(--tx2);margin-top:4px;font-weight:500}
-.sc.blue{background:var(--pl);border-color:#bfdbfe}.sc.green{background:var(--gl);border-color:#bbf7d0}
-.sc.red{background:var(--rl);border-color:#fecaca}.sc.amber{background:var(--ol);border-color:#fde68a}
-.sc.purple{background:var(--pul);border-color:#e9d5ff}.sc.teal{background:#f0fdfa;border-color:#99f6e4}
+.sc{border-radius:14px;padding:18px 16px;text-align:center;border:none;background:var(--card-bg);transition:all .25s ease;position:relative;overflow:hidden}
+.sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;opacity:1;transition:.25s}
+.sc:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(15,23,42,.1)}.sc .val{font-size:1.5em;font-weight:800;letter-spacing:-.03em}.sc .lab{font-size:.74em;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.sc.blue{background:linear-gradient(135deg,#1e3a5f,#1e40af);color:#fff}.sc.blue .val,.sc.blue .lab{color:#fff}.sc.blue::before{background:#3b82f6}
+.sc.green{background:linear-gradient(135deg,#064e3b,#047857);color:#fff}.sc.green .val,.sc.green .lab{color:#fff}.sc.green::before{background:#10b981}
+.sc.red{background:linear-gradient(135deg,#7f1d1d,#b91c1c);color:#fff}.sc.red .val,.sc.red .lab{color:#fff}.sc.red::before{background:#ef4444}
+.sc.amber{background:linear-gradient(135deg,#78350f,#b45309);color:#fff}.sc.amber .val,.sc.amber .lab{color:#fff}.sc.amber::before{background:#f59e0b}
+.sc.purple{background:linear-gradient(135deg,#3b0764,#6d28d9);color:#fff}.sc.purple .val,.sc.purple .lab{color:#fff}.sc.purple::before{background:#8b5cf6}
+.sc.teal{background:linear-gradient(135deg,#134e4a,#0d7377);color:#fff}.sc.teal .val,.sc.teal .lab{color:#fff}.sc.teal::before{background:#14b8a6}
 /* Upload zone */
 .uz{border:2px dashed var(--brd);border-radius:16px;padding:32px;text-align:center;cursor:pointer;transition:all .3s ease;background:var(--card-bg);position:relative}
 .uz:hover{border-color:var(--p3);background:var(--pl);box-shadow:0 0 0 4px rgba(37,99,235,.06)}
@@ -11954,8 +11957,8 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .al.err{background:var(--rl);color:#991b1b;border:1px solid #fecaca;border-left-color:#dc2626}
 .al.warn{background:var(--ol);color:#92400e;border:1px solid #fde68a;border-left-color:#d97706}
 /* Gauge */
-.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--gc,var(--g)) 0%,var(--gc,var(--g)) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto}
-.gauge-inner{width:90px;height:90px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p)}
+.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--gc,var(--g)) 0%,var(--gc,var(--g)) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto;box-shadow:0 4px 16px rgba(15,23,42,.1)}
+.gauge-inner{width:88px;height:88px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p);box-shadow:inset 0 2px 8px rgba(15,23,42,.06)}
 /* Progress */
 .prg{display:none;margin:14px 0}
 .prg-bar{height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
@@ -11985,12 +11988,12 @@ body{color-scheme:dark}
 th{background:#334155;color:#e2e8f0}
 tr:hover{background:rgba(59,130,246,.08)}
 .tabs{background:#334155}
-.sc.blue{background:rgba(59,130,246,.1);border-color:#1e40af}
-.sc.green{background:rgba(74,222,128,.08);border-color:#166534}
-.sc.red{background:rgba(248,113,113,.08);border-color:#991b1b}
-.sc.amber{background:rgba(251,191,36,.08);border-color:#92400e}
-.sc.purple{background:rgba(192,132,252,.08);border-color:#7e22ce}
-.sc.teal{background:rgba(45,212,191,.08);border-color:#0d9488}
+.sc.blue{background:linear-gradient(135deg,#1e3a5f,#1e40af)}
+.sc.green{background:linear-gradient(135deg,#064e3b,#047857)}
+.sc.red{background:linear-gradient(135deg,#7f1d1d,#b91c1c)}
+.sc.amber{background:linear-gradient(135deg,#78350f,#b45309)}
+.sc.purple{background:linear-gradient(135deg,#3b0764,#6d28d9)}
+.sc.teal{background:linear-gradient(135deg,#134e4a,#0d7377)}
 .badge-blue{background:rgba(59,130,246,.15);color:#93c5fd}
 .badge-green{background:rgba(74,222,128,.12);color:#4ade80}
 .badge-red{background:rgba(248,113,113,.12);color:#f87171}
@@ -12033,6 +12036,7 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="layout">
 <nav class="sidebar" id="sidebar" aria-label="Menu principal">
 <div class="logo"><svg class="logo-shield" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="1.8"><path d="M12 2l7 4v5c0 5.25-3.5 9.74-7 11-3.5-1.26-7-5.75-7-11V6l7-4z"/><path d="M9 12l2 2 4-4" stroke="#4ade80" stroke-width="2"/></svg><em>NormaCheck</em> <span>v3.9.0</span></div>
+<div class="sidebar-nav">
 <div class="nav-group">Analyse</div>
 <div class="nl active" tabindex="0" onclick="showS('dashboard',this)"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/></svg></span><span>Dashboard</span></div>
 <div class="nl" tabindex="0" onclick="showS('analyse',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M9 2v6a2 2 0 002 2h6"/><path d="M4 5.5V19a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6a2 2 0 00-2 2z"/><path d="M9 15l2 2 4-4"/></svg></span><span>Import / Analyse</span></div>
@@ -12050,8 +12054,8 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="nl" tabindex="0" onclick="showS('equipe',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg></span><span>Equipe</span></div>
 <div class="nl" tabindex="0" onclick="showS('config',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></span><span>Configuration</span></div>
 <div class="nl" tabindex="0" onclick="showS('ensavoirplus',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span><span>En savoir plus</span></div>
-<div class="spacer"></div>
-<div style="padding:10px 18px;font-size:.78em;color:#94a3b8" id="sidebar-user"></div>
+</div><!-- end sidebar-nav -->
+<div style="padding:10px 18px;font-size:.78em;color:#94a3b8;flex-shrink:0" id="sidebar-user"></div>
 <div class="logout" onclick="doLogout()"><span class="ico"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></span><span>Deconnexion</span></div>
 </nav>
 <div class="content">
@@ -12069,7 +12073,7 @@ APP_HTML += """
 <div class="sc blue"><div class="val" id="dash-anomalies">0</div><div class="lab">Anomalies</div></div>
 <div class="sc amber"><div class="val" id="dash-impact">0 EUR</div><div class="lab">Impact cotisations</div></div>
 <div class="sc green"><div class="val" id="dash-conf">-</div><div class="lab">Conformite</div></div>
-<div class="sc"><div class="val" id="dash-docs">0</div><div class="lab">Documents</div></div>
+<div class="sc teal"><div class="val" id="dash-docs">0</div><div class="lab">Documents</div></div>
 </div>
 <div class="g2">
 <div class="card"><h2>Conformite globale</h2>
@@ -12080,22 +12084,22 @@ APP_HTML += """
 </div>
 <div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button> <button class="btn btn-s btn-sm" onclick="showS('ensavoirplus')" style="margin-left:4px;font-size:.78em">&#128218; En savoir plus</button></h2>
 <div class="g3" id="dash-scores-triple">
-<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
-<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">URSSAF / CSS</div>
-<div class="gauge" id="gauge-urssaf" style="--pct:0%;--gc:var(--p3)"><div class="gauge-inner" id="gauge-urssaf-val">-</div></div>
-<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Securite sociale</div>
+<div style="text-align:center;padding:20px 16px;border-radius:14px;background:linear-gradient(180deg,#f8fafc,#eff6ff);border:1px solid #bfdbfe;box-shadow:0 2px 8px rgba(37,99,235,.06)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1.5px;color:#1e40af;margin-bottom:10px;font-weight:800">URSSAF / CSS</div>
+<div class="gauge" id="gauge-urssaf" style="--pct:0%;--gc:#2563eb"><div class="gauge-inner" id="gauge-urssaf-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:8px;font-weight:500">Securite sociale</div>
 <div style="font-size:.72em;margin-top:2px" id="grade-urssaf"></div>
 </div>
-<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
-<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">DGFIP / CGI</div>
-<div class="gauge" id="gauge-fiscal" style="--pct:0%;--gc:var(--pu)"><div class="gauge-inner" id="gauge-fiscal-val">-</div></div>
-<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Fiscal</div>
+<div style="text-align:center;padding:20px 16px;border-radius:14px;background:linear-gradient(180deg,#f8fafc,#f5f3ff);border:1px solid #ddd6fe;box-shadow:0 2px 8px rgba(124,58,237,.06)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1.5px;color:#6d28d9;margin-bottom:10px;font-weight:800">DGFIP / CGI</div>
+<div class="gauge" id="gauge-fiscal" style="--pct:0%;--gc:#7c3aed"><div class="gauge-inner" id="gauge-fiscal-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:8px;font-weight:500">Fiscal</div>
 <div style="font-size:.72em;margin-top:2px" id="grade-fiscal"></div>
 </div>
-<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
-<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">COUR DES COMPTES</div>
-<div class="gauge" id="gauge-cdc" style="--pct:0%;--gc:var(--tl)"><div class="gauge-inner" id="gauge-cdc-val">-</div></div>
-<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Regularite comptable</div>
+<div style="text-align:center;padding:20px 16px;border-radius:14px;background:linear-gradient(180deg,#f8fafc,#f0fdfa);border:1px solid #99f6e4;box-shadow:0 2px 8px rgba(13,115,119,.06)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1.5px;color:#0d7377;margin-bottom:10px;font-weight:800">COUR DES COMPTES</div>
+<div class="gauge" id="gauge-cdc" style="--pct:0%;--gc:#0d9488"><div class="gauge-inner" id="gauge-cdc-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:8px;font-weight:500">Regularite comptable</div>
 <div style="font-size:.72em;margin-top:2px" id="grade-cdc"></div>
 </div>
 </div>
