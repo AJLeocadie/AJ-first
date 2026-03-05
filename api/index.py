@@ -10445,101 +10445,117 @@ LANDING_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="NormaCheck - Plateforme professionnelle de conformite sociale et fiscale. Analysez vos documents, detectez les anomalies, gerez votre comptabilite et generez vos DSN.">
+<meta name="theme-color" content="#0f172a">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9878;</text></svg>">
 <title>NormaCheck - Conformite sociale et fiscale intelligente</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b;-webkit-font-smoothing:antialiased}
-.nav{background:#0f172a;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:14px 40px;position:sticky;top:0;z-index:100}
+.nav{background:rgba(15,23,42,.97);backdrop-filter:blur(12px);color:#fff;display:flex;justify-content:space-between;align-items:center;padding:14px 40px;position:sticky;top:0;z-index:100}
 .nav .logo{font-size:1.6em;font-weight:800;letter-spacing:-.5px}
 .nav .logo em{font-style:normal;color:#60a5fa}
 .nav .links{display:flex;gap:24px;align-items:center}
-.nav a{color:#fff;text-decoration:none;font-size:.9em;opacity:.75;transition:.2s}
-.nav a:hover{opacity:1}
-.nav .bl{background:rgba(96,165,250,.2);padding:8px 22px;border-radius:8px;font-weight:600;opacity:1;border:1px solid rgba(96,165,250,.3)}
-.hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#1e40af 100%);color:#fff;text-align:center;padding:90px 20px 70px;position:relative}
-.hero h1{font-size:3em;font-weight:800;margin-bottom:18px;line-height:1.1}
-.hero h1 em{font-style:normal;color:#60a5fa}
-.hero p{font-size:1.15em;opacity:.85;max-width:680px;margin:0 auto 35px;line-height:1.6}
-.hero-btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
-.cta-main{display:inline-block;background:#3b82f6;color:#fff;padding:15px 40px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 20px rgba(59,130,246,.4);transition:.3s}
-.cta-main:hover{background:#2563eb;transform:translateY(-2px)}
-.cta-sec{display:inline-block;background:rgba(255,255,255,.12);color:#fff;padding:15px 40px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:1px solid rgba(255,255,255,.2);transition:.3s}
-.cta-sec:hover{background:rgba(255,255,255,.2)}
-.limits{display:flex;gap:24px;justify-content:center;margin-top:30px;flex-wrap:wrap}
-.limit{background:rgba(255,255,255,.08);padding:12px 20px;border-radius:10px;font-size:.85em;border:1px solid rgba(255,255,255,.1)}
+.nav a{color:#fff;text-decoration:none;font-size:.9em;opacity:.75;transition:opacity .2s,transform .2s}
+.nav a:hover{opacity:1;transform:translateY(-1px)}
+.nav a:focus-visible{outline:2px solid #60a5fa;outline-offset:2px;border-radius:4px}
+.nav .bl{background:rgba(96,165,250,.2);padding:8px 22px;border-radius:8px;font-weight:600;opacity:1;border:1px solid rgba(96,165,250,.3);transition:background .3s,transform .2s}
+.nav .bl:hover{background:rgba(96,165,250,.35);transform:translateY(-1px)}
+.hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 40%,#1e40af 70%,#3b82f6 100%);color:#fff;text-align:center;padding:100px 20px 80px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 30% 50%,rgba(96,165,250,.15) 0%,transparent 50%),radial-gradient(circle at 70% 80%,rgba(59,130,246,.1) 0%,transparent 40%);pointer-events:none}
+.hero h1{font-size:3.2em;font-weight:800;margin-bottom:18px;line-height:1.1;position:relative;animation:fadeInUp .8s ease-out}
+.hero h1 em{font-style:normal;background:linear-gradient(135deg,#60a5fa,#93c5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero p{font-size:1.18em;opacity:.85;max-width:700px;margin:0 auto 35px;line-height:1.7;position:relative;animation:fadeInUp .8s ease-out .1s both}
+.hero-btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .2s both}
+.cta-main{display:inline-block;background:#3b82f6;color:#fff;padding:16px 44px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 24px rgba(59,130,246,.4);transition:all .3s}
+.cta-main:hover{background:#2563eb;transform:translateY(-3px);box-shadow:0 8px 32px rgba(59,130,246,.5)}
+.cta-main:focus-visible{outline:2px solid #fff;outline-offset:3px}
+.cta-main:active{transform:translateY(-1px)}
+.cta-sec{display:inline-block;background:rgba(255,255,255,.12);color:#fff;padding:16px 44px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:1px solid rgba(255,255,255,.25);transition:all .3s;backdrop-filter:blur(4px)}
+.cta-sec:hover{background:rgba(255,255,255,.22);transform:translateY(-3px)}
+.cta-sec:focus-visible{outline:2px solid #fff;outline-offset:3px}
+.limits{display:flex;gap:24px;justify-content:center;margin-top:35px;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .3s both}
+.limit{background:rgba(255,255,255,.08);padding:12px 20px;border-radius:10px;font-size:.85em;border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(4px);transition:background .3s}
+.limit:hover{background:rgba(255,255,255,.14)}
 .limit strong{color:#60a5fa}
-.pricing{max-width:1000px;margin:60px auto;padding:0 20px}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+.pricing{max-width:1000px;margin:70px auto;padding:0 20px}
 .pricing h2{text-align:center;font-size:1.8em;color:#0f172a;margin-bottom:10px}
-.pricing .sub{text-align:center;color:#64748b;font-size:.95em;margin-bottom:30px}
-.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-.plan{background:#fff;border-radius:16px;padding:28px 22px;border:1px solid #e2e8f0;text-align:center;transition:.3s;position:relative}
-.plan:hover{transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,.06)}
+.pricing .sub{text-align:center;color:#64748b;font-size:.95em;margin-bottom:35px}
+.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.plan{background:#fff;border-radius:16px;padding:30px 24px;border:1px solid #e2e8f0;text-align:center;transition:all .3s;position:relative}
+.plan:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08)}
 .plan.pop{border-color:#3b82f6;box-shadow:0 8px 30px rgba(59,130,246,.12)}
-.plan.pop::before{content:"Populaire";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:#3b82f6;color:#fff;padding:4px 16px;border-radius:20px;font-size:.72em;font-weight:700}
+.plan.pop::before{content:"Populaire";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;padding:4px 18px;border-radius:20px;font-size:.72em;font-weight:700;box-shadow:0 2px 8px rgba(59,130,246,.3)}
 .plan h3{font-size:1.15em;color:#0f172a;margin-bottom:6px}
 .plan .price{font-size:2.2em;font-weight:800;color:#0f172a;margin:10px 0}
 .plan .price em{font-size:.38em;font-weight:400;color:#64748b;font-style:normal}
 .plan .profiles{font-size:.82em;color:#3b82f6;font-weight:600;margin-bottom:12px}
 .plan ul{list-style:none;text-align:left;margin:12px 0}
-.plan li{padding:5px 0;font-size:.84em;color:#475569}
+.plan li{padding:6px 0;font-size:.84em;color:#475569}
 .plan li::before{content:"\\2713 ";color:#22c55e;font-weight:700}
-.plan-btn{width:100%;padding:11px;border-radius:10px;font-size:.92em;font-weight:700;cursor:pointer;transition:.2s;border:1.5px solid #e2e8f0;background:#fff;color:#0f172a}
-.plan-btn:hover{border-color:#3b82f6;color:#3b82f6}
+.plan-btn{width:100%;padding:12px;border-radius:10px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid #e2e8f0;background:#fff;color:#0f172a}
+.plan-btn:hover{border-color:#3b82f6;color:#3b82f6;transform:translateY(-1px);box-shadow:0 4px 12px rgba(59,130,246,.1)}
+.plan-btn:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
 .plan.pop .plan-btn{background:#0f172a;color:#fff;border-color:#0f172a}
-.plan.pop .plan-btn:hover{background:#1e293b}
-.feat{max-width:1100px;margin:70px auto;padding:0 20px}
-.feat h2{text-align:center;font-size:1.9em;font-weight:700;color:#0f172a;margin-bottom:40px}
-.fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}
-.fc{background:#fff;border-radius:14px;padding:24px;border:1px solid #e2e8f0;transition:.3s}
-.fc:hover{transform:translateY(-3px);box-shadow:0 8px 25px rgba(0,0,0,.06)}
-.fc .ic{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3em;margin-bottom:12px}
+.plan.pop .plan-btn:hover{background:#1e293b;box-shadow:0 4px 16px rgba(15,23,42,.2)}
+.feat{max-width:1100px;margin:80px auto;padding:0 20px}
+.feat h2{text-align:center;font-size:1.9em;font-weight:700;color:#0f172a;margin-bottom:45px}
+.fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
+.fc{background:#fff;border-radius:14px;padding:26px;border:1px solid #e2e8f0;transition:all .3s}
+.fc:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(0,0,0,.07);border-color:#bfdbfe}
+.fc .ic{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.4em;margin-bottom:14px;transition:transform .3s}
+.fc:hover .ic{transform:scale(1.1)}
 .fc .ic.bl{background:#eff6ff}.fc .ic.gr{background:#f0fdf4}.fc .ic.pu{background:#faf5ff}.fc .ic.am{background:#fffbeb}
-.fc h3{color:#0f172a;margin-bottom:6px;font-size:.98em}
-.fc p{color:#64748b;font-size:.85em;line-height:1.5}
-.guarantee{max-width:800px;margin:50px auto;padding:24px 30px;background:#fffbeb;border:1px solid #fde68a;border-radius:14px;text-align:center}
-.guarantee h3{color:#92400e;margin-bottom:8px}.guarantee p{color:#92400e;font-size:.88em;line-height:1.6}
-.tgt{background:#fff;padding:60px 20px;text-align:center;border-top:1px solid #e2e8f0}
-.tgt h2{font-size:1.7em;color:#0f172a;margin-bottom:30px}
+.fc h3{color:#0f172a;margin-bottom:8px;font-size:1em}
+.fc p{color:#64748b;font-size:.85em;line-height:1.6}
+.guarantee{max-width:800px;margin:50px auto;padding:26px 32px;background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fde68a;border-radius:14px;text-align:center}
+.guarantee h3{color:#92400e;margin-bottom:10px}.guarantee p{color:#92400e;font-size:.88em;line-height:1.6}
+.tgt{background:#fff;padding:70px 20px;text-align:center;border-top:1px solid #e2e8f0}
+.tgt h2{font-size:1.7em;color:#0f172a;margin-bottom:35px}
 .tg{display:flex;justify-content:center;gap:24px;flex-wrap:wrap;max-width:800px;margin:0 auto}
-.ti{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:24px 18px;width:180px;transition:.3s}
-.ti:hover{border-color:#3b82f6}.ti .ic2{font-size:1.8em;margin-bottom:6px}.ti h4{color:#0f172a;font-size:.95em;margin-bottom:3px}.ti p{font-size:.8em;color:#64748b}
-.auth-sec{max-width:420px;margin:60px auto;padding:0 20px}
-.auth-card{background:#fff;border-radius:20px;padding:36px;box-shadow:0 8px 30px rgba(0,0,0,.06);border:1px solid #e2e8f0}
+.ti{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:28px 20px;width:180px;transition:all .3s;cursor:default}
+.ti:hover{border-color:#3b82f6;transform:translateY(-3px);box-shadow:0 8px 24px rgba(59,130,246,.08)}.ti .ic2{font-size:1.8em;margin-bottom:8px}.ti h4{color:#0f172a;font-size:.95em;margin-bottom:4px}.ti p{font-size:.8em;color:#64748b}
+.auth-sec{max-width:420px;margin:70px auto;padding:0 20px}
+.auth-card{background:#fff;border-radius:20px;padding:40px;box-shadow:0 12px 40px rgba(0,0,0,.08);border:1px solid #e2e8f0}
 .auth-card h2{text-align:center;color:#0f172a;margin-bottom:24px;font-size:1.3em}
 .auth-tabs{display:flex;margin-bottom:24px;background:#f1f5f9;border-radius:10px;padding:4px}
-.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:#64748b;border-radius:8px;transition:.2s;font-size:.9em}
+.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:#64748b;border-radius:8px;transition:all .25s;font-size:.9em}
+.auth-tab:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
 .auth-tab.active{color:#0f172a;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .auth-form{display:none}.auth-form.active{display:block}
 .auth-form label{display:block;font-weight:600;font-size:.84em;color:#475569;margin-bottom:5px}
-.auth-form input{width:100%;padding:11px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:.95em;margin-bottom:14px;background:#f8fafc}
-.auth-form input:focus{border-color:#3b82f6;outline:none;background:#fff}
-.submit-btn{width:100%;padding:13px;background:#0f172a;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer}
-.submit-btn:hover{background:#1e293b}
-.msg{padding:10px 14px;border-radius:10px;margin:12px 0;font-size:.9em;display:none}
+.auth-form input{width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:.95em;margin-bottom:14px;background:#f8fafc;transition:all .25s}
+.auth-form input:focus{border-color:#3b82f6;outline:none;background:#fff;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
+.submit-btn{width:100%;padding:14px;background:#0f172a;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s}
+.submit-btn:hover{background:#1e293b;transform:translateY(-1px);box-shadow:0 4px 12px rgba(15,23,42,.2)}
+.submit-btn:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.submit-btn:active{transform:translateY(0)}
+.msg{padding:12px 16px;border-radius:10px;margin:12px 0;font-size:.9em;display:none;animation:fadeInUp .3s ease-out}
 .msg.ok{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}
 .msg.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
 .rgpd{font-size:.78em;color:#94a3b8;margin-top:14px;line-height:1.4;text-align:center}
-footer{text-align:center;padding:40px 20px;color:#94a3b8;font-size:.82em;background:#0f172a}
-footer a{color:#60a5fa;text-decoration:none}footer a:hover{text-decoration:underline}
-footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
-@media(max-width:768px){.hero h1{font-size:2em}.hero{padding:60px 16px 50px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:12px 16px}.nav .links{gap:12px}.nav a:not(.bl){display:none}.limits{gap:10px}.limit{padding:8px 14px;font-size:.78em}}
+footer{text-align:center;padding:45px 20px;color:#94a3b8;font-size:.82em;background:#0f172a}
+footer a{color:#60a5fa;text-decoration:none;transition:color .2s}footer a:hover{text-decoration:underline;color:#93c5fd}
+footer .links{margin-bottom:14px;display:flex;gap:20px;justify-content:center}
+@media(max-width:768px){.hero h1{font-size:2.1em}.hero{padding:70px 16px 55px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:12px 16px}.nav .links{gap:12px}.nav a:not(.bl){display:none}.limits{gap:10px}.limit{padding:8px 14px;font-size:.78em}.auth-card{padding:28px 20px}.tg{gap:12px}.ti{width:calc(50% - 12px)}}
 </style>
 </head>
 <body>
-<div class="nav"><div class="logo"><em>NormaCheck</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></div>
-<div class="hero">
+<nav class="nav" aria-label="Navigation principale"><div class="logo"><em>NormaCheck</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></nav>
+<main class="hero" role="banner">
 <h1>La conformite sociale et fiscale<br>enfin <em>simplifiee</em>.</h1>
 <p>Analysez vos documents sociaux et fiscaux, detectez les anomalies en euros, gerez votre comptabilite, generez vos DSN et pilotez vos obligations. Pour dirigeants, comptables et experts.</p>
 <div class="hero-btns">
-<button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Commencer maintenant</button>
-<button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
+<button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})" aria-label="Commencer maintenant - aller au formulaire de connexion">Commencer maintenant</button>
+<button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})" aria-label="Voir les tarifs disponibles">Voir les tarifs</button>
 </div>
 <div class="limits">
 <div class="limit"><strong>50 fichiers</strong> par analyse</div>
 <div class="limit"><strong>2 Go</strong> max par analyse</div>
 <div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
 </div>
-</div>
+</main>
 
 <div class="pricing" id="pricing">
 <h2>Tarification adaptative</h2>
@@ -10652,8 +10668,8 @@ NormaCheck v3.8.1 &mdash; Conformite sociale et fiscale &copy; 2026<br>
 </footer>
 <script>
 function showAT(t){document.querySelectorAll(".auth-tab").forEach(function(b,i){b.classList.toggle("active",i===(t==="login"?0:1))});document.getElementById("form-login").classList.toggle("active",t==="login");document.getElementById("form-register").classList.toggle("active",t==="register");document.getElementById("amsg").className="msg";}
-function doLogin(){var fd=new FormData();fd.append("email",document.getElementById("le").value);fd.append("mot_de_passe",document.getElementById("lp").value);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
-function doReg(){if(document.getElementById("rpw").value!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Mots de passe differents.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var fd=new FormData();fd.append("nom",document.getElementById("rn").value);fd.append("prenom",document.getElementById("rp2").value);fd.append("email",document.getElementById("re").value);fd.append("mot_de_passe",document.getElementById("rpw").value);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function doLogin(){var email=document.getElementById("le").value.trim();var pwd=document.getElementById("lp").value;if(!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Veuillez saisir votre identifiant.";return;}var btn=document.querySelector("#form-login .submit-btn");btn.disabled=true;btn.textContent="Connexion...";var fd=new FormData();fd.append("email",email);fd.append("mot_de_passe",pwd);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Identifiants incorrects")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie. Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Se connecter";});}
+function doReg(){var nom=document.getElementById("rn").value.trim();var prenom=document.getElementById("rp2").value.trim();var email=document.getElementById("re").value.trim();var pwd=document.getElementById("rpw").value;if(!nom||!prenom||!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Tous les champs sont obligatoires.";return;}if(!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Adresse email invalide.";return;}if(pwd.length<6){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir au moins 6 caracteres.";return;}if(pwd!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Les mots de passe ne correspondent pas.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var btn=document.querySelector("#form-register .submit-btn");btn.disabled=true;btn.textContent="Creation...";var fd=new FormData();fd.append("nom",nom);fd.append("prenom",prenom);fd.append("email",email);fd.append("mot_de_passe",pwd);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur lors de l inscription")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree avec succes ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Creer mon compte";});}
 </script>
 </body>
 </html>"""
@@ -10883,6 +10899,9 @@ APP_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="NormaCheck - Application de conformite sociale et fiscale">
+<meta name="theme-color" content="#0f172a">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9878;</text></svg>">
 <title>NormaCheck - Application</title>
 <style>
 :root{--p:#0f172a;--p2:#1e40af;--p3:#3b82f6;--pl:#eff6ff;--g:#22c55e;--gl:#f0fdf4;--r:#ef4444;--rl:#fef2f2;--o:#f59e0b;--ol:#fffbeb;--pu:#a855f7;--pul:#faf5ff;--tl:#0d9488;--bg:#f8fafc;--tx:#1e293b;--tx2:#64748b;--brd:#e2e8f0;--sh:0 1px 3px rgba(0,0,0,.06);--sidebar-w:240px;--card-bg:#fff}
@@ -10896,7 +10915,7 @@ body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--
 .sidebar .logo em{font-style:normal;color:#60a5fa}
 .sidebar .nav-group{padding:14px 10px 4px;font-size:.68em;text-transform:uppercase;letter-spacing:1.5px;color:#475569;font-weight:600}
 .sidebar .nl{display:flex;align-items:center;gap:10px;padding:12px 18px;cursor:pointer;color:rgba(255,255,255,.6);transition:.2s;border-radius:8px;margin:2px 8px;font-size:.88em;-webkit-tap-highlight-color:transparent;min-height:44px}
-.sidebar .nl:hover{background:rgba(255,255,255,.07);color:#fff}
+.sidebar .nl:hover{background:rgba(255,255,255,.07);color:#fff;transform:translateX(2px)}
 .sidebar .nl.active{background:rgba(96,165,250,.15);color:#60a5fa;font-weight:600}
 .sidebar .nl .ico{width:20px;text-align:center;font-size:1.1em;flex-shrink:0}
 .sidebar .spacer{flex:1}
@@ -10909,7 +10928,8 @@ body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--
 .topbar .info{font-size:.83em;color:var(--tx2)}
 .topbar .mob-menu{display:none;background:none;border:none;font-size:1.5em;cursor:pointer;padding:8px 12px;color:var(--p);-webkit-tap-highlight-color:transparent;min-height:44px;min-width:44px}
 .page{padding:24px 28px;max-width:1200px}
-.sec{display:none}.sec.active{display:block}
+.sec{display:none;animation:fadeIn .3s ease-out}.sec.active{display:block}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
 /* Overlay mobile */
 .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90;-webkit-tap-highlight-color:transparent}
 /* Tablet */
@@ -11122,28 +11142,28 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <body>
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
-<div class="sidebar" id="sidebar">
+<nav class="sidebar" id="sidebar" aria-label="Menu principal">
 <div class="logo"><em>NormaCheck</em> <span>v3.8.1</span></div>
 <div class="nav-group">Analyse</div>
-<div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
-<div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
-<div class="nl" onclick="showS('biblio',this)"><span class="ico">&#128218;</span><span>Bibliotheque</span></div>
+<div class="nl active" tabindex="0" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
+<div class="nl" tabindex="0" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
+<div class="nl" tabindex="0" onclick="showS('biblio',this)"><span class="ico">&#128218;</span><span>Bibliotheque</span></div>
 <div class="nav-group">Gestion</div>
-<div class="nl" onclick="showS('compta',this)"><span class="ico">&#128203;</span><span>Comptabilite</span></div>
-<div class="nl" onclick="showS('factures',this)"><span class="ico">&#128206;</span><span>Factures</span></div>
-<div class="nl" onclick="showS('dsn',this)"><span class="ico">&#128196;</span><span>Creation DSN</span></div>
-<div class="nl" onclick="showS('rh',this)"><span class="ico">&#128119;</span><span>Ressources humaines</span></div>
-<div class="nl" onclick="showS('simulation',this)"><span class="ico">&#128200;</span><span>Simulation</span></div>
+<div class="nl" tabindex="0" onclick="showS('compta',this)"><span class="ico">&#128203;</span><span>Comptabilite</span></div>
+<div class="nl" tabindex="0" onclick="showS('factures',this)"><span class="ico">&#128206;</span><span>Factures</span></div>
+<div class="nl" tabindex="0" onclick="showS('dsn',this)"><span class="ico">&#128196;</span><span>Creation DSN</span></div>
+<div class="nl" tabindex="0" onclick="showS('rh',this)"><span class="ico">&#128119;</span><span>Ressources humaines</span></div>
+<div class="nl" tabindex="0" onclick="showS('simulation',this)"><span class="ico">&#128200;</span><span>Simulation</span></div>
 <div class="nav-group">Outils</div>
-<div class="nl" onclick="showS('subventions',this)"><span class="ico">&#127974;</span><span>Subventions</span></div>
-<div class="nl" onclick="showS('veille',this)"><span class="ico">&#9878;</span><span>Veille juridique</span></div>
-<div class="nl" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
-<div class="nl" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
-<div class="nl" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
+<div class="nl" tabindex="0" onclick="showS('subventions',this)"><span class="ico">&#127974;</span><span>Subventions</span></div>
+<div class="nl" tabindex="0" onclick="showS('veille',this)"><span class="ico">&#9878;</span><span>Veille juridique</span></div>
+<div class="nl" tabindex="0" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
+<div class="nl" tabindex="0" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
+<div class="nl" tabindex="0" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
 <div class="spacer"></div>
 <div style="padding:10px 18px;font-size:.78em;color:#94a3b8" id="sidebar-user"></div>
 <div class="logout" onclick="doLogout()"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
-</div>
+</nav>
 <div class="content">
 <div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.1 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
@@ -13743,13 +13763,31 @@ function ajouterCompteURSSAF(){var c={siret:document.getElementById("urssaf-sire
 function renderComptesURSSAF(){var el=document.getElementById("urssaf-list");if(!_urssafComptes.length){el.innerHTML="";return;}var h="<table><tr><th>SIRET</th><th>N Compte</th><th>Caisse</th><th>Taux AT</th></tr>";for(var i=0;i<_urssafComptes.length;i++){var c=_urssafComptes[i];h+="<tr><td>"+c.siret+"</td><td>"+c.compte+"</td><td>"+c.caisse+"</td><td>"+c.taux_at+"%</td></tr>";}h+="</table>";el.innerHTML=h;}
 
 /* === TOAST === */
+var _toastStack=[];
 function toast(msg,type){
 type=type||"err";var d=document.createElement("div");
-d.style.cssText="position:fixed;top:20px;right:20px;z-index:9999;padding:14px 20px;border-radius:12px;font-size:.88em;max-width:400px;box-shadow:0 8px 30px rgba(0,0,0,.15);animation:slideIn .3s;font-family:inherit";
-if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.border="1px solid #bbf7d0";}
-else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";}
-else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";}
-d.textContent=msg;document.body.appendChild(d);setTimeout(function(){d.style.opacity="0";d.style.transition="opacity .3s";setTimeout(function(){d.remove();},300);},4000);}
+d.setAttribute("role","alert");d.setAttribute("aria-live","polite");
+var offset=20+_toastStack.length*60;
+d.style.cssText="position:fixed;top:"+offset+"px;right:20px;z-index:9999;padding:14px 20px;border-radius:12px;font-size:.88em;max-width:420px;box-shadow:0 8px 30px rgba(0,0,0,.15);font-family:inherit;transform:translateX(120%);transition:transform .35s cubic-bezier(.4,0,.2,1),opacity .3s;display:flex;align-items:center;gap:8px";
+var icon="";
+if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.border="1px solid #bbf7d0";icon="&#9989; ";}
+else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";icon="&#128161; ";}
+else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";icon="&#9888; ";}
+d.innerHTML="<span>"+icon+"</span><span>"+msg.replace(/</g,"&lt;").replace(/>/g,"&gt;")+"</span>";
+document.body.appendChild(d);_toastStack.push(d);
+requestAnimationFrame(function(){requestAnimationFrame(function(){d.style.transform="translateX(0)";});});
+setTimeout(function(){d.style.opacity="0";d.style.transform="translateX(120%)";setTimeout(function(){d.remove();var idx=_toastStack.indexOf(d);if(idx>-1)_toastStack.splice(idx,1);},350);},4000);}
+
+/* === KEYBOARD NAV === */
+document.addEventListener("keydown",function(e){
+if(e.key==="Escape"){closeSidebar();}
+if(e.key==="Enter"&&e.target.classList.contains("nl")){e.target.click();}
+if(e.altKey&&e.key>="1"&&e.key<="9"){
+var sections=["dashboard","analyse","biblio","compta","factures","dsn","rh","simulation","veille"];
+var idx=parseInt(e.key)-1;
+if(idx<sections.length){e.preventDefault();showS(sections[idx]);}
+}
+});
 
 /* === INITIALIZATION === */
 (function initApp(){
