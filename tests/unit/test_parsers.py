@@ -143,8 +143,9 @@ class TestDSNParser:
         decl = declarations[0]
 
         nirs = {e.nir for e in decl.employes}
-        assert "1850175123456" in nirs
-        assert "1920683987654" in nirs
+        # NIR de 13 chiffres sont completes avec la cle de controle (15 chiffres)
+        assert any("1850175123456" in nir for nir in nirs)
+        assert any("1920683987654" in nir for nir in nirs)
 
     def test_metadata(self):
         metadata = self.parser.extraire_metadata(FIXTURES / "sample_dsn.dsn")

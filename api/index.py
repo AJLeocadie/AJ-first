@@ -11328,116 +11328,222 @@ LANDING_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="NormaCheck - Plateforme professionnelle de conformite sociale et fiscale. Analysez vos documents, detectez les anomalies, gerez votre comptabilite et generez vos DSN.">
-<meta name="theme-color" content="#0f172a">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9878;</text></svg>">
+<meta name="theme-color" content="#000091">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14.5' fill='%23000091' stroke='%23E1000F' stroke-width='1'/><circle cx='16' cy='16' r='11' fill='none' stroke='rgba(255,255,255,.3)' stroke-width='.5'/><path d='M13.5 10a5 5 0 00-2.5 6.5' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' fill='none'/><path d='M18.5 10a5 5 0 012.5 6.5' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' fill='none'/><path d='M11 18l3.5 3.5 7-7' stroke='%23E1000F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
 <title>NormaCheck - Conformite sociale et fiscale intelligente</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b;-webkit-font-smoothing:antialiased}
-.nav{background:rgba(15,23,42,.97);backdrop-filter:blur(12px);color:#fff;display:flex;justify-content:space-between;align-items:center;padding:14px 40px;position:sticky;top:0;z-index:100}
-.nav .logo{font-size:1.6em;font-weight:800;letter-spacing:-.5px}
-.nav .logo em{font-style:normal;color:#60a5fa}
-.nav .links{display:flex;gap:24px;align-items:center}
-.nav a{color:#fff;text-decoration:none;font-size:.9em;opacity:.75;transition:opacity .2s,transform .2s}
-.nav a:hover{opacity:1;transform:translateY(-1px)}
-.nav a:focus-visible{outline:2px solid #60a5fa;outline-offset:2px;border-radius:4px}
-.nav .bl{background:rgba(96,165,250,.2);padding:8px 22px;border-radius:8px;font-weight:600;opacity:1;border:1px solid rgba(96,165,250,.3);transition:background .3s,transform .2s}
-.nav .bl:hover{background:rgba(96,165,250,.35);transform:translateY(-1px)}
-.hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 40%,#1e40af 70%,#3b82f6 100%);color:#fff;text-align:center;padding:100px 20px 80px;position:relative;overflow:hidden}
-.hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 30% 50%,rgba(96,165,250,.15) 0%,transparent 50%),radial-gradient(circle at 70% 80%,rgba(59,130,246,.1) 0%,transparent 40%);pointer-events:none}
-.hero h1{font-size:3.2em;font-weight:800;margin-bottom:18px;line-height:1.1;position:relative;animation:fadeInUp .8s ease-out}
-.hero h1 em{font-style:normal;background:linear-gradient(135deg,#60a5fa,#93c5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero p{font-size:1.18em;opacity:.85;max-width:700px;margin:0 auto 35px;line-height:1.7;position:relative;animation:fadeInUp .8s ease-out .1s both}
-.hero-btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .2s both}
-.cta-main{display:inline-block;background:#3b82f6;color:#fff;padding:16px 44px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 24px rgba(59,130,246,.4);transition:all .3s}
-.cta-main:hover{background:#2563eb;transform:translateY(-3px);box-shadow:0 8px 32px rgba(59,130,246,.5)}
+@import url('https://fonts.googleapis.com/css2?family=Marianne:wght@400;500;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
+:root{--bleu-france:#000091;--rouge-marianne:#E1000F;--bleu-urssaf:#154389;--turquoise:#56DFE7;--or-accent:#C9B56A;--gris-fond:#f5f5fe;--gris-texte:#3a3a3a;--gris-mention:#666}
+body{font-family:'Inter','Marianne',-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--gris-fond);color:var(--gris-texte);-webkit-font-smoothing:antialiased}
+/* NAV - Barre institutionnelle avec liser\u00e9 tricolore */
+.tricolor{height:4px;background:linear-gradient(90deg,var(--bleu-france) 33.33%,#fff 33.33% 66.66%,var(--rouge-marianne) 66.66%);position:fixed;top:0;left:0;right:0;z-index:200}
+.nav{background:#fff;color:var(--gris-texte);display:flex;justify-content:space-between;align-items:center;padding:0 40px;position:sticky;top:4px;z-index:100;height:60px;border-bottom:1px solid #e5e5e5;box-shadow:0 1px 4px rgba(0,0,0,.04)}
+.nav .logo-wrap{display:flex;align-items:center;gap:12px;height:100%}
+.nav .logo-mark{display:flex;align-items:center;gap:10px}
+.nav .logo-mark svg{width:38px;height:38px;flex-shrink:0}
+.nav .logo-text{font-size:1.35em;font-weight:800;letter-spacing:-.5px;color:var(--bleu-france)}
+.nav .logo-sub{font-size:.58em;color:var(--gris-mention);font-weight:500;letter-spacing:.3px;text-transform:uppercase;margin-top:1px}
+.nav .links{display:flex;gap:22px;align-items:center}
+.nav a{color:var(--gris-texte);text-decoration:none;font-size:.85em;transition:color .2s;font-weight:500}
+.nav a:hover{color:var(--bleu-france)}
+.nav a:focus-visible{outline:2px solid var(--bleu-france);outline-offset:2px;border-radius:4px}
+.nav .bl{background:var(--bleu-france);color:#fff;padding:8px 22px;border-radius:6px;font-weight:600;border:none;transition:background .3s,transform .2s}
+.nav .bl:hover{background:#00006e;transform:translateY(-1px)}
+/* HERO - Fond institutionnel sobre */
+.hero{background:linear-gradient(135deg,var(--bleu-france) 0%,#000070 60%,#00005a 100%);color:#fff;text-align:center;padding:100px 20px 80px;position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;inset:0;background:url("data:image/svg+xml,%3Csvg width='60' height='60' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M30 0v60M0 30h60' stroke='rgba(255,255,255,.02)' stroke-width='.5'/%3E%3C/svg%3E");pointer-events:none}
+.hero-seal{margin-bottom:32px;position:relative;animation:fadeInUp .7s ease-out}
+.hero-seal svg{width:100px;height:100px;filter:drop-shadow(0 6px 30px rgba(0,0,0,.25))}
+.hero h1{font-size:2.6em;font-weight:800;margin-bottom:18px;line-height:1.18;position:relative;animation:fadeInUp .8s ease-out .1s both;max-width:780px;margin-left:auto;margin-right:auto;letter-spacing:-.02em}
+.hero h1 em{font-style:normal;color:var(--turquoise)}
+.hero p{font-size:1.05em;opacity:.78;max-width:650px;margin:0 auto 36px;line-height:1.75;position:relative;animation:fadeInUp .8s ease-out .2s both}
+.hero-btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .3s both}
+.cta-main{display:inline-block;background:var(--rouge-marianne);color:#fff;padding:14px 38px;border-radius:6px;font-size:1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 20px rgba(225,0,15,.3);transition:all .3s;letter-spacing:.01em}
+.cta-main:hover{background:#b8000c;transform:translateY(-2px);box-shadow:0 8px 28px rgba(225,0,15,.35)}
 .cta-main:focus-visible{outline:2px solid #fff;outline-offset:3px}
-.cta-main:active{transform:translateY(-1px)}
-.cta-sec{display:inline-block;background:rgba(255,255,255,.12);color:#fff;padding:16px 44px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:1px solid rgba(255,255,255,.25);transition:all .3s;backdrop-filter:blur(4px)}
-.cta-sec:hover{background:rgba(255,255,255,.22);transform:translateY(-3px)}
-.cta-sec:focus-visible{outline:2px solid #fff;outline-offset:3px}
-.limits{display:flex;gap:24px;justify-content:center;margin-top:35px;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .3s both}
-.limit{background:rgba(255,255,255,.08);padding:12px 20px;border-radius:10px;font-size:.85em;border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(4px);transition:background .3s}
-.limit:hover{background:rgba(255,255,255,.14)}
-.limit strong{color:#60a5fa}
+.cta-sec{display:inline-block;background:transparent;color:#fff;padding:14px 38px;border-radius:6px;font-size:1em;font-weight:600;cursor:pointer;border:1.5px solid rgba(255,255,255,.3);transition:all .3s}
+.cta-sec:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.5);transform:translateY(-2px)}
+/* Institutions */
+.inst-bar{display:flex;justify-content:center;gap:28px;margin-top:40px;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .4s both}
+.inst-badge{display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.06);padding:8px 16px;border-radius:6px;font-size:.78em;font-weight:600;border:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.75);letter-spacing:.02em}
 @keyframes fadeInUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+/* Bandeau conformite */
+.trust-bar{background:#fff;border-bottom:1px solid #e5e5e5;padding:16px 20px}
+.trust-bar .inner{max-width:1000px;margin:0 auto;display:flex;align-items:center;justify-content:center;gap:24px;flex-wrap:wrap}
+.trust-item{display:flex;align-items:center;gap:8px;font-size:.8em;color:var(--gris-mention);font-weight:500}
+.trust-item svg{width:18px;height:18px;flex-shrink:0}
+.trust-sep{width:1px;height:20px;background:#e5e5e5}
+/* Formats */
+.formats-bar{background:var(--gris-fond);padding:18px 20px;text-align:center;border-bottom:1px solid #e5e5e5}
+.formats-bar .inner{max-width:900px;margin:0 auto;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;font-size:.8em;color:var(--gris-mention)}
+.formats-bar .tag{background:#fff;padding:4px 12px;border-radius:4px;font-weight:600;color:var(--bleu-france);font-size:.88em;border:1px solid #e5e5e5}
+/* Pricing */
 .pricing{max-width:1000px;margin:70px auto;padding:0 20px}
-.pricing h2{text-align:center;font-size:1.8em;color:#0f172a;margin-bottom:10px}
-.pricing .sub{text-align:center;color:#64748b;font-size:.95em;margin-bottom:35px}
+.pricing h2{text-align:center;font-size:1.7em;color:var(--gris-texte);margin-bottom:10px;font-weight:800}
+.pricing .sub{text-align:center;color:var(--gris-mention);font-size:.92em;margin-bottom:35px}
 .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-.plan{background:#fff;border-radius:16px;padding:30px 24px;border:1px solid #e2e8f0;text-align:center;transition:all .3s;position:relative}
-.plan:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08)}
-.plan.pop{border-color:#3b82f6;box-shadow:0 8px 30px rgba(59,130,246,.12)}
-.plan.pop::before{content:"Populaire";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;padding:4px 18px;border-radius:20px;font-size:.72em;font-weight:700;box-shadow:0 2px 8px rgba(59,130,246,.3)}
-.plan h3{font-size:1.15em;color:#0f172a;margin-bottom:6px}
-.plan .price{font-size:2.2em;font-weight:800;color:#0f172a;margin:10px 0}
-.plan .price em{font-size:.38em;font-weight:400;color:#64748b;font-style:normal}
-.plan .profiles{font-size:.82em;color:#3b82f6;font-weight:600;margin-bottom:12px}
+.plan{background:#fff;border-radius:12px;padding:30px 24px;border:1px solid #e5e5e5;text-align:center;transition:all .3s;position:relative}
+.plan:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.07)}
+.plan.pop{border-color:var(--bleu-france);box-shadow:0 8px 30px rgba(0,0,145,.08)}
+.plan.pop::before{content:"Recommand\\00e9 ";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--bleu-france);color:#fff;padding:4px 18px;border-radius:20px;font-size:.72em;font-weight:700}
+.plan h3{font-size:1.12em;color:var(--gris-texte);margin-bottom:6px}
+.plan .price{font-size:2.1em;font-weight:800;color:var(--gris-texte);margin:10px 0}
+.plan .price em{font-size:.38em;font-weight:400;color:var(--gris-mention);font-style:normal}
+.plan .profiles{font-size:.82em;color:var(--bleu-france);font-weight:600;margin-bottom:12px}
 .plan ul{list-style:none;text-align:left;margin:12px 0}
-.plan li{padding:6px 0;font-size:.84em;color:#475569}
-.plan li::before{content:"\\2713 ";color:#22c55e;font-weight:700}
-.plan-btn{width:100%;padding:12px;border-radius:10px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid #e2e8f0;background:#fff;color:#0f172a}
-.plan-btn:hover{border-color:#3b82f6;color:#3b82f6;transform:translateY(-1px);box-shadow:0 4px 12px rgba(59,130,246,.1)}
-.plan-btn:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
-.plan.pop .plan-btn{background:#0f172a;color:#fff;border-color:#0f172a}
-.plan.pop .plan-btn:hover{background:#1e293b;box-shadow:0 4px 16px rgba(15,23,42,.2)}
+.plan li{padding:5px 0;font-size:.84em;color:#555}
+.plan li::before{content:"\\2713 ";color:#059669;font-weight:700}
+.plan-btn{width:100%;padding:12px;border-radius:6px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid #e5e5e5;background:#fff;color:var(--gris-texte);font-family:inherit}
+.plan-btn:hover{border-color:var(--bleu-france);color:var(--bleu-france);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,145,.06)}
+.plan-btn:focus-visible{outline:2px solid var(--bleu-france);outline-offset:2px}
+.plan.pop .plan-btn{background:var(--bleu-france);color:#fff;border-color:var(--bleu-france)}
+.plan.pop .plan-btn:hover{background:#00006e;box-shadow:0 4px 16px rgba(0,0,145,.2)}
+/* Features */
 .feat{max-width:1100px;margin:80px auto;padding:0 20px}
-.feat h2{text-align:center;font-size:1.9em;font-weight:700;color:#0f172a;margin-bottom:45px}
-.fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
-.fc{background:#fff;border-radius:14px;padding:26px;border:1px solid #e2e8f0;transition:all .3s}
-.fc:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(0,0,0,.07);border-color:#bfdbfe}
-.fc .ic{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.4em;margin-bottom:14px;transition:transform .3s}
-.fc:hover .ic{transform:scale(1.1)}
-.fc .ic.bl{background:#eff6ff}.fc .ic.gr{background:#f0fdf4}.fc .ic.pu{background:#faf5ff}.fc .ic.am{background:#fffbeb}
-.fc h3{color:#0f172a;margin-bottom:8px;font-size:1em}
-.fc p{color:#64748b;font-size:.85em;line-height:1.6}
-.guarantee{max-width:800px;margin:50px auto;padding:26px 32px;background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fde68a;border-radius:14px;text-align:center}
-.guarantee h3{color:#92400e;margin-bottom:10px}.guarantee p{color:#92400e;font-size:.88em;line-height:1.6}
-.tgt{background:#fff;padding:70px 20px;text-align:center;border-top:1px solid #e2e8f0}
-.tgt h2{font-size:1.7em;color:#0f172a;margin-bottom:35px}
-.tg{display:flex;justify-content:center;gap:24px;flex-wrap:wrap;max-width:800px;margin:0 auto}
-.ti{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:28px 20px;width:180px;transition:all .3s;cursor:default}
-.ti:hover{border-color:#3b82f6;transform:translateY(-3px);box-shadow:0 8px 24px rgba(59,130,246,.08)}.ti .ic2{font-size:1.8em;margin-bottom:8px}.ti h4{color:#0f172a;font-size:.95em;margin-bottom:4px}.ti p{font-size:.8em;color:#64748b}
+.feat h2{text-align:center;font-size:1.8em;font-weight:800;color:var(--gris-texte);margin-bottom:12px}
+.feat .sub{text-align:center;color:var(--gris-mention);font-size:.92em;margin-bottom:40px}
+.fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}
+.fc{background:#fff;border-radius:10px;padding:24px;border:1px solid #e5e5e5;transition:all .3s}
+.fc:hover{transform:translateY(-3px);box-shadow:0 10px 28px rgba(0,0,0,.06);border-color:var(--bleu-france)}
+.fc .ic{width:44px;height:44px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.3em;margin-bottom:12px;transition:transform .3s}
+.fc:hover .ic{transform:scale(1.08)}
+.fc .ic.bl{background:#f0f0ff;color:var(--bleu-france)}.fc .ic.gr{background:#f0fdf4}.fc .ic.pu{background:#faf5ff}.fc .ic.am{background:#fffbeb}.fc .ic.rd{background:#fef2f2}.fc .ic.tq{background:#ecfeff;color:var(--bleu-urssaf)}
+.fc h3{color:var(--gris-texte);margin-bottom:6px;font-size:.98em}
+.fc p{color:var(--gris-mention);font-size:.83em;line-height:1.6}
+/* Guarantee */
+.guarantee{max-width:800px;margin:50px auto;padding:24px 30px;background:#fff;border:1px solid #e5e5e5;border-left:4px solid var(--bleu-france);border-radius:6px}
+.guarantee h3{color:var(--gris-texte);margin-bottom:8px;font-size:.95em}.guarantee p{color:var(--gris-mention);font-size:.85em;line-height:1.65}
+/* Targets */
+.tgt{background:#fff;padding:70px 20px;text-align:center;border-top:1px solid #e5e5e5}
+.tgt h2{font-size:1.6em;color:var(--gris-texte);margin-bottom:35px;font-weight:800}
+.tg{display:flex;justify-content:center;gap:20px;flex-wrap:wrap;max-width:800px;margin:0 auto}
+.ti{background:var(--gris-fond);border:1px solid #e5e5e5;border-radius:10px;padding:24px 18px;width:170px;transition:all .3s;cursor:default}
+.ti:hover{border-color:var(--bleu-france);transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,145,.05)}.ti .ic2{font-size:1.6em;margin-bottom:6px}.ti h4{color:var(--gris-texte);font-size:.92em;margin-bottom:3px}.ti p{font-size:.78em;color:var(--gris-mention)}
+/* Auth */
 .auth-sec{max-width:420px;margin:70px auto;padding:0 20px}
-.auth-card{background:#fff;border-radius:20px;padding:40px;box-shadow:0 12px 40px rgba(0,0,0,.08);border:1px solid #e2e8f0}
-.auth-card h2{text-align:center;color:#0f172a;margin-bottom:24px;font-size:1.3em}
-.auth-tabs{display:flex;margin-bottom:24px;background:#f1f5f9;border-radius:10px;padding:4px}
-.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:#64748b;border-radius:8px;transition:all .25s;font-size:.9em}
-.auth-tab:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
-.auth-tab.active{color:#0f172a;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.auth-card{background:#fff;border-radius:12px;padding:36px;box-shadow:0 10px 36px rgba(0,0,0,.06);border:1px solid #e5e5e5}
+.auth-card h2{text-align:center;color:var(--gris-texte);margin-bottom:22px;font-size:1.25em}
+.auth-tabs{display:flex;margin-bottom:22px;background:var(--gris-fond);border-radius:6px;padding:3px}
+.auth-tab{flex:1;padding:9px;text-align:center;cursor:pointer;font-weight:600;color:var(--gris-mention);border-radius:4px;transition:all .25s;font-size:.88em}
+.auth-tab:focus-visible{outline:2px solid var(--bleu-france);outline-offset:-2px}
+.auth-tab.active{color:var(--bleu-france);background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .auth-form{display:none}.auth-form.active{display:block}
-.auth-form label{display:block;font-weight:600;font-size:.84em;color:#475569;margin-bottom:5px}
-.auth-form input{width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:.95em;margin-bottom:14px;background:#f8fafc;transition:all .25s}
-.auth-form input:focus{border-color:#3b82f6;outline:none;background:#fff;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
-.submit-btn{width:100%;padding:14px;background:#0f172a;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s}
-.submit-btn:hover{background:#1e293b;transform:translateY(-1px);box-shadow:0 4px 12px rgba(15,23,42,.2)}
-.submit-btn:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.auth-form label{display:block;font-weight:600;font-size:.82em;color:#555;margin-bottom:4px}
+.auth-form input{width:100%;padding:11px 13px;border:1.5px solid #e5e5e5;border-radius:6px;font-size:.93em;margin-bottom:12px;background:var(--gris-fond);transition:all .25s;font-family:inherit}
+.auth-form input:focus{border-color:var(--bleu-france);outline:none;background:#fff;box-shadow:0 0 0 3px rgba(0,0,145,.06)}
+.submit-btn{width:100%;padding:13px;background:var(--bleu-france);color:#fff;border:none;border-radius:6px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s;font-family:inherit}
+.submit-btn:hover{background:#00006e;transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,145,.15)}
+.submit-btn:focus-visible{outline:2px solid var(--rouge-marianne);outline-offset:2px}
 .submit-btn:active{transform:translateY(0)}
-.msg{padding:12px 16px;border-radius:10px;margin:12px 0;font-size:.9em;display:none;animation:fadeInUp .3s ease-out}
+.msg{padding:11px 15px;border-radius:6px;margin:10px 0;font-size:.88em;display:none;animation:fadeInUp .3s ease-out}
 .msg.ok{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}
 .msg.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
-.rgpd{font-size:.78em;color:#94a3b8;margin-top:14px;line-height:1.4;text-align:center}
-footer{text-align:center;padding:45px 20px;color:#94a3b8;font-size:.82em;background:#0f172a}
-footer a{color:#60a5fa;text-decoration:none;transition:color .2s}footer a:hover{text-decoration:underline;color:#93c5fd}
-footer .links{margin-bottom:14px;display:flex;gap:20px;justify-content:center}
-@media(max-width:768px){.hero h1{font-size:2.1em}.hero{padding:70px 16px 55px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:12px 16px}.nav .links{gap:12px}.nav a:not(.bl){display:none}.limits{gap:10px}.limit{padding:8px 14px;font-size:.78em}.auth-card{padding:28px 20px}.tg{gap:12px}.ti{width:calc(50% - 12px)}}
+.rgpd{font-size:.76em;color:#94a3b8;margin-top:12px;line-height:1.4;text-align:center}
+/* Footer */
+footer{text-align:center;padding:40px 20px;color:rgba(255,255,255,.55);font-size:.8em;background:var(--bleu-france)}
+footer::before{content:"";display:block;height:3px;background:linear-gradient(90deg,var(--bleu-france) 33.33%,#fff 33.33% 66.66%,var(--rouge-marianne) 66.66%);margin:-40px -20px 30px}
+footer a{color:rgba(255,255,255,.7);text-decoration:none;transition:color .2s}footer a:hover{text-decoration:underline;color:#fff}
+footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
+@media(max-width:768px){.hero h1{font-size:1.9em}.hero{padding:70px 16px 50px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:0 16px;height:52px;top:4px}.nav .links{gap:10px}.nav a:not(.bl){display:none}.inst-bar{gap:8px}.inst-badge{padding:6px 10px;font-size:.72em}.auth-card{padding:24px 18px}.tg{gap:10px}.ti{width:calc(50% - 10px)}.nav .logo-sub{display:none}.hero-seal svg{width:72px;height:72px}.formats-bar .inner{font-size:.72em}.trust-bar .inner{gap:12px}.trust-sep{display:none}.tricolor{height:3px}}
 </style>
 </head>
 <body>
-<nav class="nav" aria-label="Navigation principale"><div class="logo"><em>NormaCheck</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></nav>
-<main class="hero" role="banner">
-<h1>La conformite sociale et fiscale<br>enfin <em>simplifiee</em>.</h1>
-<p>Analysez vos documents sociaux et fiscaux, detectez les anomalies en euros, gerez votre comptabilite, generez vos DSN et pilotez vos obligations. Pour dirigeants, comptables et experts.</p>
-<div class="hero-btns">
-<button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})" aria-label="Commencer maintenant - aller au formulaire de connexion">Commencer maintenant</button>
-<button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})" aria-label="Voir les tarifs disponibles">Voir les tarifs</button>
+<!-- Lisere tricolore -->
+<div class="tricolor" aria-hidden="true"></div>
+
+<!-- NAVIGATION - Style institutionnel sobre -->
+<nav class="nav" aria-label="Navigation principale">
+<div class="logo-wrap">
+<div class="logo-mark">
+<!-- LOGO: Sceau circulaire (Cour des comptes) + bouclier (DGFIP) + double C + check tricolore -->
+<svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- Sceau circulaire externe -->
+<circle cx="20" cy="20" r="18.5" fill="var(--bleu-france)" stroke="var(--rouge-marianne)" stroke-width=".8"/>
+<circle cx="20" cy="20" r="15.5" fill="none" stroke="rgba(255,255,255,.15)" stroke-width=".4"/>
+<!-- Bouclier interieur (DGFIP) -->
+<path d="M20 7l9 4.5v6c0 7-4 12.5-9 15-5-2.5-9-8-9-15v-6L20 7z" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.35)" stroke-width=".8"/>
+<!-- Double C (Cour des comptes) -->
+<path d="M17 14.5a5.5 5.5 0 00-2.8 7.2" stroke="rgba(255,255,255,.3)" stroke-width="1.3" stroke-linecap="round" fill="none"/>
+<path d="M23 14.5a5.5 5.5 0 012.8 7.2" stroke="rgba(255,255,255,.3)" stroke-width="1.3" stroke-linecap="round" fill="none"/>
+<!-- Check (conformite) -->
+<path d="M14.5 21l3.8 3.8 7.2-7.2" stroke="#E1000F" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<!-- Anneau turquoise (URSSAF) -->
+<circle cx="20" cy="20" r="17" fill="none" stroke="var(--turquoise)" stroke-width=".4" opacity=".5" stroke-dasharray="2 3"/>
+</svg>
+<div>
+<div class="logo-text">NormaCheck</div>
+<div class="logo-sub">Conformite sociale &amp; fiscale</div>
 </div>
-<div class="limits">
-<div class="limit"><strong>50 fichiers</strong> par analyse</div>
-<div class="limit"><strong>2 Go</strong> max par analyse</div>
-<div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
+</div>
+</div>
+<div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div>
+</nav>
+
+<!-- HERO -->
+<main class="hero" role="banner">
+<div class="hero-seal">
+<!-- Grand sceau hero -->
+<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- Sceau circulaire externe avec ornement -->
+<circle cx="50" cy="50" r="47" fill="none" stroke="rgba(255,255,255,.12)" stroke-width="1"/>
+<circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,.06)" stroke-width=".5"/>
+<!-- Anneau turquoise URSSAF -->
+<circle cx="50" cy="50" r="45.5" fill="none" stroke="var(--turquoise)" stroke-width=".6" opacity=".35" stroke-dasharray="3 4"/>
+<!-- Bouclier central -->
+<path d="M50 14l22 11v15c0 17-10 31-22 37-12-6-22-20-22-37V25L50 14z" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+<path d="M50 20l17 8.5v12c0 13-7.5 24-17 29-9.5-5-17-16-17-29v-12L50 20z" fill="rgba(255,255,255,.03)"/>
+<!-- Double C (Cour des comptes) -->
+<path d="M42 34a13 13 0 00-7 17" stroke="rgba(255,255,255,.22)" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+<path d="M58 34a13 13 0 017 17" stroke="rgba(255,255,255,.22)" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+<!-- Balance de la justice (DGFIP) -->
+<line x1="50" y1="62" x2="50" y2="71" stroke="rgba(255,255,255,.18)" stroke-width="1.2"/>
+<line x1="43" y1="71" x2="57" y2="71" stroke="rgba(255,255,255,.18)" stroke-width="1.2" stroke-linecap="round"/>
+<line x1="43" y1="62" x2="57" y2="62" stroke="rgba(255,255,255,.12)" stroke-width="1" stroke-linecap="round"/>
+<!-- Check tricolore (conformite) -->
+<path d="M36 48l10 10 18-18" stroke="#E1000F" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<path d="M36 48l10 10 18-18" stroke="rgba(255,255,255,.15)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none" style="filter:blur(3px)"/>
+<!-- Or accent (sceau officiel) -->
+<circle cx="50" cy="50" r="41" fill="none" stroke="var(--or-accent)" stroke-width=".3" opacity=".25"/>
+</svg>
+</div>
+<h1>La conformite sociale et fiscale<br>enfin <em>maitrisee</em>.</h1>
+<p>Analysez bulletins de paie, DSN, bordereaux URSSAF et documents fiscaux. Detectez chaque ecart en euros. Generez vos declarations. Pour dirigeants, comptables et experts.</p>
+<div class="hero-btns">
+<button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Commencer maintenant</button>
+<button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
+</div>
+<div class="inst-bar">
+<div class="inst-badge">URSSAF / CSS</div>
+<div class="inst-badge">DGFIP / CGI</div>
+<div class="inst-badge">Cour des comptes</div>
+<div class="inst-badge">France Travail</div>
+<div class="inst-badge">CARSAT</div>
 </div>
 </main>
+
+<!-- Bandeau de confiance -->
+<div class="trust-bar">
+<div class="inner">
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><path d="M9 1l2 4h4.5l-3.5 3 1.2 4.5L9 10l-4.2 2.5L6 8 2.5 5H7z" fill="var(--or-accent)" opacity=".7"/></svg>Norme NEODeS Phase 3</div>
+<div class="trust-sep"></div>
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="14" height="14" rx="2" stroke="var(--bleu-france)" stroke-width="1.2"/><path d="M6 9l2 2 4-4" stroke="var(--bleu-france)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>FEC conforme art. L.47 A-I LPF</div>
+<div class="trust-sep"></div>
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><path d="M9 2v14M2 9h14" stroke="var(--rouge-marianne)" stroke-width="1.2" stroke-linecap="round"/><circle cx="9" cy="9" r="7" stroke="var(--rouge-marianne)" stroke-width="1" opacity=".4"/></svg>Conforme RGPD</div>
+<div class="trust-sep"></div>
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><path d="M9 1.5l7 4v5c0 4-3 7-7 8.5-4-1.5-7-4.5-7-8.5v-5l7-4z" stroke="var(--bleu-urssaf)" stroke-width="1" fill="none"/></svg>Donnees chiffrees</div>
+</div>
+</div>
+
+<!-- Formats banner -->
+<div class="formats-bar">
+<div class="inner">
+<span>Formats compatibles :</span>
+<span class="tag">PDF</span><span class="tag">Excel</span><span class="tag">CSV</span><span class="tag">DSN</span><span class="tag">XML</span><span class="tag">FEC</span><span class="tag">Images</span><span class="tag">DOCX</span>
+<span style="color:#ccc">|</span>
+<span>SAGE, CIEL, EBP, ADP, Silae, PayFit, CEGID, Quadratus</span>
+</div>
+</div>
 
 <div class="pricing" id="pricing">
 <h2>Tarification adaptative</h2>
@@ -11492,16 +11598,17 @@ footer .links{margin-bottom:14px;display:flex;gap:20px;justify-content:center}
 </div>
 
 <div class="feat" id="features">
-<h2>Plateforme complete</h2>
+<h2>Plateforme complete de conformite</h2>
+<p class="sub">Tous les outils pour maitriser vos obligations sociales et fiscales.</p>
 <div class="fg">
-<div class="fc"><div class="ic bl">&#128269;</div><h3>Analyse et detection</h3><p>Rapprochement DSN / livre de paie. Ecarts par salarie, par rubrique. Score de risque par destinataire.</p></div>
-<div class="fc"><div class="ic gr">&#128200;</div><h3>Dashboard dirigeant</h3><p>Vision globale : anomalies, charges, conformite, scores URSSAF / Fiscal / France Travail / GUSO.</p></div>
-<div class="fc"><div class="ic pu">&#128196;</div><h3>Comptabilite integree</h3><p>Grand livre, balance, bilan, resultat, TVA. Alertes justificatifs. Ecritures manuelles tracees.</p></div>
-<div class="fc"><div class="ic am">&#128221;</div><h3>Generation DSN</h3><p>Creez vos declarations sociales nominatives au format NEODeS. Salaries, cotisations, totaux automatiques.</p></div>
-<div class="fc"><div class="ic bl">&#9878;</div><h3>Veille juridique</h3><p>Baremes et legislation 2020-2026. Comparaison interannuelle. Patch mensuel automatique.</p></div>
+<div class="fc"><div class="ic bl">&#128269;</div><h3>Analyse et detection</h3><p>Rapprochement DSN / livre de paie. Ecarts par salarie, par rubrique. Score de risque par destinataire (URSSAF, DGFIP, France Travail).</p></div>
+<div class="fc"><div class="ic tq">&#128200;</div><h3>Dashboard dirigeant</h3><p>Vision globale : anomalies, charges, conformite, scores URSSAF / Fiscal / France Travail / GUSO / AGESSA.</p></div>
+<div class="fc"><div class="ic pu">&#128196;</div><h3>Comptabilite integree</h3><p>Grand livre, balance, bilan, resultat, TVA. FEC conforme art. L.47 A-I. Ecritures manuelles tracees.</p></div>
+<div class="fc"><div class="ic am">&#128221;</div><h3>Generation DSN</h3><p>Declarations sociales nominatives NEODeS Phase 3. Salaries, cotisations, arrets, contrats. 80+ codes CTP.</p></div>
+<div class="fc"><div class="ic bl">&#9878;</div><h3>Veille juridique</h3><p>Baremes et legislation 2020-2026. PMSS, SMIC, taux AT/MP. Comparaison interannuelle. Mise a jour mensuelle.</p></div>
 <div class="fc"><div class="ic gr">&#128101;</div><h3>Collaboration</h3><p>Invitez des collaborateurs. Tracabilite des actions. Profil decisionnaire pour validation.</p></div>
-<div class="fc"><div class="ic pu">&#128203;</div><h3>Gestion factures</h3><p>Analyse OCR, comptabilisation auto, suivi paiements (paye/impaye), historique complet.</p></div>
-<div class="fc"><div class="ic am">&#128274;</div><h3>Securite et RGPD</h3><p>Donnees chiffrees, acces controle, conformite RGPD. Droit d'acces, rectification, suppression.</p></div>
+<div class="fc"><div class="ic rd">&#128203;</div><h3>Gestion factures</h3><p>Analyse OCR, comptabilisation auto, suivi paiements (paye/impaye), historique complet.</p></div>
+<div class="fc"><div class="ic tq">&#128274;</div><h3>Securite et RGPD</h3><p>Donnees chiffrees, acces controle, conformite RGPD. Validation NIR, SIRET par algorithme de Luhn.</p></div>
 </div>
 </div>
 
@@ -11545,8 +11652,8 @@ footer .links{margin-bottom:14px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.8.1 &mdash; Conformite sociale et fiscale &copy; 2026<br>
-<span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
+NormaCheck v3.9.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+<span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations (URSSAF, DGFIP, France Travail, etc.)</span>
 </footer>
 <script>
 function showAT(t){document.querySelectorAll(".auth-tab").forEach(function(b,i){b.classList.toggle("active",i===(t==="login"?0:1))});document.getElementById("form-login").classList.toggle("active",t==="login");document.getElementById("form-register").classList.toggle("active",t==="register");document.getElementById("amsg").className="msg";}
@@ -11787,7 +11894,7 @@ APP_HTML = """<!DOCTYPE html>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2'><path d='M12 2l7 4v5c0 5.25-3.5 9.74-7 11-3.5-1.26-7-5.75-7-11V6l7-4z'/><path d='M9 12l2 2 4-4' stroke='%2322c55e' stroke-width='2.5'/></svg>">
 <title>NormaCheck - Conformite</title>
 <style>
-:root{--p:#0c1829;--p2:#1a3a6b;--p3:#2563eb;--pl:#eef4ff;--g:#059669;--gl:#ecfdf5;--r:#dc2626;--rl:#fef2f2;--o:#d97706;--ol:#fffbeb;--pu:#7c3aed;--pul:#f5f3ff;--tl:#0d7377;--bg:#f1f5f9;--tx:#0f172a;--tx2:#475569;--brd:#cbd5e1;--sh:0 1px 4px rgba(15,23,42,.08);--sidebar-w:256px;--card-bg:#fff;--accent:#1d4ed8;--accent-light:#dbeafe}
+:root{--p:#0c1829;--p2:#1a3a6b;--p3:#2563eb;--pl:#eef4ff;--g:#059669;--gl:#ecfdf5;--r:#dc2626;--rl:#fef2f2;--o:#d97706;--ol:#fffbeb;--pu:#7c3aed;--pul:#f5f3ff;--tl:#0d7377;--bg:#f1f5f9;--bg2:#f8fafc;--tx:#0f172a;--tx2:#475569;--brd:#cbd5e1;--sh:0 1px 4px rgba(15,23,42,.08);--sidebar-w:256px;--card-bg:#fff;--accent:#1d4ed8;--accent-light:#dbeafe}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden;-webkit-text-size-adjust:100%;letter-spacing:-.01em}
 .layout{display:flex;min-height:100vh;min-height:100dvh}
@@ -11980,7 +12087,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
 /* ===== Dark Mode ===== */
 @media(prefers-color-scheme:dark){
-:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2);--accent:#60a5fa;--accent-light:rgba(96,165,250,.15)}
+:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--bg2:#1a2332;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2);--accent:#60a5fa;--accent-light:rgba(96,165,250,.15)}
 body{color-scheme:dark}
 .sidebar{background:#020617}
 .topbar{background:rgba(30,41,59,.92);backdrop-filter:blur(12px)}
@@ -13375,34 +13482,64 @@ setGauge("gauge-cdc","gauge-cdc-val","grade-cdc",ts.cdc);
 
 function renderAnomalies(id,constats){
 var el=document.getElementById(id);if(!constats.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune anomalie detectee.</p>";return;}
-var h="<div style='margin-bottom:8px;font-size:.86em;color:var(--tx2)'>"+constats.length+" anomalie(s) detectee(s). Cliquez sur chaque ligne pour voir le detail.</div>";
-constats.forEach(function(c){
+/* Trier : haute d'abord, puis moyenne, puis faible */
+var sevOrder={"haute":0,"moyenne":1,"faible":2};
+constats.sort(function(a,b){return (sevOrder[a.severite]||2)-(sevOrder[b.severite]||2);});
+var nbH=constats.filter(function(c){return c.severite==="haute"}).length;
+var nbM=constats.filter(function(c){return c.severite==="moyenne"}).length;
+var nbL=constats.length-nbH-nbM;
+var h="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;align-items:center'>";
+h+="<span style='font-weight:700;font-size:.95em'>"+constats.length+" anomalie(s) detectee(s)</span>";
+if(nbH)h+="<span class='badge badge-red'>"+nbH+" critique"+(nbH>1?"s":"")+"</span>";
+if(nbM)h+="<span class='badge badge-amber'>"+nbM+" moyenne"+(nbM>1?"s":"")+"</span>";
+if(nbL)h+="<span class='badge badge-green'>"+nbL+" mineure"+(nbL>1?"s":"")+"</span>";
+h+="</div>";
+constats.forEach(function(c,idx){
 var impact=c.montant_impact||0;var neg=impact>0;
 var sevCls=c.severite==="haute"?"high":(c.severite==="moyenne"?"med":"low");
 var dest=categToDest(c.categorie||"");
 var destCls={"URSSAF":"badge-blue","Fiscal":"badge-purple","France Travail":"badge-amber","GUSO":"badge-teal"}[dest]||"badge-blue";
 var sevBadge=c.severite==="haute"?"badge-red":(c.severite==="moyenne"?"badge-amber":"badge-green");
-h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'><div class='head'><div><span class='title'>"+(c.titre||"Ecart")+"</span> ";
-h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+c.severite+"</span>";
+var sevLabel=c.severite==="haute"?"Critique":(c.severite==="moyenne"?"Moyenne":"Mineure");
+h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'>";
+/* --- Ligne resume cliquable --- */
+h+="<div class='head'><div style='flex:1'>";
+h+="<span style='font-weight:700;font-size:.76em;color:var(--tx2);margin-right:6px'>#"+(idx+1)+"</span>";
+h+="<span class='title'>"+(c.titre||"Ecart")+"</span> ";
+h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+sevLabel+"</span>";
 if(c.periode)h+=" <span class='badge' style='background:#e0e7ff;color:#3730a3'>"+c.periode+"</span>";
 h+="</div>";
 if(neg)h+="<div class='montant neg'>+"+Math.abs(impact).toFixed(2)+" EUR</div>";
 h+="</div>";
+/* --- Comparaison rapide (toujours visible) --- */
+if(c.valeur_constatee||c.valeur_attendue){
+h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:.85em'>";
+if(c.valeur_constatee)h+="<div style='background:var(--rl);padding:4px 10px;border-radius:6px;border:1px solid #fecaca'><strong style='color:var(--r)'>Constate :</strong> <span style='font-weight:600'>"+c.valeur_constatee+"</span></div>";
+if(c.valeur_attendue)h+="<div style='background:var(--gl);padding:4px 10px;border-radius:6px;border:1px solid #bbf7d0'><strong style='color:var(--g)'>Attendu :</strong> <span style='font-weight:600'>"+c.valeur_attendue+"</span></div>";
+if(neg)h+="<div style='background:var(--ol);padding:4px 10px;border-radius:6px;border:1px solid #fde68a'><strong style='color:var(--o)'>Impact :</strong> <span style='font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
+h+="</div>";}
+/* --- Detail (deploye au clic) --- */
 h+="<div class='detail'>";
-h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:10px;font-size:.9em'>";
-h+="<div><strong>Categorie :</strong> "+(c.categorie||"-")+"</div>";
-h+="<div><strong>Periode :</strong> "+(c.periode||"Non precisee")+"</div>";
-h+="<div><strong>Document(s) source :</strong> "+(c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"Non precise"))+"</div>";
-h+="<div><strong>Rubrique :</strong> "+(c.rubrique||"Generale")+"</div>";
-if(c.valeur_constatee)h+="<div><strong>Valeur constatee :</strong> <span style='color:var(--r);font-weight:600'>"+c.valeur_constatee+"</span></div>";
-if(c.valeur_attendue)h+="<div><strong>Valeur attendue :</strong> <span style='color:var(--g);font-weight:600'>"+c.valeur_attendue+"</span></div>";
-if(neg)h+="<div><strong>Impact financier :</strong> <span style='color:var(--r);font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
-h+="<div><strong>Detecte par :</strong> "+(c.detecte_par||"-")+"</div>";
+/* Localisation */
+var docSrc=c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"");
+h+="<div style='background:var(--pl);border:1px solid #bfdbfe;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.88em'>";
+h+="<strong style='color:var(--p2)'>&#128204; Localisation de l'erreur</strong><br>";
+if(docSrc)h+="<span>Document : <strong>"+docSrc+"</strong></span><br>";
+h+="<span>Categorie : "+(c.categorie||"-")+"</span>";
+if(c.rubrique&&c.rubrique!=="Generale")h+=" &bull; <span>Rubrique : "+c.rubrique+"</span>";
+if(c.periode)h+=" &bull; <span>Periode : "+c.periode+"</span>";
 h+="</div>";
+/* Explication claire */
 var desc=(c.description||"").replace(/\\n/g,"<br>");
-h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin:8px 0'><strong>Explication :</strong> "+desc+"</div>";
-if(c.recommandation)h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128161;</span><span><strong>Action recommandee :</strong> "+c.recommandation+"</span></div>";
-if(c.reference_legale)h+="<div style='margin-top:6px;font-size:.85em;color:var(--tx2)'><em>Base legale : "+c.reference_legale+"</em></div>";
+h+="<div style='border-radius:8px;padding:12px;margin-bottom:10px;font-size:.88em;line-height:1.6;background:var(--card-bg);border:1px solid var(--brd)'>"+desc+"</div>";
+/* Action recommandee */
+if(c.recommandation){
+h+="<div style='background:var(--gl);border:1px solid #a7f3d0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:.88em'>";
+h+="<strong style='color:#065f46'>&#9989; Action a realiser :</strong> "+c.recommandation+"</div>";}
+/* Base legale */
+if(c.reference_legale){
+h+="<div style='font-size:.82em;color:var(--tx2);padding:6px 10px;background:var(--bg);border-radius:6px;border:1px solid var(--brd)'>";
+h+="<strong>&#9878; Base legale :</strong> "+c.reference_legale+"</div>";}
 h+="</div></div>";});el.innerHTML=h;}
 
 function categToDest(cat){var c=cat.toLowerCase();if(c.indexOf("fiscal")>=0||c.indexOf("impot")>=0)return"Fiscal";if(c.indexOf("france travail")>=0||c.indexOf("chomage")>=0)return"France Travail";if(c.indexOf("guso")>=0||c.indexOf("spectacle")>=0)return"GUSO";return"URSSAF";}
@@ -13554,7 +13691,8 @@ fetch("/api/documents/bibliotheque/"+docId+"/corriger",{method:"POST",body:fd}).
 function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
 
 var factFile=null;
-document.getElementById("fi-fact").addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});
+var _fiFact=document.getElementById("fi-fact");
+if(_fiFact){_fiFact.addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});}
 
 function analyserFacture(){
 if(!factFile)return;var fd=new FormData();fd.append("fichier",factFile);
@@ -14093,9 +14231,10 @@ var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll(
 var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_"+name+".csv";a.click();toast("Export telecharge.","ok");}
 
 /* === MODE ANALYSE === */
-document.getElementById("mode-analyse").addEventListener("change",function(){
+var _modeAzSel=document.getElementById("mode-analyse");
+if(_modeAzSel){_modeAzSel.addEventListener("change",function(){
 var m=this.value;var msgs={"simple":"Analyse simple : detection des ecarts de taux et montants.","social":"Audit social : verification complete des cotisations, DSN, conges, conventions collectives.","fiscal":"Audit fiscal : coherence TVA, charges deductibles, IS/IR, declarations fiscales.","complet":"Audit complet : verification de toutes les coherences sociales, fiscales, DSN et rapprochements."};
-document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});
+document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});}
 
 /* === FILE INTERPRETATION + AUDIT === */
 function showFileInterpretation(data){

@@ -17,7 +17,11 @@ from urssaf_analyzer.models.documents import (
 )
 from urssaf_analyzer.config.constants import ContributionType
 from urssaf_analyzer.parsers.base_parser import BaseParser
-from urssaf_analyzer.utils.number_utils import parser_montant
+from urssaf_analyzer.utils.number_utils import parser_montant, valider_siret, valider_siren
+from urssaf_analyzer.utils.validators import valider_nir, valider_montant, valider_base_brute, ParseLog
+
+import logging
+logger = logging.getLogger(__name__)
 
 try:
     import pdfplumber
@@ -834,6 +838,9 @@ class PDFParser(BaseParser):
         if not HAS_PDFPLUMBER:
             raise ParseError("pdfplumber n'est pas installe. Installer avec: pip install pdfplumber")
 
+        # Limite a 200 Mo pour les PDF (scans haute resolution)
+        self._verifier_taille_fichier(chemin, max_bytes=200 * 1024 * 1024)
+
         try:
             with pdfplumber.open(chemin) as pdf:
                 texte_complet = ""
@@ -1134,6 +1141,14 @@ class PDFParser(BaseParser):
         if brut <= 0 and net_a_payer > 0:
             brut = Decimal(str(round(float(net_a_payer) / 0.78, 2)))
 
+        # --- Validation des montants extraits ---
+        avertissements = []
+        if brut > 0:
+            result_brut = valider_base_brute(brut, net=net_a_payer if net_a_payer > 0 else None)
+            if not result_brut.valide:
+                avertissements.append(result_brut.message)
+                logger.warning("PDF bulletin: %s", result_brut.message)
+
         # Store metadata
         metadata = {
             "type_document": "bulletin_de_paie",
@@ -1143,6 +1158,8 @@ class PDFParser(BaseParser):
             "total_patronal": float(total_patronal),
             "total_salarial": float(total_salarial),
         }
+        if avertissements:
+            metadata["avertissements_validation"] = avertissements
         if date_virement:
             metadata["date_virement"] = date_virement.isoformat()
 
@@ -2276,12 +2293,20 @@ class PDFParser(BaseParser):
         m = _RE_SIRET.search(texte)
         if m:
             siret = m.group(1).replace(" ", "")
-            employeur.siret = siret
-            employeur.siren = siret[:9]
+            if valider_siret(siret):
+                employeur.siret = siret
+                employeur.siren = siret[:9]
+            else:
+                employeur.siret = siret  # Garder mais loguer
+                employeur.siren = siret[:9]
+                logger.debug("SIRET suspect dans PDF (Luhn invalide): %s", siret)
         else:
             m = _RE_SIREN.search(texte)
             if m:
-                employeur.siren = m.group(1)
+                siren = m.group(1)
+                if not valider_siren(siren):
+                    logger.debug("SIREN suspect dans PDF (Luhn invalide): %s", siren)
+                employeur.siren = siren
 
         m = _RE_RAISON_SOCIALE.search(texte)
         if m:
@@ -2297,10 +2322,16 @@ class PDFParser(BaseParser):
         """Extrait les informations du salarie."""
         emp = Employe(source_document_id=doc_id)
 
-        # NIR
+        # NIR (avec validation)
         m = _RE_NIR.search(texte)
         if m:
-            emp.nir = m.group(1).replace(" ", "")
+            nir_brut = m.group(1).replace(" ", "")
+            result_nir = valider_nir(nir_brut)
+            if result_nir.valide:
+                emp.nir = result_nir.valeur_corrigee
+            else:
+                emp.nir = nir_brut  # Garder tel quel, mais loguer
+                logger.debug("NIR suspect dans PDF: %s (%s)", nir_brut, result_nir.message)
 
         # Try combined nom+prenom first
         m = _RE_NOM_PRENOM.search(texte)

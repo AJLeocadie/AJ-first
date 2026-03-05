@@ -5,10 +5,20 @@ Non-presentation = amende 5 000 EUR (art. 1729 D CGI).
 
 Le FEC est un fichier texte a champs separes (tabulation ou pipe) avec 18 colonnes
 obligatoires dans un ordre precis.
+
+Compatible avec les exports FEC de :
+- SAGE Comptabilite (FEC tabulation, encoding cp1252)
+- CIEL Compta (FEC point-virgule, ISO-8859-1)
+- EBP Compta (FEC tabulation)
+- Quadratus (FEC tabulation, cp1252)
+- ACD (FEC tabulation)
+- Cegid (FEC tabulation ou pipe)
+- Coala (FEC tabulation)
 """
 
 import csv
 import io
+import logging
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -19,6 +29,9 @@ from urssaf_analyzer.models.documents import Document, Declaration, Cotisation
 from urssaf_analyzer.parsers.base_parser import BaseParser
 from urssaf_analyzer.utils.date_utils import parser_date
 from urssaf_analyzer.utils.number_utils import parser_montant
+from urssaf_analyzer.utils.validators import valider_compte_fec, ParseLog
+
+logger = logging.getLogger(__name__)
 
 # Les 18 colonnes obligatoires du FEC (art. A.47 A-1 LPF)
 COLONNES_FEC = [
@@ -176,6 +189,8 @@ class FECParser(BaseParser):
         return metadata
 
     def parser(self, chemin: Path, document: Document) -> list[Declaration]:
+        self._verifier_taille_fichier(chemin)
+        parse_log = ParseLog("FECParser", str(chemin))
         contenu = self._lire_fichier(chemin)
         lignes = contenu.split("\n")
         if not lignes:
@@ -198,6 +213,11 @@ class FECParser(BaseParser):
         # Parser les ecritures
         ecritures_fec = []
         erreurs = []
+        comptes_invalides = set()
+        dernier_ecriture_num = ""
+        ecritures_sans_date = 0
+        ecritures_debit_credit = 0  # lignes avec debit ET credit non nuls
+
         for i, ligne in enumerate(lignes[1:], start=2):
             ligne = ligne.strip()
             if not ligne:
@@ -205,30 +225,95 @@ class FECParser(BaseParser):
             champs = ligne.split(sep)
             if len(champs) < len(obligatoires):
                 erreurs.append(f"Ligne {i}: nombre de champs insuffisant ({len(champs)})")
+                parse_log.error(i, "structure", f"Nombre de champs insuffisant: {len(champs)}")
                 continue
             try:
                 ecriture = self._parser_ligne_fec(champs, header, col_map, i)
                 if ecriture:
+                    # Validation du compte
+                    compte = ecriture.get("compte_num", "")
+                    if compte:
+                        v = valider_compte_fec(compte)
+                        if not v.valide and compte not in comptes_invalides:
+                            comptes_invalides.add(compte)
+                            parse_log.warning(i, "compte", v.message, compte)
+
+                    # Verifier la date d'ecriture
+                    if not ecriture.get("ecriture_date"):
+                        ecritures_sans_date += 1
+                        parse_log.warning(i, "date", "Date d'ecriture manquante")
+
+                    # Verifier debit/credit exclusif
+                    debit = ecriture.get("debit", 0)
+                    credit = ecriture.get("credit", 0)
+                    if isinstance(debit, (int, float)) and isinstance(credit, (int, float)):
+                        if debit > 0 and credit > 0:
+                            ecritures_debit_credit += 1
+                            parse_log.warning(
+                                i, "debit_credit",
+                                f"Debit ({debit}) et credit ({credit}) non nuls simultanément"
+                            )
+
+                    # Verifier la sequence des numeros d'ecriture
+                    ecriture_num = ecriture.get("ecriture_num", "")
+                    if (ecriture_num and dernier_ecriture_num
+                            and ecriture_num < dernier_ecriture_num
+                            and ecriture.get("journal_code") == ecritures_fec[-1].get("journal_code", "") if ecritures_fec else False):
+                        parse_log.warning(
+                            i, "sequence",
+                            f"Numero d'ecriture non sequentiel: {ecriture_num} apres {dernier_ecriture_num}"
+                        )
+                    dernier_ecriture_num = ecriture_num
+
                     ecritures_fec.append(ecriture)
             except Exception as e:
                 erreurs.append(f"Ligne {i}: {e}")
+                parse_log.error(i, "parsing", str(e))
 
-        # Convertir en Declaration(s) — regrouper par journal
+        # Convertir en Declaration(s)
         cotisations = []
         journaux_vus = set()
         comptes_vus = set()
+        comptes_sociaux = {}
         total_debit = Decimal("0")
         total_credit = Decimal("0")
 
+        # Equilibre par ecriture (groupe de lignes ayant le meme EcritureNum)
+        ecritures_desequilibrees = 0
+        ecriture_groupes = {}
+        for ec in ecritures_fec:
+            num = ec.get("ecriture_num", "")
+            if num not in ecriture_groupes:
+                ecriture_groupes[num] = {"debit": Decimal("0"), "credit": Decimal("0")}
+            ecriture_groupes[num]["debit"] += Decimal(str(ec.get("debit", 0)))
+            ecriture_groupes[num]["credit"] += Decimal(str(ec.get("credit", 0)))
+
+        for num, totaux in ecriture_groupes.items():
+            ecart = abs(totaux["debit"] - totaux["credit"])
+            if ecart > Decimal("0.01"):
+                ecritures_desequilibrees += 1
+
         for ec in ecritures_fec:
             journaux_vus.add(ec.get("journal_code", ""))
-            comptes_vus.add(ec.get("compte_num", ""))
-            debit = ec.get("debit", Decimal("0"))
-            credit = ec.get("credit", Decimal("0"))
+            compte = ec.get("compte_num", "")
+            comptes_vus.add(compte)
+
+            debit = Decimal(str(ec.get("debit", 0)))
+            credit = Decimal(str(ec.get("credit", 0)))
             total_debit += debit
             total_credit += credit
 
-            # Creer une Cotisation synthétique pour chaque ligne FEC
+            # Identifier les comptes sociaux (classe 43x)
+            if compte.startswith("43"):
+                if compte not in comptes_sociaux:
+                    comptes_sociaux[compte] = {
+                        "libelle": ec.get("compte_lib", ""),
+                        "total_debit": 0.0,
+                        "total_credit": 0.0,
+                    }
+                comptes_sociaux[compte]["total_debit"] += float(debit)
+                comptes_sociaux[compte]["total_credit"] += float(credit)
+
             cot = Cotisation(source_document_id=document.id)
             cot.base_brute = debit if debit > 0 else credit
             cot.assiette = cot.base_brute
@@ -258,21 +343,36 @@ class FECParser(BaseParser):
             "total_debit": float(total_debit),
             "total_credit": float(total_credit),
             "equilibre": abs(total_debit - total_credit) < Decimal("0.01"),
+            "ecart_global": float(abs(total_debit - total_credit)),
+            "ecritures_desequilibrees": ecritures_desequilibrees,
+            "ecritures_sans_date": ecritures_sans_date,
+            "ecritures_debit_credit_simultanes": ecritures_debit_credit,
+            "comptes_invalides": list(comptes_invalides)[:20],
             "colonnes_conformes": conformite["conformes"],
             "colonnes_manquantes": conformite["manquantes"],
-            "erreurs_parsing": erreurs[:20],  # limiter
+            "taux_conformite": conformite["taux_conformite"],
+            "erreurs_parsing": erreurs[:50],
             "ecritures_fec": ecritures_fec,
         })
+
+        # Ajouter les comptes sociaux identifies
+        if comptes_sociaux:
+            declaration.metadata["comptes_sociaux"] = comptes_sociaux
+
+        if parse_log.has_errors or parse_log.warnings:
+            declaration.metadata["parse_log"] = parse_log.to_dict()
 
         return [declaration]
 
     def _lire_fichier(self, chemin: Path) -> str:
-        try:
-            with open(chemin, "r", encoding="utf-8-sig") as f:
-                return f.read()
-        except UnicodeDecodeError:
-            with open(chemin, "r", encoding="latin-1") as f:
-                return f.read()
+        """Lit le FEC avec detection d'encodage (SAGE=cp1252, CIEL=iso-8859-1, etc.)."""
+        for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1", "iso-8859-15", "latin-1"):
+            try:
+                with open(chemin, "r", encoding=enc) as f:
+                    return f.read()
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        raise ParseError(f"Impossible de decoder le fichier FEC: {chemin}")
 
     @staticmethod
     def _detecter_separateur(premiere_ligne: str) -> str:
