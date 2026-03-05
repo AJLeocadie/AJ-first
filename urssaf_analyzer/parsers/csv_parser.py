@@ -1,7 +1,25 @@
-"""Parseur pour les fichiers CSV (exports comptables, listes de salaries, etc.)."""
+"""Parseur pour les fichiers CSV (exports comptables, listes de salaries, etc.).
+
+Compatible avec les exports des logiciels de paie majeurs :
+- SAGE Paie / SAGE Comptabilite (CSV point-virgule, encoding Windows-1252)
+- CIEL Paie / CIEL Compta (CSV point-virgule, ISO-8859-1)
+- EBP Paie (CSV point-virgule ou tabulation)
+- ADP (CSV virgule, UTF-8 avec BOM)
+- Silae (CSV point-virgule, UTF-8)
+- PayFit (CSV point-virgule, UTF-8)
+- CEGID (CSV point-virgule ou pipe)
+- Quadratus (CSV point-virgule)
+
+Formats institutionnels :
+- URSSAF (bordereaux recapitulatifs CSV)
+- France Travail (attestations employeur CSV)
+- CARSAT (releves de cotisations)
+- DGFIP (exports fiscaux)
+"""
 
 import csv
 import io
+import logging
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -13,7 +31,15 @@ from urssaf_analyzer.models.documents import (
 from urssaf_analyzer.config.constants import ContributionType
 from urssaf_analyzer.parsers.base_parser import BaseParser
 from urssaf_analyzer.utils.date_utils import parser_date
-from urssaf_analyzer.utils.number_utils import parser_montant
+from urssaf_analyzer.utils.number_utils import parser_montant, valider_siret, valider_siren
+from urssaf_analyzer.utils.validators import (
+    valider_nir, valider_montant, valider_taux, valider_base_brute, ParseLog,
+)
+
+logger = logging.getLogger(__name__)
+
+# Encodages a tester dans l'ordre (couvrent SAGE/CIEL/EBP/ADP/etc.)
+_ENCODAGES = ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1", "iso-8859-15", "latin-1")
 
 
 # Mapping flexible des noms de colonnes vers les champs internes
@@ -141,6 +167,77 @@ COLONNES_MAPPING = {
     # Employeur
     "siret": "siret", "siren": "siren", "raison_sociale": "raison_sociale",
     "entreprise": "raison_sociale", "societe": "raison_sociale",
+    "nom_entreprise": "raison_sociale", "employeur": "raison_sociale",
+    # Formats SAGE specifiques
+    "code_journal": "code_journal", "journal": "code_journal",
+    "n_compte": "compte", "numero_compte": "compte", "compte": "compte",
+    "debit": "debit", "credit": "credit",
+    "piece": "piece", "ref_piece": "piece", "no_piece": "piece",
+    "date_ecriture": "date_piece", "date_comptable": "date_piece",
+    # Formats URSSAF/institutions
+    "code_ctp": "code_ctp", "ctp": "code_ctp",
+    "code_type_personnel": "code_ctp",
+    "effectif": "effectif", "nb_salaries": "effectif",
+    "trimestre": "trimestre", "annee": "annee",
+    # DPAE / France Travail
+    "date_embauche": "date_embauche", "date_debut_contrat": "date_embauche",
+    "type_contrat": "type_contrat", "nature_contrat": "type_contrat",
+    "motif_rupture": "motif_rupture", "motif_fin": "motif_rupture",
+    "duree_emploi": "duree_emploi",
+    "salaire_journalier": "salaire_journalier",
+    "salaire_reference": "salaire_reference",
+    # Attestation employeur
+    "dernier_jour_travaille": "dernier_jour_travaille",
+    "date_fin_contrat": "date_fin_contrat",
+    "indemnite_licenciement": "indemnite_licenciement",
+    "indemnite_cp": "indemnite_cp",
+    # CARSAT
+    "trimestres_valides": "trimestres_valides",
+    "points_retraite": "points_retraite",
+}
+
+# Mapping des separateurs par logiciel detecte
+_LOGICIEL_SIGNATURES = {
+    "sage": {
+        "colonnes": ["code_journal", "journal", "n_compte", "piece"],
+        "separateurs": [";", "\t"],
+        "encodages": ["cp1252", "iso-8859-1"],
+    },
+    "ciel": {
+        "colonnes": ["journal", "n_compte", "piece", "debit", "credit"],
+        "separateurs": [";"],
+        "encodages": ["iso-8859-1", "cp1252"],
+    },
+    "ebp": {
+        "colonnes": ["code_employe", "ref_employe", "nom_collaborateur"],
+        "separateurs": [";", "\t"],
+        "encodages": ["cp1252", "utf-8-sig"],
+    },
+    "adp": {
+        "colonnes": ["employee_id", "last_name", "first_name", "gross_pay"],
+        "separateurs": [",", ";"],
+        "encodages": ["utf-8", "utf-8-sig"],
+    },
+    "silae": {
+        "colonnes": ["identite_salarie", "numero_salarie", "identifiant"],
+        "separateurs": [";"],
+        "encodages": ["utf-8", "cp1252"],
+    },
+    "cegid": {
+        "colonnes": ["libelle_salarie", "code_salarie"],
+        "separateurs": [";", "|"],
+        "encodages": ["utf-8", "cp1252"],
+    },
+    "payfit": {
+        "colonnes": ["collaborateur_nom", "collaborateur_prenom", "salaire_brut_mensuel"],
+        "separateurs": [";"],
+        "encodages": ["utf-8"],
+    },
+    "quadratus": {
+        "colonnes": ["code_journal", "numero_compte"],
+        "separateurs": [";"],
+        "encodages": ["cp1252"],
+    },
 }
 
 # Mots-cles pour detection du type de document CSV
@@ -151,6 +248,12 @@ _CSV_TYPE_KEYWORDS = {
     "facture": ["ht", "tva", "ttc", "fournisseur", "client", "facture"],
     "declaration_dsn": ["nir", "ctp", "code_type_personnel"],
     "grand_livre": ["compte", "debit", "credit", "journal"],
+    "bordereau_urssaf": ["ctp", "effectif", "code_type_personnel", "base", "cotisation"],
+    "attestation_employeur": ["dernier_jour_travaille", "motif_rupture", "salaire_reference"],
+    "dpae": ["date_embauche", "type_contrat", "nir", "siret"],
+    "releve_cotisations": ["trimestre", "cotisation", "base", "taux", "montant"],
+    "export_comptable_sage": ["code_journal", "n_compte", "debit", "credit", "piece"],
+    "export_comptable_ciel": ["journal", "compte", "debit", "credit"],
 }
 
 
@@ -188,27 +291,27 @@ class CSVParser(BaseParser):
         return metadata
 
     def parser(self, chemin: Path, document: Document) -> list[Declaration]:
-        try:
-            with open(chemin, "r", encoding="utf-8-sig") as f:
-                contenu = f.read()
-        except UnicodeDecodeError:
-            with open(chemin, "r", encoding="latin-1") as f:
-                contenu = f.read()
+        parse_log = ParseLog("CSVParser", str(chemin))
 
-        try:
-            dialect = csv.Sniffer().sniff(contenu[:4096])
-        except csv.Error:
-            # Detecter manuellement le separateur
-            # NB: ne PAS muter csv.excel (singleton global), creer un dialect local
-            first_line = contenu.split("\n", 1)[0]
-            if ";" in first_line:
-                class _SemicolonDialect(csv.excel):
-                    delimiter = ";"
-                dialect = _SemicolonDialect()
-            elif "\t" in first_line:
-                dialect = csv.excel_tab
-            else:
-                dialect = csv.excel
+        # Detection d'encodage robuste (couvre SAGE/CIEL/EBP/ADP/etc.)
+        contenu = None
+        encodage_utilise = None
+        for enc in _ENCODAGES:
+            try:
+                with open(chemin, "r", encoding=enc) as f:
+                    contenu = f.read()
+                encodage_utilise = enc
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        if contenu is None:
+            raise ParseError(f"Impossible de decoder le fichier CSV {chemin} "
+                             f"(encodages testes: {', '.join(_ENCODAGES)})")
+        parse_log.info(f"Encodage detecte: {encodage_utilise}")
+
+        # Detection du separateur (robuste pour tous les logiciels)
+        dialect = self._detecter_dialect(contenu)
+        parse_log.info(f"Separateur detecte: {repr(dialect.delimiter)}")
 
         reader = csv.DictReader(io.StringIO(contenu), dialect=dialect)
 
@@ -218,13 +321,21 @@ class CSVParser(BaseParser):
         # Normaliser les noms de colonnes
         col_map = {}
         for col in reader.fieldnames:
-            col_lower = col.strip().lower().replace(" ", "_")
+            col_lower = col.strip().lower().replace(" ", "_").replace("-", "_")
+            # Retirer accents pour matching
+            for a, b in [("é", "e"), ("è", "e"), ("ê", "e"), ("ë", "e"),
+                          ("à", "a"), ("â", "a"), ("ô", "o"), ("î", "i"),
+                          ("ù", "u"), ("û", "u"), ("ç", "c"), ("ï", "i")]:
+                col_lower = col_lower.replace(a, b)
             if col_lower in COLONNES_MAPPING:
                 col_map[col] = COLONNES_MAPPING[col_lower]
 
+        # Detecter le logiciel source
+        logiciel_detecte = self._detecter_logiciel(reader.fieldnames)
+        parse_log.info(f"Logiciel detecte: {logiciel_detecte or 'generique'}")
+
         cotisations = []
         employes_vus = {}
-        employes_sans_nir = []
 
         # Detecter si format recapitulatif (1 ligne = 1 salarie)
         mapped_fields = set(col_map.values())
@@ -234,10 +345,11 @@ class CSVParser(BaseParser):
             and "type_cotisation" not in mapped_fields
         )
 
+        lignes_en_erreur = 0
         for i, row in enumerate(reader, start=2):
             try:
                 # Extraire l'employe si present
-                employe = self._extraire_employe(row, col_map, document.id)
+                employe = self._extraire_employe(row, col_map, document.id, parse_log, i)
                 emp_id = None
                 if employe:
                     # Cle unique: NIR si disponible, sinon nom
@@ -252,14 +364,19 @@ class CSVParser(BaseParser):
                     )
                     cotisations.extend(cots)
                 else:
-                    cotisation = self._parser_ligne(row, col_map, document.id, i)
+                    cotisation = self._parser_ligne(row, col_map, document.id, i, parse_log)
                     if cotisation:
                         if emp_id:
                             cotisation.employe_id = emp_id
                         cotisations.append(cotisation)
 
-            except Exception:
-                continue  # Ligne mal formee, on continue
+            except Exception as e:
+                lignes_en_erreur += 1
+                parse_log.error(i, "ligne", f"Erreur de parsing: {e}")
+                if lignes_en_erreur > 100:
+                    parse_log.error(i, "fichier", "Trop d'erreurs, arret du parsing")
+                    break
+                continue
 
         # Detecter le type de document a partir des colonnes
         type_document = self._detecter_type_document(reader.fieldnames, col_map)
@@ -298,6 +415,10 @@ class CSVParser(BaseParser):
         declaration.metadata["type_document"] = type_document
         declaration.metadata["colonnes_detectees"] = list(col_map.values())
         declaration.metadata["nb_lignes_parsees"] = len(cotisations)
+        declaration.metadata["encodage"] = encodage_utilise
+        declaration.metadata["separateur"] = repr(dialect.delimiter)
+        if logiciel_detecte:
+            declaration.metadata["logiciel_source"] = logiciel_detecte
         if est_recapitulatif:
             declaration.metadata["format_recapitulatif"] = True
         if ccn_detectee:
@@ -306,6 +427,8 @@ class CSVParser(BaseParser):
             declaration.metadata["idcc"] = idcc_detecte
         if naf_detecte:
             declaration.metadata["code_naf"] = naf_detecte
+        if parse_log.has_errors or parse_log.warnings:
+            declaration.metadata["parse_log"] = parse_log.to_dict()
 
         if cotisations:
             declaration.masse_salariale_brute = sum(
@@ -337,7 +460,8 @@ class CSVParser(BaseParser):
         return best_type if best_score >= 2 else "document_comptable"
 
     def _parser_ligne(
-        self, row: dict, col_map: dict, doc_id: str, ligne: int
+        self, row: dict, col_map: dict, doc_id: str, ligne: int,
+        parse_log: ParseLog | None = None,
     ) -> Cotisation | None:
         """Parse une ligne du CSV en Cotisation."""
         mapped = {}
@@ -357,20 +481,29 @@ class CSVParser(BaseParser):
         if "base_brute" in mapped:
             cotisation.base_brute = parser_montant(mapped["base_brute"])
             cotisation.assiette = cotisation.base_brute
+            # Valider la base brute
+            v = valider_base_brute(cotisation.base_brute)
+            if not v.valide and parse_log:
+                parse_log.warning(ligne, "base_brute", v.message, mapped["base_brute"])
 
         if "assiette" in mapped:
             cotisation.assiette = parser_montant(mapped["assiette"])
 
         if "taux_patronal" in mapped:
             cotisation.taux_patronal = parser_montant(mapped["taux_patronal"])
-            # Convertir en pourcentage si > 1
-            if cotisation.taux_patronal > 1:
-                cotisation.taux_patronal = cotisation.taux_patronal / 100
+            v = valider_taux(cotisation.taux_patronal, "taux_patronal")
+            if v.valide and cotisation.taux_patronal > 1:
+                cotisation.taux_patronal = Decimal(v.valeur_corrigee)
+            elif not v.valide and parse_log:
+                parse_log.warning(ligne, "taux_patronal", v.message, mapped["taux_patronal"])
 
         if "taux_salarial" in mapped:
             cotisation.taux_salarial = parser_montant(mapped["taux_salarial"])
-            if cotisation.taux_salarial > 1:
-                cotisation.taux_salarial = cotisation.taux_salarial / 100
+            v = valider_taux(cotisation.taux_salarial, "taux_salarial")
+            if v.valide and cotisation.taux_salarial > 1:
+                cotisation.taux_salarial = Decimal(v.valeur_corrigee)
+            elif not v.valide and parse_log:
+                parse_log.warning(ligne, "taux_salarial", v.message, mapped["taux_salarial"])
 
         if "montant_patronal" in mapped:
             cotisation.montant_patronal = parser_montant(mapped["montant_patronal"])
@@ -396,6 +529,18 @@ class CSVParser(BaseParser):
             fin = parser_date(mapped["periode_fin"])
             if debut and fin:
                 cotisation.periode = DateRange(debut=debut, fin=fin)
+
+        # Coherence: verifier que montant ≈ base * taux
+        if (cotisation.base_brute > 0 and cotisation.taux_patronal > 0
+                and cotisation.montant_patronal > 0):
+            montant_calcule = cotisation.base_brute * cotisation.taux_patronal
+            ecart = abs(cotisation.montant_patronal - montant_calcule)
+            if ecart > Decimal("1") and parse_log:  # Tolerence 1 EUR (arrondis)
+                parse_log.warning(
+                    ligne, "coherence",
+                    f"Ecart montant patronal: declare={cotisation.montant_patronal}, "
+                    f"calcule={montant_calcule:.2f} (base={cotisation.base_brute} * taux={cotisation.taux_patronal})"
+                )
 
         return cotisation
 
@@ -465,7 +610,8 @@ class CSVParser(BaseParser):
         return cotisations
 
     def _extraire_employe(
-        self, row: dict, col_map: dict, doc_id: str
+        self, row: dict, col_map: dict, doc_id: str,
+        parse_log: ParseLog | None = None, ligne: int = 0,
     ) -> Employe | None:
         mapped = {}
         for col_csv, champ in col_map.items():
@@ -475,6 +621,15 @@ class CSVParser(BaseParser):
 
         if not mapped.get("nir") and not mapped.get("nom"):
             return None
+
+        # Valider le NIR si present
+        nir_raw = mapped.get("nir", "")
+        if nir_raw:
+            v = valider_nir(nir_raw)
+            if not v.valide and parse_log:
+                parse_log.warning(ligne, "nir", v.message, nir_raw)
+            elif v.valide:
+                mapped["nir"] = v.valeur_corrigee
 
         nom = mapped.get("nom", "")
         prenom = mapped.get("prenom", "")
@@ -501,6 +656,46 @@ class CSVParser(BaseParser):
             statut=mapped.get("statut", ""),
             source_document_id=doc_id,
         )
+
+    @staticmethod
+    def _detecter_dialect(contenu: str) -> csv.Dialect:
+        """Detecte le dialect CSV avec support robuste de tous les separateurs."""
+        try:
+            dialect = csv.Sniffer().sniff(contenu[:4096])
+            return dialect
+        except csv.Error:
+            pass
+
+        first_line = contenu.split("\n", 1)[0]
+
+        # Compter les occurrences de chaque separateur potentiel
+        counts = {
+            ";": first_line.count(";"),
+            "\t": first_line.count("\t"),
+            ",": first_line.count(","),
+            "|": first_line.count("|"),
+        }
+
+        # Prendre le separateur le plus frequent (minimum 1 occurrence)
+        best_sep = max(counts, key=counts.get)
+        if counts[best_sep] == 0:
+            best_sep = ","  # fallback
+
+        class _DetectedDialect(csv.excel):
+            delimiter = best_sep
+        return _DetectedDialect()
+
+    @staticmethod
+    def _detecter_logiciel(fieldnames: list[str]) -> str | None:
+        """Detecte le logiciel source a partir des noms de colonnes."""
+        if not fieldnames:
+            return None
+        headers_lower = {h.strip().lower().replace(" ", "_") for h in fieldnames}
+        for logiciel, sig in _LOGICIEL_SIGNATURES.items():
+            matches = sum(1 for kw in sig["colonnes"] if kw in headers_lower)
+            if matches >= 2:
+                return logiciel
+        return None
 
     @staticmethod
     def _mapper_type_cotisation(valeur: str) -> ContributionType:

@@ -11,12 +11,19 @@ La DSN est un fichier structure (texte ou XML) avec des blocs :
 - S44 : Arret de travail
 - S48 : Versement OPS (cotisations individuelles)
 - S51 : Remuneration
+- S60 : Fin de contrat (signalement)
+- S65 : Autre suspension (conge maternite, paternite, etc.)
+- S70 : Changement de situation
 - S78 : Base assujettie (detaillee)
 - S79 : Composant de base assujettie
 - S81 : Cotisation individuelle
 - S89 : Total versement OPS
+
+Compatible NEODeS Phase 3 (norme en vigueur 2024-2026).
+Supporte les fichiers generes par SAGE, CIEL, EBP, ADP, Silae, CEGID, PayFit.
 """
 
+import logging
 import re
 from decimal import Decimal
 from datetime import date
@@ -31,56 +38,140 @@ from urssaf_analyzer.models.documents import (
 from urssaf_analyzer.config.constants import ContributionType
 from urssaf_analyzer.parsers.base_parser import BaseParser
 from urssaf_analyzer.utils.date_utils import parser_date
-from urssaf_analyzer.utils.number_utils import parser_montant
+from urssaf_analyzer.utils.number_utils import parser_montant, valider_siret, valider_siren
+from urssaf_analyzer.utils.validators import valider_nir, valider_bloc_dsn, ParseLog
+
+logger = logging.getLogger(__name__)
 
 
 # Mapping des codes DSN vers les types de cotisations
-# Codes CTP (Codes Types de Personnel) les plus courants
+# Codes CTP (Codes Types de Personnel) - couverture etendue NEODeS Phase 3
 CTP_MAPPING = {
     # Maladie / Maternite / Invalidite / Deces
     "100": ContributionType.MALADIE,                    # RG cas general
+    "101": ContributionType.MALADIE,                    # RG cas general - complement
     "110": ContributionType.MALADIE,                    # Maladie Alsace-Moselle
+    "112": ContributionType.MALADIE,                    # Maladie complementaire Alsace-Moselle
+    "114": ContributionType.MALADIE,                    # Maladie deplafonnee (complement)
+    "120": ContributionType.MALADIE,                    # IJ maladie
     "430": ContributionType.MALADIE,                    # Maladie artistes
+    "432": ContributionType.MALADIE,                    # Maladie artistes complement
     # Vieillesse
     "260": ContributionType.VIEILLESSE_PLAFONNEE,       # Vieillesse plafonnee
+    "261": ContributionType.VIEILLESSE_PLAFONNEE,       # Vieillesse plafonnee complement
     "262": ContributionType.VIEILLESSE_DEPLAFONNEE,     # Vieillesse deplafonnee
+    "263": ContributionType.VIEILLESSE_DEPLAFONNEE,     # Vieillesse deplafonnee complement
+    "280": ContributionType.VIEILLESSE_PLAFONNEE,       # Vieillesse plaf. fonctionnaire
+    "282": ContributionType.VIEILLESSE_DEPLAFONNEE,     # Vieillesse deplaf. fonctionnaire
     # Allocations familiales
-    "332": ContributionType.ALLOCATIONS_FAMILIALES,     # Alloc. familiales
-    "430": ContributionType.ALLOCATIONS_FAMILIALES,     # AF taux reduit
+    "332": ContributionType.ALLOCATIONS_FAMILIALES,     # Alloc. familiales taux normal
+    "334": ContributionType.ALLOCATIONS_FAMILIALES,     # AF taux reduit (< 3.5 SMIC)
+    "336": ContributionType.ALLOCATIONS_FAMILIALES,     # AF employeur etranger
     # AT/MP
-    "452": ContributionType.ACCIDENT_TRAVAIL,           # AT/MP
+    "452": ContributionType.ACCIDENT_TRAVAIL,           # AT/MP taux bureau
+    "454": ContributionType.ACCIDENT_TRAVAIL,           # AT/MP taux atelier
+    "456": ContributionType.ACCIDENT_TRAVAIL,           # AT/MP taux specifique
+    "458": ContributionType.ACCIDENT_TRAVAIL,           # AT/MP taux collectivites
     # CSG / CRDS
-    "012": ContributionType.CSG_DEDUCTIBLE,             # CSG deductible
-    "018": ContributionType.CRDS,                       # CRDS
     "004": ContributionType.CSG_NON_DEDUCTIBLE,         # CSG non deductible
+    "012": ContributionType.CSG_DEDUCTIBLE,             # CSG deductible
+    "014": ContributionType.CSG_DEDUCTIBLE,             # CSG deductible - revenus remplacement
+    "018": ContributionType.CRDS,                       # CRDS
     # Chomage / AGS
-    "772": ContributionType.ASSURANCE_CHOMAGE,          # Chomage
+    "772": ContributionType.ASSURANCE_CHOMAGE,          # Chomage cas general
+    "774": ContributionType.ASSURANCE_CHOMAGE,          # Chomage CDD usage
+    "776": ContributionType.ASSURANCE_CHOMAGE,          # Chomage intermittents
     "937": ContributionType.AGS,                        # AGS
+    "938": ContributionType.AGS,                        # AGS complement
     # FNAL
-    "236": ContributionType.FNAL,                       # FNAL <= 50 salaries
-    "238": ContributionType.FNAL,                       # FNAL > 50 salaries
+    "236": ContributionType.FNAL,                       # FNAL <= 50 salaries (0.10%)
+    "238": ContributionType.FNAL,                       # FNAL > 50 salaries (0.50%)
     # Formation professionnelle / Apprentissage
-    "971": ContributionType.FORMATION_PROFESSIONNELLE,  # Formation pro
-    "951": ContributionType.TAXE_APPRENTISSAGE,         # Taxe apprentissage
+    "971": ContributionType.FORMATION_PROFESSIONNELLE,  # Formation pro < 11 sal (0.55%)
+    "973": ContributionType.FORMATION_PROFESSIONNELLE,  # Formation pro >= 11 sal (1%)
+    "975": ContributionType.FORMATION_PROFESSIONNELLE,  # Formation pro CDD (1%)
+    "951": ContributionType.TAXE_APPRENTISSAGE,         # Taxe apprentissage (0.68%)
+    "953": ContributionType.TAXE_APPRENTISSAGE,         # TA fraction principale
+    "955": ContributionType.TAXE_APPRENTISSAGE,         # TA solde liberatoire
+    "957": ContributionType.TAXE_APPRENTISSAGE,         # TA Alsace-Moselle
     "959": ContributionType.TAXE_APPRENTISSAGE,         # Contribution suppl. apprentissage
-    # Retraite complementaire
-    "063": ContributionType.RETRAITE_COMPLEMENTAIRE_T1, # Agirc-Arrco T1
-    "065": ContributionType.RETRAITE_COMPLEMENTAIRE_T2, # Agirc-Arrco T2
+    # Retraite complementaire AGIRC-ARRCO
+    "063": ContributionType.RETRAITE_COMPLEMENTAIRE_T1, # Agirc-Arrco T1 taux appel
+    "064": ContributionType.RETRAITE_COMPLEMENTAIRE_T1, # Agirc-Arrco T1 complement
+    "065": ContributionType.RETRAITE_COMPLEMENTAIRE_T2, # Agirc-Arrco T2 taux appel
+    "066": ContributionType.RETRAITE_COMPLEMENTAIRE_T2, # Agirc-Arrco T2 complement
     # CEG / CET
     "067": ContributionType.CEG_T1,                     # CEG T1
+    "068": ContributionType.CEG_T1,                     # CEG T1 complement
     "069": ContributionType.CEG_T2,                     # CEG T2
+    "070": ContributionType.CEG_T2,                     # CEG T2 complement
     "071": ContributionType.CET,                        # CET
+    "072": ContributionType.CET,                        # CET complement
     # APEC
     "073": ContributionType.APEC,                       # APEC cadres
+    "074": ContributionType.APEC,                       # APEC complement
     # Prevoyance / Mutuelle
-    "090": ContributionType.PREVOYANCE_CADRE,           # Prevoyance cadres
+    "090": ContributionType.PREVOYANCE_CADRE,           # Prevoyance cadres (art. 7)
+    "091": ContributionType.PREVOYANCE_CADRE,           # Prevoyance cadres complement
     "092": ContributionType.PREVOYANCE_NON_CADRE,       # Prevoyance non-cadres
-    "094": ContributionType.MUTUELLE_OBLIGATOIRE,       # Complementaire sante
+    "093": ContributionType.PREVOYANCE_NON_CADRE,       # Prevoyance non-cadres complement
+    "094": ContributionType.MUTUELLE_OBLIGATOIRE,       # Complementaire sante ANI
+    "095": ContributionType.MUTUELLE_OBLIGATOIRE,       # Complementaire sante complement
     # Transport
-    "900": ContributionType.VERSEMENT_MOBILITE,        # Versement mobilite
+    "900": ContributionType.VERSEMENT_MOBILITE,         # Versement mobilite
+    "901": ContributionType.VERSEMENT_MOBILITE,         # Versement mobilite additionnel
     # Reduction / Exonerations
-    "668": ContributionType.LOI_FILLON,         # Reduction Fillon
-    "671": ContributionType.LOI_FILLON,         # Reduction generale
+    "668": ContributionType.LOI_FILLON,                 # Reduction Fillon (ancienne)
+    "671": ContributionType.LOI_FILLON,                 # Reduction generale
+    "673": ContributionType.LOI_FILLON,                 # Red. generale complement
+    # Contribution Dialogue Social
+    "027": ContributionType.MALADIE,                    # Contrib. Dialogue Social
+    # Penibilite / C2P (Compte Professionnel de Prevention)
+    "085": ContributionType.MALADIE,                    # Penibilite mono-exposition
+    "087": ContributionType.MALADIE,                    # Penibilite poly-exposition
+    # GUSO (Guichet Unique du Spectacle Occasionnel)
+    "810": ContributionType.MALADIE,                    # GUSO maladie
+    "812": ContributionType.VIEILLESSE_PLAFONNEE,       # GUSO vieillesse
+    "815": ContributionType.ASSURANCE_CHOMAGE,          # GUSO chomage
+    # Artistes / Intermittents
+    "750": ContributionType.ASSURANCE_CHOMAGE,          # Chomage intermittents
+    "752": ContributionType.MALADIE,                    # Conges spectacles
+}
+
+# Motifs d'arret de travail (S44.G00.44.002)
+MOTIFS_ARRET = {
+    "01": "maladie",
+    "02": "maternite",
+    "03": "paternite",
+    "04": "accident_travail",
+    "05": "maladie_professionnelle",
+    "06": "temps_partiel_therapeutique",
+    "07": "conge_proche_aidant",
+}
+
+# Nature du contrat (S21.G00.40.007)
+NATURES_CONTRAT = {
+    "01": "CDI",
+    "02": "CDD",
+    "03": "Contrat de mission (interim)",
+    "04": "Contrat d'apprentissage",
+    "05": "Contrat initiative emploi (CUI-CIE)",
+    "07": "Contrat accompagnement dans l'emploi (CUI-CAE)",
+    "08": "Contrat d'acces a l'emploi DOM",
+    "09": "Contrat a duree indeterminee intermittent",
+    "10": "Contrat de professionnalisation",
+    "29": "Convention de stage",
+    "32": "Contrat avenir",
+    "50": "CDI intérimaire",
+    "60": "Contrat de mission engagement volontaire",
+    "70": "CDI de chantier",
+    "80": "Mandat social",
+    "81": "Mandat d'elu",
+    "82": "Contrat de soutien et d'aide par le travail (ESAT)",
+    "89": "VRP multicartes",
+    "91": "CDD senior",
+    "92": "CDD a objet defini",
+    "93": "CDI de projet",
 }
 
 # Pattern pour les lignes DSN en format texte structure
@@ -132,7 +223,7 @@ class DSNParser(BaseParser):
 
     def _lire_fichier(self, chemin: Path) -> str:
         """Lit le fichier DSN avec detection d'encodage."""
-        for encoding in ("utf-8", "latin-1", "cp1252"):
+        for encoding in ("utf-8", "utf-8-sig", "cp1252", "iso-8859-1", "iso-8859-15", "latin-1"):
             try:
                 with open(chemin, "r", encoding=encoding) as f:
                     return f.read()
@@ -142,6 +233,7 @@ class DSNParser(BaseParser):
 
     def _parser_dsn_texte(self, contenu: str, doc_id: str) -> list[Declaration]:
         """Parse un fichier DSN au format texte structure."""
+        parse_log = ParseLog("DSNParser", doc_id)
         donnees = {}
         for match in DSN_LINE_PATTERN.finditer(contenu):
             bloc = match.group(1)
@@ -154,11 +246,23 @@ class DSNParser(BaseParser):
                 donnees[cle] = []
             donnees[cle].append(valeur)
 
+        if not donnees:
+            raise ParseError("Aucun bloc DSN detecte dans le fichier")
+
+        # Valider les donnees critiques
+        self._valider_donnees_dsn(donnees, parse_log)
+
         # Extraire les informations de la declaration
-        employeur = self._extraire_employeur_texte(donnees, doc_id)
-        employes = self._extraire_employes_texte(donnees, doc_id)
+        employeur = self._extraire_employeur_texte(donnees, doc_id, parse_log)
+        employes = self._extraire_employes_texte(donnees, doc_id, parse_log)
         cotisations = self._extraire_cotisations_texte(donnees, doc_id)
         periode = self._extraire_periode_texte(donnees)
+
+        # Extraire les arrets de travail (S44)
+        arrets = self._extraire_arrets_travail(donnees)
+
+        # Extraire les contrats (S40)
+        contrats = self._extraire_contrats(donnees)
 
         declaration = Declaration(
             type_declaration="DSN",
@@ -182,25 +286,26 @@ class DSNParser(BaseParser):
             declaration.masse_salariale_brute = total
 
         # Extraire CCN/IDCC et code NAF depuis les blocs DSN
-        # S21.G00.40.017 = IDCC du contrat
         idcc_vals = donnees.get("S21.G00.40.017", [])
         idcc_detecte = idcc_vals[0] if idcc_vals else ""
-        # S21.G00.06.005 = Code APE/NAF de l'etablissement
         naf_val = self._get_val(donnees, "S21.G00.06.005")
         if not naf_val:
-            # Fallback: S20.G00.05.003 = Code APE entreprise
             naf_val = self._get_val(donnees, "S20.G00.05.003")
 
         if employeur and naf_val:
             employeur.code_naf = naf_val
 
-        # Ajouter type_document pour reconnaissance
+        # Ajouter metadata
         declaration.metadata = getattr(declaration, "metadata", {}) or {}
         declaration.metadata["type_document"] = "declaration_dsn"
         if idcc_detecte:
             declaration.metadata["idcc"] = idcc_detecte
         if naf_val:
             declaration.metadata["code_naf"] = naf_val
+        if arrets:
+            declaration.metadata["arrets_travail"] = arrets
+        if contrats:
+            declaration.metadata["contrats"] = contrats
 
         # S89 - Total versement OPS (totaux declares)
         s89_totaux = self._extraire_totaux_s89(donnees)
@@ -209,53 +314,95 @@ class DSNParser(BaseParser):
             declaration.metadata["s89_total_cotisations"] = float(s89_totaux.get("total_cotisations", 0))
             declaration.metadata["s89_total_brut"] = float(s89_totaux.get("total_brut", 0))
 
+            # Reconciliation S89 vs S81
+            if cotisations:
+                total_s81 = sum(float(c.montant_patronal) for c in cotisations)
+                ecart = abs(total_s81 - s89_totaux["total_cotisations"])
+                declaration.metadata["s89_reconciliation"] = {
+                    "total_s81": round(total_s81, 2),
+                    "total_s89": s89_totaux["total_cotisations"],
+                    "ecart": round(ecart, 2),
+                    "reconcilie": ecart < 1.0,  # Tolerance 1 EUR
+                }
+                if ecart >= 1.0:
+                    parse_log.warning(0, "s89", f"Ecart S89/S81: {ecart:.2f} EUR")
+
+        # Compter les blocs presents
+        blocs_presents = set()
+        for cle in donnees:
+            blocs_presents.add(cle[:3])
+        declaration.metadata["blocs_presents"] = sorted(blocs_presents)
+
+        if parse_log.has_errors or parse_log.warnings:
+            declaration.metadata["parse_log"] = parse_log.to_dict()
+
         return [declaration]
 
-    def _extraire_employeur_texte(self, donnees: dict, doc_id: str) -> Employeur | None:
+    def _valider_donnees_dsn(self, donnees: dict, parse_log: ParseLog) -> None:
+        """Valide les donnees critiques de la DSN."""
+        # Valider SIREN
+        siren = self._get_val(donnees, "S20.G00.05.001")
+        if siren:
+            if not valider_siren(siren):
+                parse_log.warning(0, "siren", f"SIREN invalide (Luhn): {siren}")
+
+        # Valider SIRET
+        siret = self._get_val(donnees, "S21.G00.06.001")
+        if siret:
+            if not valider_siret(siret):
+                parse_log.warning(0, "siret", f"SIRET invalide (Luhn): {siret}")
+
+        # Valider les NIR des employes
+        for prefix in ("S21.G00.30", "S30.G00.30"):
+            nirs = donnees.get(f"{prefix}.001", [])
+            for i, nir in enumerate(nirs):
+                if nir:
+                    v = valider_nir(nir)
+                    if not v.valide:
+                        parse_log.warning(0, "nir", f"Employe {i+1}: {v.message}", nir)
+
+    def _extraire_employeur_texte(self, donnees: dict, doc_id: str,
+                                   parse_log: ParseLog | None = None) -> Employeur | None:
         """Extrait l'employeur depuis les blocs S10/S20/S21."""
         emp = Employeur(source_document_id=doc_id)
 
-        # S10.G00.01.001 = SIREN de l'emetteur
         siren = self._get_val(donnees, "S10.G00.01.001")
         if siren and len(siren) == 9:
             emp.siren = siren
 
-        # S20.G00.05.001 = SIREN de l'entreprise (fallback)
         if not emp.siren:
             siren_s20 = self._get_val(donnees, "S20.G00.05.001")
             if siren_s20 and len(siren_s20) == 9:
                 emp.siren = siren_s20
 
-        # S21.G00.06.001 = SIRET de l'etablissement (14 caracteres)
         siret = self._get_val(donnees, "S21.G00.06.001")
         if siret and len(siret) >= 14:
             emp.siret = siret
             if not emp.siren:
                 emp.siren = siret[:9]
 
-        # S20.G00.05.002 = Raison sociale (S20) ou S21.G00.06.002 (S21)
         raison = self._get_val(donnees, "S21.G00.06.002")
         if not raison:
             raison = self._get_val(donnees, "S20.G00.05.002")
         if raison:
             emp.raison_sociale = raison
 
-        # S21.G00.11.001 = Effectif
         effectif = self._get_val(donnees, "S21.G00.11.001")
         if effectif:
             try:
                 emp.effectif = int(effectif)
             except ValueError:
-                pass
+                if parse_log:
+                    parse_log.warning(0, "effectif", f"Effectif non numerique: {effectif}")
 
         return emp if emp.siren or emp.siret else None
 
-    def _extraire_employes_texte(self, donnees: dict, doc_id: str) -> list[Employe]:
+    def _extraire_employes_texte(self, donnees: dict, doc_id: str,
+                                  parse_log: ParseLog | None = None) -> list[Employe]:
         """Extrait les employes depuis les blocs S21.G00.30 ou S30.G00.30."""
         employes = []
         nirs_vus = set()
 
-        # Chercher dans les deux prefixes possibles (S21 puis S30)
         for prefix in ("S21.G00.30", "S30.G00.30"):
             nirs = donnees.get(f"{prefix}.001", [])
             noms = donnees.get(f"{prefix}.002", [])
@@ -265,8 +412,13 @@ class DSNParser(BaseParser):
             for i, nir in enumerate(nirs):
                 if nir and nir not in nirs_vus:
                     nirs_vus.add(nir)
+
+                    # Valider et normaliser le NIR
+                    v = valider_nir(nir)
+                    nir_normalise = v.valeur_corrigee if v.valide else nir
+
                     emp = Employe(
-                        nir=nir,
+                        nir=nir_normalise,
                         nom=noms[i] if i < len(noms) else "",
                         prenom=prenoms[i] if i < len(prenoms) else "",
                         source_document_id=doc_id,
@@ -281,7 +433,6 @@ class DSNParser(BaseParser):
         """Extrait les cotisations depuis les blocs S81/S21.G00.81 ou S78/S79."""
         cotisations = []
 
-        # Chercher dans les deux prefixes possibles (S21 puis S81)
         for prefix in ("S21.G00.81", "S81.G00.81"):
             codes = donnees.get(f"{prefix}.001", [])
             bases = donnees.get(f"{prefix}.003", [])
@@ -292,7 +443,9 @@ class DSNParser(BaseParser):
             for i in range(max_len):
                 c = Cotisation(source_document_id=doc_id)
 
+                code_ctp = ""
                 if i < len(codes) and codes[i]:
+                    code_ctp = codes[i]
                     c.type_cotisation = CTP_MAPPING.get(codes[i], ContributionType.MALADIE)
                 if i < len(bases) and bases[i]:
                     c.base_brute = parser_montant(bases[i])
@@ -306,12 +459,18 @@ class DSNParser(BaseParser):
                     c.montant_patronal = parser_montant(montants[i])
 
                 if c.base_brute > 0 or c.montant_patronal > 0:
+                    # Stocker le code CTP dans les metadata pour traçabilité
+                    if code_ctp and not hasattr(c, 'metadata'):
+                        c.metadata = {}
+                    if code_ctp:
+                        c.metadata = getattr(c, 'metadata', {}) or {}
+                        c.metadata["code_ctp"] = code_ctp
                     cotisations.append(c)
 
             if cotisations:
-                break  # Ne pas doubler si on a trouve dans S21
+                break
 
-        # Si pas de S81/S21.G00.81, essayer S78 (bases assujetties)
+        # Fallback S78 (bases assujetties)
         if not cotisations:
             for prefix in ("S21.G00.78", "S78.G00.78"):
                 codes_78 = donnees.get(f"{prefix}.001", [])
@@ -326,8 +485,7 @@ class DSNParser(BaseParser):
                 if cotisations:
                     break
 
-        # Extraire remuneration depuis S21.G00.51 si pas de cotisations
-        # mais qu'il y a un brut declare
+        # Fallback S51 (remuneration)
         if not cotisations:
             bruts = donnees.get("S21.G00.51.001", [])
             for brut_str in bruts:
@@ -341,10 +499,57 @@ class DSNParser(BaseParser):
 
         return cotisations
 
+    def _extraire_arrets_travail(self, donnees: dict) -> list[dict]:
+        """Extrait les arrets de travail depuis les blocs S44."""
+        arrets = []
+        for prefix in ("S21.G00.44", "S44.G00.44"):
+            dates_debut = donnees.get(f"{prefix}.001", [])
+            motifs = donnees.get(f"{prefix}.002", [])
+            dates_fin = donnees.get(f"{prefix}.003", [])
+            dates_reprise = donnees.get(f"{prefix}.009", [])
+
+            for i in range(len(dates_debut)):
+                arret = {
+                    "date_debut": dates_debut[i] if i < len(dates_debut) else "",
+                    "motif_code": motifs[i] if i < len(motifs) else "",
+                    "motif_libelle": MOTIFS_ARRET.get(
+                        motifs[i] if i < len(motifs) else "", "inconnu"
+                    ),
+                }
+                if i < len(dates_fin) and dates_fin[i]:
+                    arret["date_fin"] = dates_fin[i]
+                if i < len(dates_reprise) and dates_reprise[i]:
+                    arret["date_reprise"] = dates_reprise[i]
+                arrets.append(arret)
+            if arrets:
+                break
+        return arrets
+
+    def _extraire_contrats(self, donnees: dict) -> list[dict]:
+        """Extrait les informations de contrats depuis les blocs S40."""
+        contrats = []
+        for prefix in ("S21.G00.40",):
+            dates_debut = donnees.get(f"{prefix}.001", [])
+            natures = donnees.get(f"{prefix}.007", [])
+            statuts = donnees.get(f"{prefix}.026", [])
+            quotites = donnees.get(f"{prefix}.013", [])
+
+            for i in range(len(dates_debut)):
+                nature_code = natures[i] if i < len(natures) else ""
+                contrat = {
+                    "date_debut": dates_debut[i] if i < len(dates_debut) else "",
+                    "nature_code": nature_code,
+                    "nature_libelle": NATURES_CONTRAT.get(nature_code, "inconnu"),
+                }
+                if i < len(statuts) and statuts[i]:
+                    contrat["statut"] = statuts[i]
+                if i < len(quotites) and quotites[i]:
+                    contrat["quotite_travail"] = quotites[i]
+                contrats.append(contrat)
+        return contrats
+
     def _extraire_totaux_s89(self, donnees: dict) -> dict | None:
         """Extrait les totaux declares dans le bloc S89 (Total versement OPS)."""
-        # S89.G00.89.001 = Montant total des cotisations
-        # S89.G00.89.002 = Montant total du brut
         total_cot_str = self._get_val(donnees, "S89.G00.89.001")
         total_brut_str = self._get_val(donnees, "S89.G00.89.002")
         if total_cot_str or total_brut_str:
@@ -358,7 +563,6 @@ class DSNParser(BaseParser):
         """Extrait la periode de la declaration."""
         import calendar
 
-        # Essayer S20.G00.05.002 = Periode au format AAAAMM
         periode_str = self._get_val(donnees, "S20.G00.05.002")
         if periode_str and len(periode_str) == 6:
             try:
@@ -373,7 +577,6 @@ class DSNParser(BaseParser):
             except (ValueError, OverflowError):
                 pass
 
-        # Fallback: S21.G00.06.003 = Mois de la declaration
         mois = self._get_val(donnees, "S21.G00.06.003")
         if mois:
             d = parser_date(mois)
@@ -392,14 +595,10 @@ class DSNParser(BaseParser):
         except ET.ParseError as e:
             raise ParseError(f"XML DSN invalide: {e}") from e
 
-        # Deleguer au parser XML avec contexte DSN
         from urssaf_analyzer.parsers.xml_parser import XMLParser
         xml_parser = XMLParser()
 
-        # Creer un document temporaire
         doc = Document(id=doc_id)
-        # On reutilise le parser XML qui gere les structures DSN
-        # mais on requalifie la declaration
         declarations = xml_parser._parser_dsn_structure(root, doc_id)
         for d in declarations:
             d.type_declaration = "DSN/XML"

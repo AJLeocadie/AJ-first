@@ -2,8 +2,20 @@
 
 Detection automatique de la ligne d'en-tete, mapping des colonnes par mots-cles,
 extraction multi-salaries avec deduplication par NIR ou nom+prenom.
+
+Compatible avec les exports Excel de :
+- SAGE Paie / SAGE Comptabilite (.xlsx, .xls)
+- ADP (exports Excel multi-onglets)
+- PayFit (exports Excel)
+- CEGID (exports Excel)
+- Silae (exports Excel)
+- URSSAF (bordereaux recapitulatifs Excel)
+- France Travail (attestations Excel)
+- CARSAT (releves Excel)
+- Collectivites territoriales (etats de paie)
 """
 
+import logging
 import re as _re
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +28,9 @@ from urssaf_analyzer.models.documents import (
 from urssaf_analyzer.config.constants import ContributionType
 from urssaf_analyzer.parsers.base_parser import BaseParser
 from urssaf_analyzer.utils.number_utils import parser_montant
+from urssaf_analyzer.utils.validators import valider_nir, valider_base_brute, ParseLog
+
+logger = logging.getLogger(__name__)
 
 try:
     import openpyxl
@@ -462,6 +477,10 @@ class ExcelParser(BaseParser):
             nir = str(raw_nir).strip().replace(" ", "")
             if nir.endswith(".0"):
                 nir = nir[:-2]
+            # Valider le NIR
+            v = valider_nir(nir)
+            if v.valide:
+                nir = v.valeur_corrigee
 
         # Matricule
         raw_mat = mapped_row.get("matricule")
