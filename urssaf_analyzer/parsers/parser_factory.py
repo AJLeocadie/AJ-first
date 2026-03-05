@@ -14,6 +14,7 @@ from urssaf_analyzer.parsers.image_parser import ImageParser
 from urssaf_analyzer.parsers.text_parser import TextParser
 from urssaf_analyzer.parsers.docx_parser import DocxParser
 from urssaf_analyzer.parsers.fec_parser import FECParser
+from urssaf_analyzer.parsers.fixedwidth_parser import FixedWidthParser
 
 
 class ParserFactory:
@@ -21,15 +22,16 @@ class ParserFactory:
 
     def __init__(self):
         self._parsers: list[BaseParser] = [
-            FECParser(),    # FEC en priorite (avant CSV car peut etre .txt/.csv)
-            DSNParser(),    # DSN en priorite (peut traiter certains XML)
+            FECParser(),        # FEC en priorite (avant CSV car peut etre .txt/.csv)
+            DSNParser(),        # DSN en priorite (peut traiter certains XML)
+            FixedWidthParser(), # SAGE PNM / CIEL XIMPORT (.pnm, .txt a largeur fixe)
             CSVParser(),
             ExcelParser(),
-            DocxParser(),   # Word (.docx) avant PDF
+            DocxParser(),       # Word (.docx) avant PDF
             PDFParser(),
-            ImageParser(),  # Images (JPEG, PNG, etc.) via OCR
-            TextParser(),   # Fichiers texte brut (.txt)
-            XMLParser(),    # XML en dernier (generique)
+            ImageParser(),      # Images (JPEG, PNG, etc.) via OCR
+            TextParser(),       # Fichiers texte brut (.txt)
+            XMLParser(),        # XML en dernier (generique)
         ]
 
     def get_parser(self, chemin: Path) -> BaseParser:
