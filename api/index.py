@@ -101,6 +101,14 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+async def _safe_json(request: Request):
+    """Parse le body JSON avec gestion d'erreur propre."""
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(400, "Corps de la requete invalide (JSON attendu)")
+
+
 # --- Middleware tracabilite : stocke la requete dans le contexte pour log_action ---
 # NOTE: On utilise un middleware ASGI pur au lieu de BaseHTTPMiddleware
 # car BaseHTTPMiddleware est connu pour corrompre les grandes reponses dans Starlette.
@@ -612,7 +620,7 @@ async def auth_me(request: Request):
 @app.post("/api/dashboard/save")
 async def dashboard_save(request: Request):
     user = get_current_user(request)
-    body = await request.json()
+    body = await _safe_json(request)
     save_dashboard(user["email"], body)
     return {"status": "ok"}
 
@@ -904,7 +912,7 @@ async def seal_score(request: Request):
     Conforme art. 1366 C.civ (integrite), reglement eIDAS (horodatage).
     """
     user = get_optional_user(request)
-    body = await request.json()
+    body = await _safe_json(request)
     session_id = body.get("session_id", "")
     scores = body.get("scores", {})
     constats = body.get("constats", [])
@@ -1023,7 +1031,7 @@ async def validation_humaine_score(request: Request):
     Chaque action est scellee dans la chaine de preuve pour tracabilite.
     """
     user = get_optional_user(request)
-    body = await request.json()
+    body = await _safe_json(request)
 
     session_id = body.get("session_id", "")
     action = body.get("action", "")  # 'valider', 'ajuster', 'rejeter'
@@ -1096,7 +1104,7 @@ async def contestation_score(request: Request):
     Le score passe en statut 'conteste' jusqu'a resolution.
     """
     user = get_optional_user(request)
-    body = await request.json()
+    body = await _safe_json(request)
 
     session_id = body.get("session_id", "")
     constats_contestes = body.get("constats_contestes", [])
@@ -2611,7 +2619,7 @@ async def analyser_documents(
                 scores={},  # Score triple calcule cote client — sera scelle via /api/proof/seal-score
                 version_moteur="4.0",
                 version_constantes=hashlib.sha256(
-                    open(Path(__file__).parent.parent / "urssaf_analyzer" / "config" / "constants.py", "rb").read()
+                    (Path(__file__).parent.parent / "urssaf_analyzer" / "config" / "constants.py").read_bytes()
                 ).hexdigest()[:16],
                 operateur=user_email,
             )
@@ -2931,7 +2939,7 @@ async def valider_ecritures():
 async def modifier_libelle_ecriture(ecriture_id: str, request: Request):
     """Modifie le libelle d'une ecriture et/ou de ses lignes."""
     moteur = get_moteur()
-    body = await request.json()
+    body = await _safe_json(request)
     nouveau_libelle = body.get("libelle", "").strip()
     lignes_libelles = body.get("lignes", {})  # {index: nouveau_libelle}
 
@@ -2988,7 +2996,7 @@ async def supprimer_ecriture(ecriture_id: str):
 async def modifier_montants_ecriture(ecriture_id: str, request: Request):
     """Modifie les montants d une ecriture comptable."""
     moteur = get_moteur()
-    body = await request.json()
+    body = await _safe_json(request)
 
     ecriture = None
     for e in moteur.ecritures:
@@ -6204,7 +6212,7 @@ async def detail_independant(ind_id: str):
 @app.put("/api/independants/{ind_id}")
 async def modifier_independant(ind_id: str, request: Request):
     db = get_db()
-    data = await request.json()
+    data = await _safe_json(request)
     champs_autorises = {
         "type_statut", "siret", "activite", "code_naf", "regime_fiscal",
         "option_is", "tva_franchise", "caisse_retraite", "acre", "annee_creation",
@@ -6329,7 +6337,7 @@ async def knowledge_base():
 async def export_pdf(request: Request):
     """Genere un vrai PDF telechargeable a partir des donnees d'analyse."""
     user = get_current_user(request)
-    body = await request.json()
+    body = await _safe_json(request)
     data = body.get("data") or {}
     synthese = data.get("synthese", {})
     constats = data.get("constats", [])
@@ -8155,7 +8163,7 @@ async def detecter_doublons_salaries():
 @app.post("/api/rh/doublons/fusionner")
 async def fusionner_doublons(request: Request):
     """Fusionne deux fiches salarie en une seule (garde la plus complete)."""
-    body = await request.json()
+    body = await _safe_json(request)
     id_garder = body.get("id_garder", "")
     id_supprimer = body.get("id_supprimer", "")
 
@@ -8604,7 +8612,7 @@ async def suggestions_comptes(compte: str = Query(""), description: str = Query(
     (ex: 'loyer', 'achat fournitures', 'salaire') pour guider les utilisateurs
     ne connaissant pas le plan comptable.
     """
-    pc = get_plan_comptable()
+    pc = PlanComptable()
     suggestions = []
     contreparties = []
 
@@ -8753,7 +8761,7 @@ async def creer_sous_compte(
     libelle: str = Form(...),
 ):
     """Cree un sous-compte du plan comptable (ex: 401001 pour fournisseur specifique)."""
-    pc = get_plan_comptable()
+    pc = PlanComptable()
 
     # Verifier que le compte parent existe (au moins la racine)
     racine = compte_parent[:3]
@@ -11433,7 +11441,7 @@ async def integrer_salaries_planning(
 async def modifier_creneau_defaut(request: Request):
     """Modifie le creneau par defaut applique lors de l'integration automatique."""
     global _planning_creneau_defaut
-    body = await request.json()
+    body = await _safe_json(request)
     if "heure_debut" in body:
         _planning_creneau_defaut["heure_debut"] = body["heure_debut"]
     if "heure_fin" in body:
