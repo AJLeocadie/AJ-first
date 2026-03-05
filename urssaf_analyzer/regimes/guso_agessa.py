@@ -170,7 +170,7 @@ class ParametresGUSO:
     vieillesse_plafonnee_patronal: Decimal = Decimal("0.0855")
     vieillesse_plafonnee_salarial: Decimal = Decimal("0.069")
     vieillesse_deplafonnee_patronal: Decimal = Decimal("0.0211")
-    vieillesse_deplafonnee_salarial: Decimal = Decimal("0.024")
+    vieillesse_deplafonnee_salarial: Decimal = Decimal("0.004")
     allocations_familiales: Decimal = Decimal("0.0525")
     accident_travail: Decimal = Decimal("0.0175")  # Taux collectif spectacle
 

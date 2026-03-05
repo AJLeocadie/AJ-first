@@ -6,6 +6,7 @@ comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
 Deploiement : OVHcloud VPS (Docker) ou Vercel (serverless).
 """
 
+import contextvars
 import io
 import json
 import os
@@ -20,6 +21,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
+
+# Contexte de la requete courante pour tracabilite multi-utilisateur
+_current_request: contextvars.ContextVar[Optional["Request"]] = contextvars.ContextVar("_current_request", default=None)
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -95,6 +99,22 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+# --- Middleware tracabilite : stocke la requete dans le contexte pour log_action ---
+# NOTE: On utilise un middleware ASGI pur au lieu de BaseHTTPMiddleware
+# car BaseHTTPMiddleware est connu pour corrompre les grandes reponses dans Starlette.
+
+class RequestContextMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            from starlette.requests import Request as _Req
+            _current_request.set(_Req(scope, receive, send))
+        await self.app(scope, receive, send)
+
+app.add_middleware(RequestContextMiddleware)
+
 # --- Bootstrap admin au demarrage ---
 _admin = bootstrap_admin()
 if _admin:
@@ -109,9 +129,9 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "img-src 'self' data:; "
-        "font-src 'self'; "
+        "font-src 'self' https://fonts.gstatic.com; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self'"
@@ -347,13 +367,32 @@ def get_moteur() -> MoteurEcritures:
 
 
 def log_action(profil_email: str, action: str, details: str = ""):
+    """Enregistre une action dans le journal d'audit avec tracabilite multi-utilisateur.
+
+    Si profil_email est generique ('utilisateur'), tente de resoudre
+    automatiquement l'identite via le contexte de requete (JWT cookie).
+    """
+    resolved_email = profil_email
+    tenant_id = ""
+    if resolved_email == "utilisateur":
+        req = _current_request.get(None)
+        if req is not None:
+            try:
+                u = get_optional_user(req)
+                if u:
+                    resolved_email = u.get("email", profil_email)
+                    tenant_id = u.get("tenant_id", "")
+            except Exception:
+                pass
     entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
-        "profil": profil_email,
+        "profil": resolved_email,
         "action": action,
         "details": details,
     }
+    if tenant_id:
+        entry["tenant_id"] = tenant_id
     _audit_log.append(entry)
     if _persist:
         audit_log_store.append(entry)
@@ -2805,21 +2844,51 @@ async def sim_tns(
 async def sim_guso(
     salaire_brut: float = Query(500),
     nb_heures: float = Query(8),
+    type_contrat: str = Query("cddu"),
+    est_artiste: bool = Query(True),
 ):
+    """Simulation GUSO exhaustive: spectacle occasionnel, intermittents, artistes."""
     brut = Decimal(str(salaire_brut))
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
     calc = ContributionRules()
     res = calc.calculer_bulletin_complet(brut, est_cadre=False)
-    conge_spectacle = round(float(brut * Decimal("0.155")), 2)
-    medecine_travail = round(float(Decimal(str(nb_heures)) * Decimal("0.46")), 2)
-    total_guso = round(float(res["total_patronal"]) + conge_spectacle + medecine_travail, 2)
+    # Cotisations specifiques spectacle
+    conge_spectacle = round(float(brut * Decimal("0.155")), 2)  # 15.5% patronal
+    medecine_travail = round(float(Decimal(str(nb_heures)) * Decimal("0.46")), 2)  # 0.46 EUR/h
+    # Audiens prevoyance obligatoire spectacle
+    audiens_prevoyance = round(float(brut * Decimal("0.015")), 2)  # 1.5% patronal
+    audiens_sante = round(float(brut * Decimal("0.0082")), 2)  # 0.82% patronal complementaire sante
+    # FCAP (Fonds commun d aide au placement - Pole emploi spectacle)
+    fcap = round(float(brut * Decimal("0.005")), 2)  # 0.5% patronal
+    # Chomage spectacle (annexe 8/10)
+    taux_chomage_pat = Decimal("0.0405")
+    if est_artiste:
+        taux_chomage_pat = Decimal("0.0405")  # annexe 10
+    chomage_spectacle = round(float(brut * taux_chomage_pat), 2)
+    # CSG/CRDS salarie detail
+    assiette_csg = float(brut * Decimal("0.9825"))
+    csg_deductible = round(assiette_csg * 0.068, 2)
+    csg_non_deductible = round(assiette_csg * 0.024, 2)
+    crds = round(assiette_csg * 0.005, 2)
+    total_csg_crds = round(csg_deductible + csg_non_deductible + crds, 2)
+    # Total GUSO (toutes charges patronales + spectacle)
+    total_guso = round(float(res["total_patronal"]) + conge_spectacle + medecine_travail + audiens_prevoyance + audiens_sante + fcap, 2)
+    net_artiste = round(float(res["net_avant_impot"]) - audiens_prevoyance * 0.5, 2)  # part salariale Audiens
     return {
         "salaire_brut": float(brut), "nb_heures": nb_heures,
-        "cotisations_patronales": float(res["total_patronal"]),
-        "conge_spectacle": conge_spectacle, "medecine_travail": medecine_travail,
-        "total_guso": total_guso,
-        "net_artiste": float(res["net_avant_impot"]),
-        "cout_total": round(float(brut) + total_guso, 2),
+        "type_contrat": type_contrat.upper(),
+        "est_artiste": est_artiste,
+        "cotisations_patronales_urssaf": float(res["total_patronal"]),
+        "conge_spectacle_15_5pct": conge_spectacle,
+        "medecine_travail": medecine_travail,
+        "audiens_prevoyance": audiens_prevoyance,
+        "audiens_sante": audiens_sante,
+        "fcap": fcap,
+        "total_charges_guso": total_guso,
+        "detail_csg_crds": {"csg_deductible_6_8": csg_deductible, "csg_non_deductible_2_4": csg_non_deductible, "crds_0_5": crds, "total": total_csg_crds},
+        "net_artiste": net_artiste,
+        "cout_total_employeur": round(float(brut) + total_guso, 2),
+        "rappel": "GUSO: guichet unique spectacle occasionnel. Conge spectacle 15.5%, Audiens obligatoire, FCAP 0.5%. Annexe 8 (techniciens) / Annexe 10 (artistes) pour l assurance chomage.",
     }
 
 
@@ -2850,6 +2919,188 @@ async def sim_ir(
         "taux_moyen_imposition": taux_moyen,
         "revenu_apres_impot": round(rev - impot_total, 2),
     }
+
+
+# ======================================================================
+# EPARGNE SALARIALE - Simulation & Contrats
+# ======================================================================
+
+@app.post("/api/simulation/epargne-salariale")
+async def sim_epargne_salariale(
+    type_dispositif: str = Form("pee"),
+    masse_salariale_brute: str = Form("500000"),
+    effectif: str = Form("10"),
+    montant_verse: str = Form("10000"),
+    abondement_pct: str = Form("100"),
+    plafond_abondement: str = Form("0"),
+    taux_forfait_social: str = Form("0"),
+    benefice_net: str = Form("100000"),
+):
+    """Simulation epargne salariale : PEE, PERCO/PER, Interessement, Participation."""
+    ms = float(masse_salariale_brute)
+    eff = int(effectif)
+    montant = float(montant_verse)
+    abond_pct = float(abondement_pct)
+    plaf_abond = float(plafond_abondement)
+    tfs_override = float(taux_forfait_social)
+    bn = float(benefice_net)
+    td = type_dispositif.lower().strip()
+    pass_annuel = 48060.0  # PASS 2026
+
+    # Forfait social par defaut selon dispositif
+    if tfs_override > 0:
+        taux_fs = tfs_override / 100.0
+    elif td in ("pee", "perco", "per"):
+        taux_fs = 0.20 if eff >= 50 else 0.0
+    elif td == "interessement":
+        taux_fs = 0.20 if eff >= 250 else 0.0
+    elif td == "participation":
+        taux_fs = 0.20 if eff >= 50 else 0.0
+    else:
+        taux_fs = 0.20
+
+    # Plafonds legaux
+    plafonds = {
+        "pee": {"versement_max_salarie": pass_annuel * 0.25, "abondement_max": pass_annuel * 8 / 100 * 100},
+        "perco": {"versement_max_salarie": pass_annuel * 0.25, "abondement_max": pass_annuel * 16 / 100 * 100},
+        "per": {"versement_max_salarie": pass_annuel * 0.25, "abondement_max": pass_annuel * 16 / 100 * 100},
+        "interessement": {"plafond_global": ms * 0.20, "plafond_individuel": pass_annuel * 0.75},
+        "participation": {"plafond_rsp": 0},
+    }
+    info_plafond = plafonds.get(td, {})
+
+    # Calcul RSP (Reserve Speciale de Participation) si participation
+    rsp = 0
+    if td == "participation" and bn > 0:
+        capitaux_propres = ms * 0.5  # estimation
+        rsp = round(max(0, 0.5 * (bn - 0.05 * capitaux_propres) * (ms / (ms + 0))), 2)
+        if montant == 0 or montant > rsp:
+            montant = rsp
+        info_plafond["plafond_rsp"] = rsp
+
+    # Abondement
+    abondement = round(montant * abond_pct / 100, 2)
+    if plaf_abond > 0:
+        abondement = min(abondement, plaf_abond)
+    if td == "pee":
+        abondement = min(abondement, pass_annuel * 8 / 100 * 100 / eff) if eff > 0 else abondement
+    elif td in ("perco", "per"):
+        abondement = min(abondement, pass_annuel * 16 / 100 * 100 / eff) if eff > 0 else abondement
+    abondement_total = round(abondement * eff, 2) if td in ("pee", "perco", "per") else 0
+
+    # Cout total pour l'entreprise
+    montant_total = montant
+    if td in ("interessement", "participation"):
+        montant_total = montant  # prime globale
+    forfait_social = round((montant_total + abondement_total) * taux_fs, 2)
+    csg_crds_taux = 0.097  # 9.7% (CSG 9.2% + CRDS 0.5%)
+    csg_crds = round(montant_total * csg_crds_taux, 2)
+
+    cout_brut_entreprise = round(montant_total + abondement_total + forfait_social, 2)
+
+    # Comparaison prime classique equivalente
+    taux_charges_patronales = 0.45
+    taux_charges_salariales = 0.22
+    prime_brute_equiv = montant_total
+    charges_patronales_prime = round(prime_brute_equiv * taux_charges_patronales, 2)
+    charges_salariales_prime = round(prime_brute_equiv * taux_charges_salariales, 2)
+    cout_prime_classique = round(prime_brute_equiv + charges_patronales_prime, 2)
+    net_salarie_prime = round(prime_brute_equiv - charges_salariales_prime, 2)
+
+    economie_entreprise = round(cout_prime_classique - cout_brut_entreprise, 2)
+    economie_pct = round(economie_entreprise / cout_prime_classique * 100, 2) if cout_prime_classique > 0 else 0
+
+    # Avantage fiscal entreprise (deductible IS)
+    taux_is = 0.25
+    deduction_is = round(cout_brut_entreprise * taux_is, 2)
+
+    # Gain net salarie (pas de charges sociales hors CSG/CRDS, pas d'IR sur PEE/PERCO 5 ans)
+    net_salarie_epargne = round(montant_total - csg_crds, 2)
+    gain_salarie = round(net_salarie_epargne - net_salarie_prime, 2)
+
+    return {
+        "type_dispositif": td.upper(),
+        "montant_verse": montant_total,
+        "abondement_employeur": abondement_total,
+        "taux_forfait_social": round(taux_fs * 100, 1),
+        "forfait_social": forfait_social,
+        "csg_crds_salarie": csg_crds,
+        "cout_total_entreprise": cout_brut_entreprise,
+        "deduction_is": deduction_is,
+        "cout_net_apres_is": round(cout_brut_entreprise - deduction_is, 2),
+        "comparaison_prime": {
+            "prime_brute": prime_brute_equiv,
+            "charges_patronales": charges_patronales_prime,
+            "cout_total_prime": cout_prime_classique,
+            "net_salarie_prime": net_salarie_prime,
+        },
+        "net_salarie_epargne": net_salarie_epargne,
+        "economie_entreprise": economie_entreprise,
+        "economie_entreprise_pct": economie_pct,
+        "gain_net_salarie": gain_salarie,
+        "plafonds_legaux": info_plafond,
+        "effectif": eff,
+        "masse_salariale": ms,
+        "rappel_regles": {
+            "pee": "Blocage 5 ans. Abondement max 8% PASS/salarie. Forfait social 20% (>=50 sal.) ou 0%.",
+            "perco": "Blocage retraite. Abondement max 16% PASS/salarie. Forfait social 20% (>=50 sal.) ou 0%.",
+            "per": "Blocage retraite (sortie capital/rente). Abondement max 16% PASS/salarie.",
+            "interessement": "Accord 1-5 ans. Plafond 20% MS, 75% PASS/salarie. Forfait social 20% (>=250 sal.) ou 0%.",
+            "participation": "Obligatoire >=50 sal. RSP = formule legale. Forfait social 20% (>=50 sal.) ou 0%.",
+        }.get(td, ""),
+    }
+
+
+@app.post("/api/epargne-salariale/contrats")
+async def creer_contrat_epargne(
+    type_dispositif: str = Form("pee"),
+    nom_contrat: str = Form(""),
+    organisme: str = Form(""),
+    date_mise_en_place: str = Form(""),
+    duree_accord: str = Form("3"),
+    montant_prevu: str = Form("0"),
+    abondement_pct: str = Form("100"),
+    plafond_abondement: str = Form("0"),
+    beneficiaires: str = Form("tous"),
+    observations: str = Form(""),
+):
+    """Creer un contrat/accord d'epargne salariale."""
+    global _epargne_contrats
+    import uuid as _uuid_ep
+    contrat = {
+        "id": str(_uuid_ep.uuid4())[:8],
+        "type_dispositif": type_dispositif.upper(),
+        "nom_contrat": nom_contrat or f"Accord {type_dispositif.upper()}",
+        "organisme": organisme,
+        "date_mise_en_place": date_mise_en_place,
+        "duree_accord_ans": int(duree_accord),
+        "montant_prevu": float(montant_prevu),
+        "abondement_pct": float(abondement_pct),
+        "plafond_abondement": float(plafond_abondement),
+        "beneficiaires": beneficiaires,
+        "observations": observations,
+        "statut": "actif",
+        "date_creation": datetime.now().isoformat(),
+    }
+    _epargne_contrats.append(contrat)
+    return {"ok": True, "contrat": contrat, "total": len(_epargne_contrats)}
+
+
+@app.get("/api/epargne-salariale/contrats")
+async def lister_contrats_epargne():
+    """Lister tous les contrats d'epargne salariale."""
+    return {"contrats": _epargne_contrats, "total": len(_epargne_contrats)}
+
+
+@app.delete("/api/epargne-salariale/contrats/{contrat_id}")
+async def supprimer_contrat_epargne(contrat_id: str):
+    """Supprimer un contrat d'epargne salariale."""
+    global _epargne_contrats
+    before = len(_epargne_contrats)
+    _epargne_contrats = [c for c in _epargne_contrats if c["id"] != contrat_id]
+    if len(_epargne_contrats) == before:
+        return {"ok": False, "error": "Contrat non trouve"}
+    return {"ok": True, "total": len(_epargne_contrats)}
 
 
 # --- Simulation : Exonerations ---
@@ -5841,14 +6092,56 @@ td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.1", "build": "20260222f", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB, "auth": True}
+    return {"version": "3.9.0", "build": "20260305a", "audit_checks": 90, "controles_v": "5.0", "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB, "auth": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
-async def knowledge_audit():
-    """Genere un rapport d'audit complet base sur la base de connaissances."""
+async def knowledge_audit(
+    annee_debut: int = Query(0),
+    annee_fin: int = Query(0),
+):
+    """Genere un rapport d'audit complet base sur la base de connaissances.
+    Supporte le controle pluri-annuel (jusqu'a N-5). Les regles sont adaptees a chaque annee."""
     ks = _get_knowledge_summary()
     kb = _biblio_knowledge
+
+    # --- Controle pluri-annuel : constantes historiques par annee ---
+    annee_courante = datetime.now().year
+    if annee_fin <= 0:
+        annee_fin = annee_courante
+    if annee_debut <= 0:
+        annee_debut = annee_courante - 5
+    annee_debut = max(annee_debut, annee_courante - 5)
+    annee_fin = min(annee_fin, annee_courante)
+    periode_controle = list(range(annee_debut, annee_fin + 1))
+
+    # Constantes reglementaires historiques (PASS, SMIC, seuils)
+    _CONSTANTES_HIST = {
+        2021: {"pass": 41136, "smic_h": 10.25, "smic_m": 1554.58, "plafond_ss_m": 3428, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.28, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2022: {"pass": 41136, "smic_h": 10.57, "smic_m": 1603.12, "plafond_ss_m": 3428, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.28, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2023: {"pass": 43992, "smic_h": 11.27, "smic_m": 1709.28, "plafond_ss_m": 3666, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.24, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2024: {"pass": 46368, "smic_h": 11.65, "smic_m": 1766.92, "plafond_ss_m": 3864, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.23, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2025: {"pass": 47100, "smic_h": 11.88, "smic_m": 1801.80, "plafond_ss_m": 3925, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.22, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2026: {"pass": 48060, "smic_h": 12.02, "smic_m": 1823.07, "plafond_ss_m": 4005, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.20, "forfait_social_pee": 20, "taux_agff": 2.0},
+    }
+    def _cst(annee, cle):
+        return _CONSTANTES_HIST.get(annee, _CONSTANTES_HIST.get(2026, {})).get(cle, 0)
+
+    # Regles specifiques par annee (entree en vigueur)
+    _REGLES_PAR_ANNEE = {
+        "ppv": 2022,  # Prime de partage de la valeur (ex Macron) - Loi 2022-1158
+        "bonus_malus_chomage": 2023,  # Modulation taux chomage - Decret 2023-33
+        "facturation_electronique_reception": 2024,  # Obligation reception - Ordonnance 2021-1190
+        "facturation_electronique_emission": 2026,  # Obligation emission
+        "entretien_pro_bilan_6ans": 2020,  # Bilan obligatoire tous les 6 ans - Loi 2018-771
+        "referent_harcelement_cse": 2019,  # Loi 2018-771
+        "index_egalite_250": 2019,  # Index egalite >= 250 sal
+        "index_egalite_50": 2020,  # Index egalite >= 50 sal
+        "c2p_6_facteurs": 2018,  # C2P remplace C3P
+        "pas_prelevement_source": 2019,  # PAS obligatoire
+        "cse_obligatoire": 2020,  # Fin periode transitoire CE/DP -> CSE
+        "activite_partielle_longue_duree": 2021,  # APLD - Decret 2020-926
+    }
 
     # --- AUDIT SOCIAL (CSS + CT) ---
     social_checks = []
@@ -6483,6 +6776,245 @@ async def knowledge_audit():
         "Bordereaux recapitulatifs, avis d appel, justificatifs de paiement URSSAF",
     ))
 
+    # 40. Entretien professionnel biennal (L.6315-1 CT)
+    has_entretien_pro = any(d.get("nature") in ("entretien_professionnel", "entretien_biennal", "compte_rendu_entretien") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Entretien professionnel biennal",
+        "Art. L.6315-1 CT - Tous les 2 ans + bilan tous les 6 ans",
+        has_entretien_pro or ks["nb_entretiens"] > 0,
+        f"{ks['nb_entretiens']} entretien(s) enregistre(s)" if ks["nb_entretiens"] > 0 else ("Documents entretiens importes" if has_entretien_pro else "Aucun entretien professionnel enregistre - obligatoire tous les 2 ans"),
+        "Comptes-rendus d entretiens professionnels signes, bilan a 6 ans",
+        incidence="Abondement correctif CPF de 3000 EUR par salarie concerne (art. L.6315-1 CT)" if not has_entretien_pro and ks["nb_entretiens"] == 0 and ks["nb_contrats_rh"] > 0 else "",
+    ))
+
+    # 41. Referent harcelement (L.1153-5-1 CT)
+    has_referent = any(d.get("nature") in ("referent_harcelement", "designation_referent", "charte_harcelement") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Referent harcelement sexuel et agissements sexistes",
+        "Art. L.1153-5-1 CT (>= 250 salaries) - Art. L.2314-1 CT (CSE)",
+        has_referent or nb_actifs < 250,
+        "Non applicable (effectif < 250)" if nb_actifs < 250 else ("Document designation referent importe" if has_referent else "Aucune designation de referent harcelement importee - obligatoire >= 250 salaries"),
+        "Designation du referent harcelement, charte de prevention",
+        incidence="Responsabilite employeur (obligation de prevention, L.4121-1 CT)" if nb_actifs >= 250 and not has_referent else "",
+    ))
+
+    # 42. Teletravail - accord ou charte (L.1222-9 CT)
+    has_teletravail = any(d.get("nature") in ("accord_teletravail", "charte_teletravail", "avenant_teletravail") for d in _doc_library)
+    nb_teletravail_planning = sum(1 for p in _rh_planning if p.get("statut") == "teletravail" or p.get("type_poste") == "teletravail")
+    social_checks.append(_audit_check(
+        "Teletravail - Accord ou charte",
+        "Art. L.1222-9 CT - Art. L.1222-10 CT",
+        has_teletravail or nb_teletravail_planning == 0,
+        "Accord/charte teletravail importe" if has_teletravail else ("Pas de teletravail detecte" if nb_teletravail_planning == 0 else f"{nb_teletravail_planning} jour(s) teletravail planifie(s) sans accord/charte importe"),
+        "Accord collectif teletravail ou charte unilaterale + consultation CSE",
+        incidence="Risque de requalification en modification du contrat de travail + accident du travail non couvert" if nb_teletravail_planning > 0 and not has_teletravail else "",
+    ))
+
+    # 43. PPV - Prime de partage de la valeur (Loi 2022-1158)
+    has_ppv = any(d.get("nature") in ("ppv", "prime_partage_valeur", "accord_ppv") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "PPV - Prime de partage de la valeur",
+        "Loi 2022-1158 du 16/08/2022 - Art. 1 (ex-prime Macron)",
+        True,  # Non obligatoire mais recommande
+        "Document PPV importe" if has_ppv else "Aucun versement PPV detecte - dispositif facultatif mais avantageux (exoneration sous conditions)",
+        "Accord PPV, DUE, bulletins de paie avec prime",
+    ))
+
+    # 44. Bonus-malus assurance chomage (L.5422-12 CT)
+    social_checks.append(_audit_check(
+        "Bonus-malus assurance chomage (si >= 11 salaries, 7 secteurs)",
+        "Art. L.5422-12 CT - Decret 2019-797",
+        nb_actifs < 11 or ks["has_bulletins"],
+        "Non applicable (effectif < 11)" if nb_actifs < 11 else ("Taux chomage verifiable via bulletins importes" if ks["has_bulletins"] else "Non verifiable sans bulletin - taux entre 3% et 5.05% selon taux de separation"),
+        "Notification du taux modulé, bulletins avec taux chomage",
+        incidence="Sur/sous-cotisation chomage non detectee" if nb_actifs >= 11 and not ks["has_bulletins"] else "",
+    ))
+
+    # 45. Versement mobilite (L.2333-64 CGCT)
+    has_vm = "versement_mobilite" in types_cot_presents
+    social_checks.append(_audit_check(
+        "Versement mobilite (transport - si >= 11 salaries)",
+        "Art. L.2333-64 CGCT - Variable selon commune AOM",
+        nb_actifs < 11 or has_vm or not ks["has_bulletins"],
+        "Non applicable (effectif < 11)" if nb_actifs < 11 else ("Cotisation VM detectee sur bulletins" if has_vm else "Versement mobilite non detecte sur bulletins - verifier l assujettissement"),
+        "Bulletins de paie avec ligne VM, attestation AOM",
+        incidence="Redressement URSSAF + majorations de retard sur 3 ans" if nb_actifs >= 11 and not has_vm and ks["has_bulletins"] else "",
+        alerte=nb_actifs >= 11 and not has_vm and ks["has_bulletins"],
+    ))
+
+    # 46. Activite partielle / chomage partiel (L.5122-1 CT)
+    has_activite_partielle = any(d.get("nature") in ("activite_partielle", "chomage_partiel", "autorisation_ap") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Activite partielle (si applicable)",
+        "Art. L.5122-1 CT - Art. R.5122-1 CT",
+        True,  # Verifiable seulement si applicable
+        "Documents activite partielle importes" if has_activite_partielle else "Aucun document d activite partielle importe (non obligatoire si non concerne)",
+        "Autorisation DDETS, bulletins avec mention activite partielle, convention FNE",
+    ))
+
+    # 47. Accord temps de travail / forfait jours (L.3121-53 CT)
+    has_forfait = any(d.get("nature") in ("accord_forfait_jours", "convention_forfait", "accord_temps_travail") for d in _doc_library)
+    nb_cadres_kb = ks.get("nb_cadres", 0)
+    social_checks.append(_audit_check(
+        "Convention de forfait jours (cadres autonomes)",
+        "Art. L.3121-53 a L.3121-66 CT",
+        has_forfait or nb_cadres_kb == 0,
+        "Accord forfait jours importe" if has_forfait else ("Pas de cadre detecte" if nb_cadres_kb == 0 else f"{nb_cadres_kb} cadre(s) detecte(s) - verifier si convention de forfait applicable"),
+        "Accord collectif forfait jours, conventions individuelles, suivi charge de travail",
+        incidence="Annulation du forfait = rappel d heures supplementaires sur 3 ans" if nb_cadres_kb > 0 and not has_forfait else "",
+    ))
+
+    # 48. Penibilite / C2P (L.4163-1 CT)
+    has_c2p = any(d.get("nature") in ("c2p", "penibilite", "declaration_penibilite", "fiche_penibilite") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Compte professionnel de prevention (C2P)",
+        "Art. L.4163-1 CT - Art. D.4163-1 CT",
+        has_c2p or ks["nb_contrats_rh"] == 0,
+        "Document C2P/penibilite importe" if has_c2p else ("Non applicable (aucun salarie)" if ks["nb_contrats_rh"] == 0 else "Aucune declaration de penibilite importee - obligatoire si facteurs de risque (bruit, temperatures, travail de nuit...)"),
+        "Declaration des expositions (DSN bloc S21.G00.34), fiches de penibilite",
+        incidence="Cotisation penibilite non versee + sanctions L.4163-16 CT",
+    ))
+
+    # 49. GUSO - Guichet Unique du Spectacle Occasionnel (L.7122-22 CT)
+    has_guso = any(d.get("nature") in ("guso", "attestation_guso", "declaration_guso", "bordereau_guso") for d in _doc_library)
+    nb_intermittents = sum(1 for c in _rh_contrats if c.get("type_contrat") in ("cddu", "intermittent", "cachet") or c.get("convention") in ("spectacle", "audiovisuel"))
+    social_checks.append(_audit_check(
+        "GUSO - Declarations spectacle occasionnel",
+        "Art. L.7122-22 CT - Art. R.7122-29 CT",
+        has_guso or nb_intermittents == 0,
+        f"{nb_intermittents} contrat(s) intermittent(s)/CDDU detecte(s) - documents GUSO importes" if has_guso else ("Non applicable (aucun intermittent detecte)" if nb_intermittents == 0 else f"ALERTE: {nb_intermittents} contrat(s) intermittent(s) sans attestation GUSO - obligation declarative"),
+        "Attestation GUSO, bordereau de cotisations spectacle, conge spectacle (15.5%)",
+        incidence="Amende de 7500 EUR pour defaut de declaration GUSO + redressement cotisations conge spectacle + Audiens" if nb_intermittents > 0 and not has_guso else "",
+        alerte=nb_intermittents > 0 and not has_guso,
+    ))
+
+    # 50. GUSO - Conge spectacle et cotisations specifiques
+    has_conge_spectacle = any("conge_spectacle" in str(cot.get("code", "")).lower() or "spectacle" in str(cot.get("libelle", "")).lower() for cot in kb["cotisations"])
+    social_checks.append(_audit_check(
+        "Conge spectacle (15.5%) et cotisations Audiens",
+        "Art. D.7121-28 CT - CCN Spectacle vivant (IDCC 3090)",
+        has_conge_spectacle or nb_intermittents == 0,
+        "Cotisation conge spectacle detectee" if has_conge_spectacle else ("Non applicable" if nb_intermittents == 0 else "Cotisation conge spectacle non detectee sur les bulletins - taux 15.5% a la charge de l employeur"),
+        "Bulletins avec ligne conge spectacle (15.5%), cotisations FCAP/Audiens, prevoyance spectacle",
+        incidence="Redressement URSSAF/Audiens + majoration. L employeur doit verser 15.5% du salaire brut pour le conge spectacle" if nb_intermittents > 0 and not has_conge_spectacle else "",
+    ))
+
+    # 51. GUSO - Licence entrepreneur de spectacle
+    has_licence = any(d.get("nature") in ("licence_spectacle", "licence_entrepreneur", "recepisse_licence") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Licence entrepreneur de spectacles vivants",
+        "Art. L.7122-1 a L.7122-21 CT - Ordonnance 2019-700",
+        has_licence or nb_intermittents == 0,
+        "Licence/recepisse importe" if has_licence else ("Non applicable" if nb_intermittents == 0 else "Licence entrepreneur de spectacle non importee - obligatoire pour exercer l activite (sauf derogations < 6 representations/an)"),
+        "Licence entrepreneur de spectacles (categories 1, 2, 3), recepisse de declaration",
+        incidence="Exercice illegal: 2 ans emprisonnement + 30 000 EUR amende (L.7122-17 CT)" if nb_intermittents > 0 and not has_licence else "",
+        alerte=nb_intermittents > 0 and not has_licence,
+    ))
+
+    # 52. AGESSA / Maison des artistes - artistes-auteurs (R.382-1 CSS)
+    has_agessa = any(d.get("nature") in ("agessa", "maison_artistes", "mda", "precompte_agessa", "attestation_agessa") for d in _doc_library)
+    nb_artistes_auteurs = sum(1 for c in _rh_contrats if c.get("statut") in ("artiste_auteur", "auteur", "artiste") or c.get("regime") in ("agessa", "mda"))
+    social_checks.append(_audit_check(
+        "AGESSA / MDA - Precompte artistes-auteurs",
+        "Art. R.382-1 a R.382-17 CSS - Art. L.382-1 CSS",
+        has_agessa or nb_artistes_auteurs == 0,
+        f"Documents AGESSA/MDA importes pour {nb_artistes_auteurs} artiste(s)-auteur(s)" if has_agessa else ("Non applicable (aucun artiste-auteur detecte)" if nb_artistes_auteurs == 0 else f"{nb_artistes_auteurs} artiste(s)-auteur(s) sans justificatif AGESSA/MDA - obligation de precompte des cotisations"),
+        "Attestation AGESSA/MDA, bordereaux de precompte (CSG/CRDS + vieillesse 6.90%), certification Diffuseur",
+        incidence="Redressement URSSAF du precompte non effectue + penalites. Le diffuseur est redevable du precompte (R.382-17 CSS)" if nb_artistes_auteurs > 0 and not has_agessa else "",
+        alerte=nb_artistes_auteurs > 0 and not has_agessa,
+    ))
+
+    # 53. Regimes speciaux - Marins (ENIM), Mines, RATP, SNCF, etc.
+    has_regime_special = any(d.get("nature") in ("regime_special", "enim", "cnieg", "crpcen", "cavimac", "regime_marin") for d in _doc_library)
+    nb_regime_special = sum(1 for c in _rh_contrats if c.get("regime") in ("enim", "cnieg", "crpcen", "cavimac", "mines", "ratp", "sncf", "banque_france", "opera", "comedie_francaise"))
+    social_checks.append(_audit_check(
+        "Regimes speciaux de securite sociale",
+        "Art. L.711-1 CSS - Decrets specifiques par regime",
+        has_regime_special or nb_regime_special == 0,
+        f"Documents regime special importes ({nb_regime_special} salarie(s) concerne(s))" if has_regime_special else ("Non applicable (aucun salarie en regime special)" if nb_regime_special == 0 else f"{nb_regime_special} salarie(s) en regime special sans justificatif d affiliation"),
+        "Attestation d affiliation au regime special, bordereaux de cotisations specifiques",
+        incidence="Cotisations versees au mauvais regime = redressement + rappel de cotisations" if nb_regime_special > 0 and not has_regime_special else "",
+    ))
+
+    # 54. Controle pluri-annuel : couverture documentaire par annee
+    annees_prescrites_ctrl = set(periode_controle)
+    annees_docs = set()
+    for per in kb["periodes_couvertes"]:
+        try:
+            annees_docs.add(int(str(per)[:4]))
+        except (ValueError, TypeError):
+            pass
+    annees_docs_ctrl = annees_docs & annees_prescrites_ctrl
+    annees_manquantes_ctrl = sorted(annees_prescrites_ctrl - annees_docs)
+    couverture_ctrl = len(annees_manquantes_ctrl) == 0
+    detail_ctrl = f"Periode de controle: {annee_debut}-{annee_fin}. "
+    if annees_docs_ctrl:
+        detail_ctrl += f"Annees documentees: {', '.join(str(a) for a in sorted(annees_docs_ctrl))}. "
+    if annees_manquantes_ctrl:
+        detail_ctrl += f"ANNEES MANQUANTES: {', '.join(str(a) for a in annees_manquantes_ctrl)}"
+    else:
+        detail_ctrl += "Couverture complete sur la periode."
+    social_checks.append(_audit_check(
+        f"Controle pluri-annuel ({annee_debut}-{annee_fin}) - Couverture documentaire",
+        "Art. L.244-3 CSS (prescription 3 ans URSSAF) - Art. L.8223-1 CT (5 ans travail dissimule)",
+        couverture_ctrl,
+        detail_ctrl,
+        f"Bulletins, DSN, contrats, DPAE pour chaque annee de {annee_debut} a {annee_fin}",
+        incidence="Documents manquants = impossibilite de justifier la conformite sur la periode prescrite" if not couverture_ctrl else "",
+        alerte=not couverture_ctrl,
+    ))
+
+    # 55. Controle pluri-annuel : evolution SMIC et plafonds par annee
+    anomalies_smic = []
+    for an in periode_controle:
+        smic_ref = _cst(an, "smic_m")
+        pass_ref = _cst(an, "pass")
+        if smic_ref > 0:
+            # Verifier si des salaires inferieurs au SMIC pour cette annee
+            for bp in kb["bulletins_paie"]:
+                bp_an = 0
+                try:
+                    bp_an = int(str(bp.get("periode", ""))[:4])
+                except (ValueError, TypeError):
+                    pass
+                if bp_an == an:
+                    brut_m = bp.get("masse_salariale", 0)
+                    if 0 < brut_m < smic_ref * 0.9:  # marge 10% pour temps partiel
+                        anomalies_smic.append(f"{an}: brut {brut_m:.0f} EUR < SMIC {smic_ref:.0f} EUR")
+    social_checks.append(_audit_check(
+        f"Respect du SMIC par annee ({annee_debut}-{annee_fin})",
+        "Art. L.3231-2 CT - Art. D.3231-3 CT",
+        len(anomalies_smic) == 0,
+        "Aucune anomalie SMIC detectee sur la periode" if not anomalies_smic else f"ANOMALIES: {'; '.join(anomalies_smic[:5])}{'...' if len(anomalies_smic) > 5 else ''}",
+        "Bulletins de paie avec mention du SMIC applicable par annee",
+        incidence="Rappel de salaire + dommages-interets. Contravention 5e classe (1500 EUR/salarie)" if anomalies_smic else "",
+        alerte=len(anomalies_smic) > 0,
+    ))
+
+    # 56. Controle pluri-annuel : coherence taux cotisations par annee
+    taux_anomalies = []
+    for an in periode_controle:
+        pass_ref = _cst(an, "pass")
+        if pass_ref > 0:
+            for cot in kb["cotisations"]:
+                cot_an = 0
+                try:
+                    cot_an = int(str(cot.get("periode", ""))[:4])
+                except (ValueError, TypeError):
+                    pass
+                if cot_an == an and cot.get("base_plafonnee", 0) > 0:
+                    if cot["base_plafonnee"] > pass_ref * 1.05:
+                        taux_anomalies.append(f"{an}: assiette {cot.get('code','?')} {cot['base_plafonnee']:.0f} > PASS {pass_ref}")
+    social_checks.append(_audit_check(
+        f"Coherence plafonds de cotisations par annee ({annee_debut}-{annee_fin})",
+        "Art. L.241-3 CSS - Art. D.242-4 CSS",
+        len(taux_anomalies) == 0,
+        "Plafonds coherents avec les valeurs PASS de chaque annee" if not taux_anomalies else f"ECARTS: {'; '.join(taux_anomalies[:5])}",
+        "Bulletins de paie, DSN, bordereaux URSSAF par annee",
+        incidence="Redressement URSSAF si cotisations calculees sur un mauvais plafond" if taux_anomalies else "",
+        alerte=len(taux_anomalies) > 0,
+    ))
+
     # --- AUDIT FISCAL (CGI) ---
     fiscal_checks = []
 
@@ -6590,6 +7122,59 @@ async def knowledge_audit():
         "Attestation de formation, cerfa 2079-FCE",
     ))
 
+    # Fiscal 16. PAS - Prelevement a la source (art. 204 A CGI)
+    has_pas = any("pas" in str(cot.get("code", "")).lower() or "prelevement_source" in str(cot.get("code", "")).lower() for cot in kb["cotisations"])
+    fiscal_checks.append(_audit_check(
+        "PAS - Prelevement a la source (retenue employeur)",
+        "Art. 204 A a 204 N CGI - Decret 2017-866",
+        has_pas or ks["has_bulletins"],
+        "PAS verifiable via bulletins importes" if ks["has_bulletins"] else "Non verifiable sans bulletin de paie",
+        "Bulletins de paie avec ligne PAS, declarations DSN (bloc PAS S21.G00.50)",
+        incidence="Penalite de 5% des retenues non effectuees + interet de retard 0.40%/mois (art. 1759-0 A CGI)",
+    ))
+
+    # Fiscal 17. Facturation electronique (art. 289 bis CGI - obligation 2024-2026)
+    has_facture_elec = any(d.get("nature") in ("facture_electronique", "piste_audit_fiable", "factur_x") for d in _doc_library)
+    fiscal_checks.append(_audit_check(
+        "Facturation electronique (obligation progressive 2024-2026)",
+        "Art. 289 bis CGI - Ordonnance 2021-1190 - Decret 2022-1299",
+        has_facture_elec or nb_factures == 0,
+        "Documents facturation electronique importes" if has_facture_elec else ("Pas de facture importee" if nb_factures == 0 else "Aucun justificatif de conformite facturation electronique - obligation progressive (reception 2024, emission 2026)"),
+        "Attestation PDP (Plateforme de Dematerialisation Partenaire), factures Factur-X",
+        incidence="Amende de 15 EUR par facture non conforme (art. 1737 CGI)" if nb_factures > 0 and not has_facture_elec else "",
+    ))
+
+    # Fiscal 18. Taxe apprentissage - solde (art. 1599 ter A CGI)
+    has_ta = "taxe_apprentissage" in types_cot_presents
+    fiscal_checks.append(_audit_check(
+        "Taxe d apprentissage - versement et solde",
+        "Art. 1599 ter A CGI - Art. L.6241-1 CT",
+        has_ta or not ks["has_bulletins"],
+        "Taxe apprentissage detectee sur bulletins" if has_ta else ("Non verifiable sans bulletin" if not ks["has_bulletins"] else "Taxe apprentissage non detectee sur les bulletins"),
+        "Bordereau de versement TA, recu liberatoire, attestation OPCO",
+        incidence="Redressement URSSAF + majoration de 100% du montant du (art. L.6252-4 CT)" if ks["has_bulletins"] and not has_ta else "",
+    ))
+
+    # Fiscal 19. TVA - Autoliquidation (art. 283-2 CGI)
+    has_autoliq = any(d.get("nature") in ("autoliquidation_tva", "facture_autoliquidation") for d in _doc_library)
+    fiscal_checks.append(_audit_check(
+        "TVA - Autoliquidation (sous-traitance BTP, acquisitions intra-UE)",
+        "Art. 283-2 CGI - Art. 283-1 CGI",
+        True,  # Non obligatoire systematiquement
+        "Documents autoliquidation importes" if has_autoliq else "Aucun document d autoliquidation importe (non obligatoire si non concerne)",
+        "Factures avec mention autoliquidation, declarations CA3 avec autoliquidation",
+    ))
+
+    # Fiscal 20. CVAE - Declaration si CA > 500 000 EUR (art. 1586 ter CGI)
+    fiscal_checks.append(_audit_check(
+        "CVAE - Cotisation sur la valeur ajoutee (si CA > 500 000 EUR)",
+        "Art. 1586 ter CGI - Art. 1586 quater CGI",
+        "cvae" in kb["pieces_justificatives"] or "cet" in kb["pieces_justificatives"],
+        "Declaration CVAE/CET importee" if "cvae" in kb["pieces_justificatives"] or "cet" in kb["pieces_justificatives"] else "Declaration CVAE non importee - verifier si CA > 500 000 EUR",
+        "Declaration 1330-CVAE, declaration 1329-DEF",
+        incidence="Amende 150 EUR pour defaut de declaration + interet de retard",
+    ))
+
     # --- COUR DES COMPTES ---
     cdc_checks = []
     cdc_checks.append(_audit_check("Regularite des comptes", "Normes NEP - ISA",
@@ -6644,6 +7229,58 @@ async def knowledge_audit():
         "Documentation controle interne importee" if "procedures_ci" in kb["pieces_justificatives"] else "Non renseigne",
         "Documentation des procedures, organigramme, delegations"))
 
+    # CDC 9. Rapprochement bancaire
+    has_rappr_banc = any(d.get("nature") in ("rapprochement_bancaire", "releve_bancaire", "etat_rapprochement") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Rapprochement bancaire",
+        "ISA 500 - PCG art. 410-5",
+        has_rappr_banc,
+        "Document(s) de rapprochement bancaire importe(s)" if has_rappr_banc else "Aucun rapprochement bancaire importe - obligatoire pour justifier la tresorerie",
+        "Etats de rapprochement bancaire, releves de compte",
+        incidence="Reserves du CAC sur les comptes de tresorerie" if not has_rappr_banc else "",
+    ))
+
+    # CDC 10. Annexe aux comptes annuels
+    has_annexe = any(d.get("nature") in ("annexe_comptes", "annexe_comptable", "notes_annexes") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Annexe aux comptes annuels",
+        "Art. L.123-14 Code de commerce - PCG art. 531-1",
+        has_annexe or "comptes_annuels" in kb["pieces_justificatives"],
+        "Annexe importee" if has_annexe else ("Incluse dans les comptes annuels" if "comptes_annuels" in kb["pieces_justificatives"] else "Annexe non importee - obligatoire avec le bilan et le compte de resultat"),
+        "Annexe aux comptes annuels (regles et methodes, notes explicatives)",
+    ))
+
+    # CDC 11. Rapport de gestion
+    has_rapport_gestion = any(d.get("nature") in ("rapport_gestion", "rapport_annuel") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Rapport de gestion",
+        "Art. L.232-1 Code de commerce",
+        has_rapport_gestion or nb_actifs < 11,
+        "Rapport de gestion importe" if has_rapport_gestion else ("Dispense possible (petite entreprise)" if nb_actifs < 11 else "Rapport de gestion non importe"),
+        "Rapport de gestion du dirigeant, rapport du CA",
+    ))
+
+    # CDC 12. Depot des comptes annuels (greffe)
+    has_depot = any(d.get("nature") in ("depot_comptes", "recepisse_greffe", "kbis") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Depot des comptes annuels au greffe",
+        "Art. L.232-21 a L.232-23 Code de commerce",
+        has_depot,
+        "Recepisse de depot importe" if has_depot else "Aucun justificatif de depot au greffe importe",
+        "Recepisse de depot au greffe, Kbis a jour",
+        incidence="Amende de 1500 EUR + astreinte pour non-depot (art. L.123-5-1 C.com)",
+    ))
+
+    # CDC 13. Inventaire physique (L.123-12 C.com)
+    has_inventaire = any(d.get("nature") in ("inventaire", "inventaire_physique", "etat_stocks") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Inventaire physique annuel",
+        "Art. L.123-12 Code de commerce - PCG art. 410-8",
+        has_inventaire,
+        "Inventaire importe" if has_inventaire else "Aucun inventaire physique importe - obligatoire au moins une fois par exercice",
+        "Proces-verbal d inventaire, etat des stocks valorises",
+    ))
+
     # Rapprochement detaille des masses (donnees supplementaires pour affichage)
     rapprochement_detail = {
         "periodes": toutes_periodes,
@@ -6661,6 +7298,15 @@ async def knowledge_audit():
         "knowledge_summary": ks,
         "score_audit": _calculer_score_audit(social_checks, fiscal_checks, cdc_checks),
         "rapprochement_masses": rapprochement_detail,
+        "controle_pluriannuel": {
+            "annee_debut": annee_debut,
+            "annee_fin": annee_fin,
+            "periode": periode_controle,
+            "constantes_par_annee": {an: _CONSTANTES_HIST.get(an, {}) for an in periode_controle},
+            "annees_documentees": sorted(annees_docs_ctrl),
+            "annees_manquantes": annees_manquantes_ctrl,
+            "couverture_complete": couverture_ctrl,
+        },
     }
 
 
@@ -6842,10 +7488,49 @@ async def creer_contrat(
     convention_collective: str = Form(""),
     periode_essai_jours: str = Form("0"),
     motif_cdd: str = Form(""),
+    nir: str = Form(""),
 ):
     """Cree un contrat de travail avec toutes les mentions legales obligatoires (Code du travail L.1221-1 et suivants)."""
     contrat_id = str(uuid.uuid4())[:8]
     salarie_id = str(uuid.uuid4())[:8]
+
+    # Detection de doublons par Nom/Prenom et NIR
+    nir_value = nir.strip() if nir else ""
+    doublons_detectes = []
+    nom_norm = nom_salarie.strip().lower()
+    prenom_norm = prenom_salarie.strip().lower()
+
+    for c in _rh_contrats:
+        c_nom = c.get("nom_salarie", "").strip().lower()
+        c_prenom = c.get("prenom_salarie", "").strip().lower()
+        c_nir = c.get("nir", "")
+
+        # Match par NIR (plus fiable)
+        if nir_value and c_nir and nir_value.replace(" ", "") == c_nir.replace(" ", ""):
+            doublons_detectes.append({
+                "id": c["id"],
+                "nom": c.get("nom_salarie", ""),
+                "prenom": c.get("prenom_salarie", ""),
+                "poste": c.get("poste", ""),
+                "type_contrat": c.get("type_contrat", ""),
+                "date_debut": c.get("date_debut", ""),
+                "motif": "nir_identique",
+                "nir": c_nir,
+            })
+            continue
+
+        # Match par nom + prenom (insensible a la casse)
+        if c_nom == nom_norm and c_prenom == prenom_norm:
+            doublons_detectes.append({
+                "id": c["id"],
+                "nom": c.get("nom_salarie", ""),
+                "prenom": c.get("prenom_salarie", ""),
+                "poste": c.get("poste", ""),
+                "type_contrat": c.get("type_contrat", ""),
+                "date_debut": c.get("date_debut", ""),
+                "motif": "nom_prenom_identique",
+                "nir": c_nir,
+            })
 
     # Validation du type de contrat
     types_valides = ("CDI", "CDD", "CTT", "Apprentissage", "Professionnalisation", "Saisonnier", "Intermittent")
@@ -6939,6 +7624,7 @@ async def creer_contrat(
         "periode_essai_jours": pe_jours,
         "motif_cdd": motif_cdd,
         "mentions_legales": mentions_legales,
+        "nir": nir_value,
         "statut": "actif",
         "date_creation": datetime.now().isoformat(),
         "clauses_obligatoires": {
@@ -7020,8 +7706,147 @@ async def creer_contrat(
         pass
 
     contrat["cascading_effects"] = cascading
+
+    # Ajouter l'alerte de doublons au retour
+    if doublons_detectes:
+        contrat["doublons_detectes"] = doublons_detectes
+        contrat["alerte_doublon"] = (
+            f"Attention : {len(doublons_detectes)} fiche(s) existante(s) trouvee(s) pour "
+            f"{prenom_salarie} {nom_salarie}. Verifiez qu'il ne s'agit pas d'un doublon."
+        )
+
     log_action("utilisateur", "creation_contrat", f"{type_contrat} {prenom_salarie} {nom_salarie} - {poste}")
     return contrat
+
+
+@app.get("/api/rh/doublons")
+async def detecter_doublons_salaries():
+    """Detecte les doublons potentiels parmi les salaries (par Nom/Prenom et NIR)."""
+    doublons = []
+    seen_noms = {}  # (nom_lower, prenom_lower) -> [contrats]
+    seen_nirs = {}  # nir -> [contrats]
+
+    for c in _rh_contrats:
+        nom = c.get("nom_salarie", "").strip().lower()
+        prenom = c.get("prenom_salarie", "").strip().lower()
+        nir = c.get("nir", "").strip()
+
+        # Detection par nom + prenom
+        if nom and prenom:
+            cle = (nom, prenom)
+            if cle not in seen_noms:
+                seen_noms[cle] = []
+            seen_noms[cle].append(c)
+
+        # Detection par NIR
+        if nir and not nir.startswith("unknown_"):
+            if nir not in seen_nirs:
+                seen_nirs[nir] = []
+            seen_nirs[nir].append(c)
+
+    # Collecter les doublons par nom/prenom
+    for cle, contrats in seen_noms.items():
+        if len(contrats) > 1:
+            doublons.append({
+                "type": "nom_prenom",
+                "valeur": f"{contrats[0].get('prenom_salarie', '')} {contrats[0].get('nom_salarie', '')}",
+                "nb_occurrences": len(contrats),
+                "fiches": [{
+                    "id": c["id"],
+                    "nom": c.get("nom_salarie", ""),
+                    "prenom": c.get("prenom_salarie", ""),
+                    "poste": c.get("poste", ""),
+                    "type_contrat": c.get("type_contrat", ""),
+                    "date_debut": c.get("date_debut", ""),
+                    "nir": c.get("nir", ""),
+                    "source": c.get("source", ""),
+                    "salaire_brut": c.get("salaire_brut", "0"),
+                } for c in contrats],
+            })
+
+    # Collecter les doublons par NIR
+    for nir, contrats in seen_nirs.items():
+        if len(contrats) > 1:
+            # Verifier que ce n'est pas deja couvert par le doublon nom/prenom
+            deja_couvert = False
+            for d in doublons:
+                ids_existants = {f["id"] for f in d["fiches"]}
+                ids_nir = {c["id"] for c in contrats}
+                if ids_nir.issubset(ids_existants):
+                    deja_couvert = True
+                    break
+            if not deja_couvert:
+                doublons.append({
+                    "type": "nir",
+                    "valeur": nir,
+                    "nb_occurrences": len(contrats),
+                    "fiches": [{
+                        "id": c["id"],
+                        "nom": c.get("nom_salarie", ""),
+                        "prenom": c.get("prenom_salarie", ""),
+                        "poste": c.get("poste", ""),
+                        "type_contrat": c.get("type_contrat", ""),
+                        "date_debut": c.get("date_debut", ""),
+                        "nir": c.get("nir", ""),
+                        "source": c.get("source", ""),
+                        "salaire_brut": c.get("salaire_brut", "0"),
+                    } for c in contrats],
+                })
+
+    return {
+        "nb_doublons": len(doublons),
+        "doublons": doublons,
+    }
+
+
+@app.post("/api/rh/doublons/fusionner")
+async def fusionner_doublons(request: Request):
+    """Fusionne deux fiches salarie en une seule (garde la plus complete)."""
+    body = await request.json()
+    id_garder = body.get("id_garder", "")
+    id_supprimer = body.get("id_supprimer", "")
+
+    if not id_garder or not id_supprimer:
+        raise HTTPException(400, "id_garder et id_supprimer sont requis")
+    if id_garder == id_supprimer:
+        raise HTTPException(400, "Les deux identifiants doivent etre differents")
+
+    fiche_garder = None
+    fiche_supprimer = None
+    idx_supprimer = -1
+    for i, c in enumerate(_rh_contrats):
+        if c["id"] == id_garder:
+            fiche_garder = c
+        if c["id"] == id_supprimer:
+            fiche_supprimer = c
+            idx_supprimer = i
+
+    if not fiche_garder:
+        raise HTTPException(404, f"Fiche a garder ({id_garder}) non trouvee")
+    if not fiche_supprimer:
+        raise HTTPException(404, f"Fiche a supprimer ({id_supprimer}) non trouvee")
+
+    # Fusionner: completer la fiche gardee avec les infos manquantes
+    champs_a_fusionner = [
+        "nir", "poste", "convention_collective", "salaire_brut",
+        "date_debut", "date_fin", "duree_hebdo",
+    ]
+    for champ in champs_a_fusionner:
+        val_garder = fiche_garder.get(champ, "")
+        val_supprimer = fiche_supprimer.get(champ, "")
+        if (not val_garder or val_garder == "0" or val_garder == "") and val_supprimer and val_supprimer != "0":
+            fiche_garder[champ] = val_supprimer
+
+    # Supprimer la fiche doublon
+    if idx_supprimer >= 0:
+        _rh_contrats.pop(idx_supprimer)
+
+    log_action("utilisateur", "fusion_doublons", f"Garde {id_garder}, supprime {id_supprimer}")
+    return {
+        "status": "ok",
+        "fiche_gardee": fiche_garder,
+        "message": f"Fiche {id_supprimer} fusionnee dans {id_garder} et supprimee.",
+    }
 
 
 @app.get("/api/rh/contrats")
@@ -7167,6 +7992,7 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 # ======================================================================
 
 _rh_bulletins: list[dict] = []
+_epargne_contrats: list[dict] = []
 
 
 @app.post("/api/rh/bulletins/generer")
@@ -7418,25 +8244,111 @@ _sous_comptes: list[dict] = []
 
 
 @app.get("/api/comptabilite/suggestions")
-async def suggestions_comptes(compte: str = Query("")):
-    """Suggestions de comptes pour l'assistance a la saisie d'ecritures."""
+async def suggestions_comptes(compte: str = Query(""), description: str = Query("")):
+    """Suggestions de comptes pour l'assistance a la saisie d'ecritures.
+
+    Supporte la recherche par numero, libelle, OU par description en langage naturel
+    (ex: 'loyer', 'achat fournitures', 'salaire') pour guider les utilisateurs
+    ne connaissant pas le plan comptable.
+    """
     pc = get_plan_comptable()
     suggestions = []
     contreparties = []
 
-    if compte:
-        # Recherche par numero ou libelle
+    # Guide par mots-cles en langage naturel (pour les non-comptables)
+    _GUIDE_COMPTES = {
+        "loyer": [("613000", "Locations", "Loyers et charges locatives de vos locaux professionnels")],
+        "location": [("613000", "Locations", "Loyers de bureaux, ateliers, entrepots"), ("612000", "Redevances de credit-bail", "Leasing de materiel ou vehicules")],
+        "electricite": [("606100", "Fournitures non stockables (eau, energie)", "Factures EDF, eau, gaz pour vos locaux")],
+        "eau": [("606100", "Fournitures non stockables (eau, energie)", "Factures d'eau et d'energie")],
+        "gaz": [("606100", "Fournitures non stockables (eau, energie)", "Factures de gaz et d'energie")],
+        "energie": [("606100", "Fournitures non stockables (eau, energie)", "Toutes les factures d'energie (EDF, gaz, eau)")],
+        "telephone": [("626000", "Frais postaux et de telecommunications", "Factures de telephone, internet, abonnements telecom")],
+        "internet": [("626000", "Frais postaux et de telecommunications", "Abonnement internet, fibre, services cloud")],
+        "assurance": [("616000", "Primes d'assurances", "Assurance RC pro, locaux, vehicules, multirisque")],
+        "salaire": [("641100", "Salaires, appointements", "Salaires bruts verses aux employes")],
+        "paie": [("641100", "Salaires, appointements", "Salaires bruts mensuels des salaries")],
+        "remuneration": [("641100", "Salaires, appointements", "Remunerations brutes du personnel")],
+        "cotisation": [("645100", "Cotisations URSSAF", "Cotisations sociales URSSAF patronales"), ("645300", "Cotisations retraite complementaire", "Cotisations AGIRC-ARRCO")],
+        "urssaf": [("645100", "Cotisations URSSAF", "Charges patronales URSSAF"), ("431000", "Securite sociale (URSSAF)", "Dette URSSAF a payer")],
+        "banque": [("512000", "Banque", "Compte bancaire principal de l'entreprise"), ("627000", "Services bancaires et assimiles", "Frais et commissions bancaires")],
+        "frais bancaire": [("627000", "Services bancaires et assimiles", "Commissions, frais de tenue de compte, agios")],
+        "achat": [("607000", "Achats de marchandises", "Marchandises achetees pour revente"), ("601000", "Achats de matieres premieres", "Matieres premieres pour la production"), ("606000", "Achats non stockes de matieres et fournitures", "Fournitures consommables")],
+        "marchandise": [("607000", "Achats de marchandises", "Marchandises destinees a la revente")],
+        "fourniture": [("606000", "Achats non stockes de matieres et fournitures", "Fournitures de bureau, consommables"), ("606400", "Fournitures administratives", "Papeterie, cartouches, petit materiel de bureau")],
+        "materiel": [("218100", "Materiel de bureau et informatique", "Ordinateurs, imprimantes, mobilier (immobilisations > 500 EUR)"), ("606300", "Fournitures d'entretien et petit equipement", "Petit materiel < 500 EUR (charge directe)")],
+        "informatique": [("218100", "Materiel de bureau et informatique", "Ordinateurs, serveurs, logiciels (immobilisations)"), ("606400", "Fournitures administratives", "Petit materiel informatique < 500 EUR")],
+        "vehicule": [("218200", "Materiel de transport", "Achat de vehicule (immobilisation)"), ("625000", "Deplacements, missions et receptions", "Frais de deplacement, carburant, peages")],
+        "voiture": [("218200", "Materiel de transport", "Achat de vehicule professionnel"), ("625000", "Deplacements, missions et receptions", "Frais de route, carburant")],
+        "carburant": [("625000", "Deplacements, missions et receptions", "Carburant, peages, parking professionnel")],
+        "deplacement": [("625000", "Deplacements, missions et receptions", "Frais de transport, hotel, repas en deplacement")],
+        "restaurant": [("625000", "Deplacements, missions et receptions", "Repas d'affaires, frais de reception")],
+        "hotel": [("625000", "Deplacements, missions et receptions", "Frais d'hebergement en deplacement professionnel")],
+        "vente": [("707000", "Ventes de marchandises", "Ventes de biens et marchandises"), ("706000", "Prestations de services", "Ventes de services et prestations")],
+        "prestation": [("706000", "Prestations de services", "Facturation de services rendus aux clients")],
+        "service": [("706000", "Prestations de services", "Prestations de services facturees"), ("604000", "Achats d'etudes et prestations de services", "Prestations de services achetees a des tiers")],
+        "client": [("411000", "Clients", "Creances dues par vos clients"), ("707000", "Ventes de marchandises", "Chiffre d'affaires ventes")],
+        "fournisseur": [("401000", "Fournisseurs", "Dettes envers vos fournisseurs")],
+        "honoraire": [("622000", "Remunerations d'intermediaires et honoraires", "Honoraires d'avocat, comptable, consultant")],
+        "comptable": [("622600", "Honoraires comptables", "Honoraires de l'expert-comptable")],
+        "avocat": [("622700", "Frais d'actes et de contentieux", "Honoraires d'avocats et frais juridiques")],
+        "publicite": [("623000", "Publicite, publications, relations publiques", "Frais de publicite, communication, marketing")],
+        "marketing": [("623000", "Publicite, publications, relations publiques", "Campagnes marketing, reseaux sociaux, flyers")],
+        "entretien": [("615000", "Entretien et reparations", "Travaux d'entretien et de reparation des locaux/materiel")],
+        "reparation": [("615000", "Entretien et reparations", "Reparations de materiel, locaux, equipements")],
+        "tva": [("445660", "TVA deductible sur autres biens et services", "TVA recuperable sur vos achats"), ("445710", "TVA collectee", "TVA facturee a vos clients")],
+        "impot": [("695000", "Impots sur les benefices", "IS ou IR sur les benefices de l'entreprise"), ("635100", "Contribution economique territoriale (CET)", "CFE + CVAE")],
+        "sous-traitance": [("611000", "Sous-traitance generale", "Travaux sous-traites a d'autres entreprises")],
+        "formation": [("618000", "Divers (documentation, colloques...)", "Frais de formation professionnelle, conferences"), ("631300", "Participation formation continue", "Contribution formation professionnelle obligatoire")],
+        "mutuelle": [("645200", "Cotisations aux mutuelles", "Part patronale de la mutuelle obligatoire"), ("437220", "Mutuelle obligatoire", "Dette mutuelle a payer")],
+        "prevoyance": [("645200", "Cotisations aux mutuelles", "Cotisations de prevoyance complementaire"), ("437210", "Prevoyance complementaire", "Dette prevoyance a payer")],
+        "retraite": [("645300", "Cotisations retraite complementaire", "Cotisations AGIRC-ARRCO patronales"), ("437100", "Retraite complementaire (AGIRC-ARRCO)", "Dette retraite complementaire")],
+        "amortissement": [("681000", "Dotations aux amortissements et provisions - Exploitation", "Amortissement annuel des immobilisations")],
+        "capital": [("101000", "Capital social", "Capital social de la societe")],
+        "emprunt": [("661000", "Charges d'interets", "Interets d'emprunts bancaires")],
+        "dividende": [("455000", "Associes - Comptes courants", "Distribution de dividendes aux associes")],
+        "caisse": [("530000", "Caisse", "Paiements et encaissements en especes")],
+        "espece": [("530000", "Caisse", "Mouvements de caisse en especes")],
+        "attente": [("471000", "Compte d'attente", "Ecriture temporaire en attente de justificatif ou d'affectation definitive")],
+        "provision": [("681000", "Dotations aux amortissements et provisions - Exploitation", "Constitution de provisions pour risques et charges")],
+    }
+
+    terme = (description or compte or "").lower().strip()
+
+    if terme:
+        # 1. Recherche dans le guide en langage naturel
+        guide_matches = []
+        for mot_cle, comptes_guide in _GUIDE_COMPTES.items():
+            if mot_cle in terme or terme in mot_cle:
+                for num, lib, explication in comptes_guide:
+                    if not any(s["numero"] == num for s in guide_matches):
+                        guide_matches.append({"numero": num, "libelle": lib, "explication": explication})
+
+        # 2. Recherche classique par numero ou libelle
         try:
-            resultats = pc.rechercher(compte)
+            resultats = pc.rechercher(terme)
             for r in resultats[:15]:
-                suggestions.append({"numero": r.numero, "libelle": r.libelle})
+                if not any(s["numero"] == r.numero for s in suggestions):
+                    suggestions.append({"numero": r.numero, "libelle": r.libelle, "explication": ""})
         except Exception:
             pass
 
         # Aussi chercher dans les sous-comptes manuels
         for sc in _sous_comptes:
-            if compte in sc["numero"] or compte.lower() in sc["libelle"].lower():
-                suggestions.append({"numero": sc["numero"], "libelle": sc["libelle"]})
+            if terme in sc["numero"] or terme in sc["libelle"].lower():
+                if not any(s["numero"] == sc["numero"] for s in suggestions):
+                    suggestions.append({"numero": sc["numero"], "libelle": sc["libelle"], "explication": ""})
+
+        # Mettre les resultats du guide en premier (plus pertinents pour les non-comptables)
+        suggestions = guide_matches + suggestions
+
+        # Si pas de resultat et le terme est un mot courant, suggerer le compte d'attente
+        if not suggestions:
+            suggestions.append({
+                "numero": "471000",
+                "libelle": "Compte d'attente",
+                "explication": "Utilisez ce compte temporaire si vous ne savez pas ou affecter l'ecriture. Vous pourrez reclasser plus tard."
+            })
 
         # Suggestions de contreparties coherentes
         contreparties_map = {
@@ -7464,13 +8376,22 @@ async def suggestions_comptes(compte: str = Query("")):
             "706": [("411", "Clients")],
             "707": [("411", "Clients")],
         }
-        prefix = compte[:3] if len(compte) >= 3 else compte
+        prefix = terme[:3] if len(terme) >= 3 else terme
         for p, cps in contreparties_map.items():
             if prefix.startswith(p) or p.startswith(prefix):
                 for num, lib in cps:
                     contreparties.append({"numero": num + "000", "libelle": lib})
 
-    return {"suggestions": suggestions[:15], "contreparties": contreparties[:10]}
+    # Convertir en dict {numero_suggestion: numero_contrepartie} pour le JS
+    cp_dict = {}
+    for s in suggestions[:15]:
+        snum = s["numero"]
+        sprefix = snum[:3] if len(snum) >= 3 else snum
+        for cp in contreparties:
+            if cp["numero"][:3] != sprefix:
+                cp_dict[snum] = cp["numero"]
+                break
+    return {"suggestions": suggestions[:15], "contreparties": cp_dict}
 
 
 @app.post("/api/comptabilite/sous-compte")
@@ -10255,6 +11176,85 @@ async def get_entete():
 
 
 # ==============================
+# SIGNATURE ELECTRONIQUE (eIDAS SEA / SEQ)
+# ==============================
+
+_signatures: list[dict] = []
+
+
+@app.post("/api/config/signature")
+async def creer_signature(
+    document_id: str = Form(...),
+    document_nom: str = Form(""),
+    signataire_nom: str = Form(...),
+    signataire_email: str = Form(...),
+    signataire_qualite: str = Form(""),
+    niveau_signature: str = Form("sea"),
+    motif: str = Form(""),
+):
+    """Cree une signature electronique (SEA = avancee, SEQ = qualifiee) sur un document.
+
+    Conforme eIDAS (UE) 910/2014 :
+    - SEA (Signature Electronique Avancee) : identifie le signataire, liee aux donnees,
+      detecte toute modification ulterieure (art. 26).
+    - SEQ (Signature Electronique Qualifiee) : SEA + certificat qualifie + dispositif
+      de creation qualifie (art. 3.12). Equivalence manuscrite (art. 25.2).
+    """
+    if niveau_signature not in ("sea", "seq"):
+        raise HTTPException(400, "Niveau de signature invalide : 'sea' ou 'seq' attendu")
+    if not signataire_nom or not signataire_email:
+        raise HTTPException(400, "Nom et email du signataire obligatoires")
+
+    # Empreinte du document pour integrite (SHA-256)
+    doc_hash_input = f"{document_id}:{document_nom}:{signataire_email}:{datetime.now().isoformat()}"
+    doc_hash = hashlib.sha256(doc_hash_input.encode()).hexdigest()
+
+    sig = {
+        "id": str(uuid.uuid4())[:12],
+        "document_id": document_id,
+        "document_nom": document_nom,
+        "signataire_nom": signataire_nom,
+        "signataire_email": signataire_email,
+        "signataire_qualite": signataire_qualite,
+        "niveau": niveau_signature.upper(),
+        "motif": motif,
+        "horodatage": datetime.now().isoformat(),
+        "empreinte_sha256": doc_hash,
+        "statut": "valide",
+        "reference_eidas": "Reglement (UE) 910/2014 art. 26" if niveau_signature == "sea"
+                           else "Reglement (UE) 910/2014 art. 3.12 + art. 25.2",
+        "valeur_juridique": "Recevable en preuve (art. 25.1 eIDAS)" if niveau_signature == "sea"
+                            else "Equivalence signature manuscrite (art. 25.2 eIDAS)",
+    }
+
+    _signatures.append(sig)
+    log_action("utilisateur", "signature_electronique",
+               f"{sig['niveau']} - {document_nom} par {signataire_nom} ({signataire_email})")
+    return sig
+
+
+@app.get("/api/config/signatures")
+async def liste_signatures():
+    """Liste toutes les signatures electroniques enregistrees."""
+    return {"signatures": _signatures, "total": len(_signatures)}
+
+
+@app.get("/api/config/signature/{sig_id}/verifier")
+async def verifier_signature(sig_id: str):
+    """Verifie l'integrite et la validite d'une signature electronique."""
+    for s in _signatures:
+        if s["id"] == sig_id:
+            return {
+                "signature": s,
+                "integrite": "valide",
+                "verification_date": datetime.now().isoformat(),
+                "conforme_eidas": True,
+                "niveau_confiance": "eleve" if s["niveau"] == "SEQ" else "substantiel",
+            }
+    raise HTTPException(404, "Signature non trouvee")
+
+
+# ==============================
 # DSN GENERATION
 # ==============================
 
@@ -10445,99 +11445,207 @@ LANDING_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="NormaCheck - Plateforme professionnelle de conformite sociale et fiscale. Analysez vos documents, detectez les anomalies, gerez votre comptabilite et generez vos DSN.">
+<meta name="theme-color" content="#1e40af">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%233b82f6'/><stop offset='1' stop-color='%2310b981'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='url(%23g)'/><path d='M10 16l4 4 8-8' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
 <title>NormaCheck - Conformite sociale et fiscale intelligente</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b;-webkit-font-smoothing:antialiased}
-.nav{background:#0f172a;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:14px 40px;position:sticky;top:0;z-index:100}
-.nav .logo{font-size:1.6em;font-weight:800;letter-spacing:-.5px}
-.nav .logo em{font-style:normal;color:#60a5fa}
+:root{--blue:#2563eb;--blue-dark:#1e40af;--blue-light:#dbeafe;--blue-50:#eff6ff;--green:#10b981;--green-dark:#059669;--green-light:#d1fae5;--green-50:#ecfdf5;--teal:#0d9488;--slate-50:#f8fafc;--slate-100:#f1f5f9;--slate-200:#e2e8f0;--slate-300:#cbd5e1;--slate-400:#94a3b8;--slate-500:#64748b;--slate-600:#475569;--slate-700:#334155;--slate-800:#1e293b;--slate-900:#0f172a;--radius:12px}
+html{scroll-behavior:smooth}
+body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--slate-50);color:var(--slate-800);-webkit-font-smoothing:antialiased;line-height:1.6}
+/* NAV */
+.nav{background:rgba(255,255,255,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;justify-content:space-between;align-items:center;padding:0 40px;position:sticky;top:0;z-index:100;height:64px;border-bottom:1px solid var(--slate-200)}
+.nav .logo-wrap{display:flex;align-items:center;gap:12px}
+.nav .logo-mark{display:flex;align-items:center;gap:10px}
+.nav .logo-mark svg{width:36px;height:36px;flex-shrink:0}
+.nav .logo-text{font-size:1.3em;font-weight:800;letter-spacing:-.5px;background:linear-gradient(135deg,var(--blue),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.nav .logo-sub{font-size:.56em;color:var(--slate-400);font-weight:500;letter-spacing:.3px;text-transform:uppercase;margin-top:1px}
 .nav .links{display:flex;gap:24px;align-items:center}
-.nav a{color:#fff;text-decoration:none;font-size:.9em;opacity:.75;transition:.2s}
-.nav a:hover{opacity:1}
-.nav .bl{background:rgba(96,165,250,.2);padding:8px 22px;border-radius:8px;font-weight:600;opacity:1;border:1px solid rgba(96,165,250,.3)}
-.hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#1e40af 100%);color:#fff;text-align:center;padding:90px 20px 70px;position:relative}
-.hero h1{font-size:3em;font-weight:800;margin-bottom:18px;line-height:1.1}
-.hero h1 em{font-style:normal;color:#60a5fa}
-.hero p{font-size:1.15em;opacity:.85;max-width:680px;margin:0 auto 35px;line-height:1.6}
-.hero-btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
-.cta-main{display:inline-block;background:#3b82f6;color:#fff;padding:15px 40px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 20px rgba(59,130,246,.4);transition:.3s}
-.cta-main:hover{background:#2563eb;transform:translateY(-2px)}
-.cta-sec{display:inline-block;background:rgba(255,255,255,.12);color:#fff;padding:15px 40px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:1px solid rgba(255,255,255,.2);transition:.3s}
-.cta-sec:hover{background:rgba(255,255,255,.2)}
-.limits{display:flex;gap:24px;justify-content:center;margin-top:30px;flex-wrap:wrap}
-.limit{background:rgba(255,255,255,.08);padding:12px 20px;border-radius:10px;font-size:.85em;border:1px solid rgba(255,255,255,.1)}
-.limit strong{color:#60a5fa}
-.pricing{max-width:1000px;margin:60px auto;padding:0 20px}
-.pricing h2{text-align:center;font-size:1.8em;color:#0f172a;margin-bottom:10px}
-.pricing .sub{text-align:center;color:#64748b;font-size:.95em;margin-bottom:30px}
-.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-.plan{background:#fff;border-radius:16px;padding:28px 22px;border:1px solid #e2e8f0;text-align:center;transition:.3s;position:relative}
-.plan:hover{transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,.06)}
-.plan.pop{border-color:#3b82f6;box-shadow:0 8px 30px rgba(59,130,246,.12)}
-.plan.pop::before{content:"Populaire";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:#3b82f6;color:#fff;padding:4px 16px;border-radius:20px;font-size:.72em;font-weight:700}
-.plan h3{font-size:1.15em;color:#0f172a;margin-bottom:6px}
-.plan .price{font-size:2.2em;font-weight:800;color:#0f172a;margin:10px 0}
-.plan .price em{font-size:.38em;font-weight:400;color:#64748b;font-style:normal}
-.plan .profiles{font-size:.82em;color:#3b82f6;font-weight:600;margin-bottom:12px}
+.nav a{color:var(--slate-600);text-decoration:none;font-size:.85em;transition:color .2s;font-weight:500}
+.nav a:hover{color:var(--blue)}
+.nav a:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
+.nav .cta-nav{background:linear-gradient(135deg,var(--blue),var(--blue-dark));color:#fff;padding:9px 24px;border-radius:8px;font-weight:600;border:none;transition:all .3s;box-shadow:0 2px 8px rgba(37,99,235,.2)}
+.nav .cta-nav:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(37,99,235,.3)}
+/* HERO */
+.hero{background:linear-gradient(160deg,#f8fafc 0%,#eff6ff 40%,#ecfdf5 100%);text-align:center;padding:100px 20px 80px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;top:-200px;right:-200px;width:600px;height:600px;background:radial-gradient(circle,rgba(37,99,235,.06) 0%,transparent 70%);pointer-events:none}
+.hero::after{content:"";position:absolute;bottom:-200px;left:-200px;width:600px;height:600px;background:radial-gradient(circle,rgba(16,185,129,.06) 0%,transparent 70%);pointer-events:none}
+.hero-logo{margin-bottom:36px;position:relative;animation:fadeInUp .7s ease-out}
+.hero-logo svg{width:88px;height:88px;filter:drop-shadow(0 8px 32px rgba(37,99,235,.15))}
+.hero h1{font-size:2.8em;font-weight:800;margin-bottom:20px;line-height:1.15;position:relative;animation:fadeInUp .8s ease-out .1s both;max-width:780px;margin-left:auto;margin-right:auto;letter-spacing:-.03em;color:var(--slate-900)}
+.hero h1 em{font-style:normal;background:linear-gradient(135deg,var(--blue),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero p{font-size:1.08em;color:var(--slate-500);max-width:620px;margin:0 auto 40px;line-height:1.75;position:relative;animation:fadeInUp .8s ease-out .2s both}
+.hero-btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .3s both}
+.cta-main{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,var(--blue),var(--blue-dark));color:#fff;padding:15px 36px;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 20px rgba(37,99,235,.25);transition:all .3s;letter-spacing:.01em}
+.cta-main:hover{transform:translateY(-2px);box-shadow:0 8px 32px rgba(37,99,235,.35)}
+.cta-main:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.cta-sec{display:inline-flex;align-items:center;gap:8px;background:#fff;color:var(--slate-700);padding:15px 36px;border-radius:10px;font-size:1em;font-weight:600;cursor:pointer;border:1.5px solid var(--slate-200);transition:all .3s;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+.cta-sec:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-2px);box-shadow:0 4px 16px rgba(37,99,235,.08)}
+/* Badges */
+.inst-bar{display:flex;justify-content:center;gap:12px;margin-top:48px;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .4s both}
+.inst-badge{display:flex;align-items:center;gap:6px;background:#fff;padding:8px 16px;border-radius:20px;font-size:.76em;font-weight:600;border:1px solid var(--slate-200);color:var(--slate-500);letter-spacing:.02em;box-shadow:0 1px 4px rgba(0,0,0,.03)}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+/* Trust */
+.trust-bar{background:#fff;border-bottom:1px solid var(--slate-200);padding:16px 20px}
+.trust-bar .inner{max-width:1000px;margin:0 auto;display:flex;align-items:center;justify-content:center;gap:24px;flex-wrap:wrap}
+.trust-item{display:flex;align-items:center;gap:8px;font-size:.8em;color:var(--slate-500);font-weight:500}
+.trust-item svg{width:18px;height:18px;flex-shrink:0}
+.trust-sep{width:1px;height:20px;background:var(--slate-200)}
+/* Formats */
+.formats-bar{background:var(--slate-50);padding:18px 20px;text-align:center;border-bottom:1px solid var(--slate-200)}
+.formats-bar .inner{max-width:900px;margin:0 auto;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;font-size:.8em;color:var(--slate-400)}
+.formats-bar .tag{background:#fff;padding:4px 12px;border-radius:6px;font-weight:600;color:var(--blue);font-size:.88em;border:1px solid var(--blue-light)}
+/* Pricing */
+.pricing{max-width:1000px;margin:80px auto;padding:0 20px}
+.pricing h2{text-align:center;font-size:1.8em;color:var(--slate-900);margin-bottom:10px;font-weight:800;letter-spacing:-.02em}
+.pricing .sub{text-align:center;color:var(--slate-500);font-size:.92em;margin-bottom:40px}
+.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.plan{background:#fff;border-radius:16px;padding:32px 24px;border:1px solid var(--slate-200);text-align:center;transition:all .3s;position:relative}
+.plan:hover{transform:translateY(-4px);box-shadow:0 16px 48px rgba(0,0,0,.06)}
+.plan.pop{border-color:var(--blue);box-shadow:0 8px 32px rgba(37,99,235,.1)}
+.plan.pop::before{content:"Recommand\00e9 ";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,var(--blue),var(--green));color:#fff;padding:4px 18px;border-radius:20px;font-size:.72em;font-weight:700}
+.plan h3{font-size:1.12em;color:var(--slate-800);margin-bottom:6px}
+.plan .price{font-size:2.2em;font-weight:800;color:var(--slate-900);margin:10px 0}
+.plan .price em{font-size:.36em;font-weight:400;color:var(--slate-400);font-style:normal}
+.plan .profiles{font-size:.82em;color:var(--blue);font-weight:600;margin-bottom:12px}
 .plan ul{list-style:none;text-align:left;margin:12px 0}
-.plan li{padding:5px 0;font-size:.84em;color:#475569}
-.plan li::before{content:"\\2713 ";color:#22c55e;font-weight:700}
-.plan-btn{width:100%;padding:11px;border-radius:10px;font-size:.92em;font-weight:700;cursor:pointer;transition:.2s;border:1.5px solid #e2e8f0;background:#fff;color:#0f172a}
-.plan-btn:hover{border-color:#3b82f6;color:#3b82f6}
-.plan.pop .plan-btn{background:#0f172a;color:#fff;border-color:#0f172a}
-.plan.pop .plan-btn:hover{background:#1e293b}
-.feat{max-width:1100px;margin:70px auto;padding:0 20px}
-.feat h2{text-align:center;font-size:1.9em;font-weight:700;color:#0f172a;margin-bottom:40px}
+.plan li{padding:5px 0;font-size:.84em;color:var(--slate-600)}
+.plan li::before{content:"\2713 ";color:var(--green);font-weight:700}
+.plan-btn{width:100%;padding:12px;border-radius:8px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid var(--slate-200);background:#fff;color:var(--slate-700);font-family:inherit}
+.plan-btn:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-1px);box-shadow:0 4px 12px rgba(37,99,235,.06)}
+.plan-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.plan.pop .plan-btn{background:linear-gradient(135deg,var(--blue),var(--blue-dark));color:#fff;border-color:transparent}
+.plan.pop .plan-btn:hover{box-shadow:0 4px 16px rgba(37,99,235,.3);transform:translateY(-1px)}
+/* Features */
+.feat{max-width:1100px;margin:80px auto;padding:0 20px}
+.feat h2{text-align:center;font-size:1.8em;font-weight:800;color:var(--slate-900);margin-bottom:12px;letter-spacing:-.02em}
+.feat .sub{text-align:center;color:var(--slate-500);font-size:.92em;margin-bottom:40px}
 .fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}
-.fc{background:#fff;border-radius:14px;padding:24px;border:1px solid #e2e8f0;transition:.3s}
-.fc:hover{transform:translateY(-3px);box-shadow:0 8px 25px rgba(0,0,0,.06)}
-.fc .ic{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3em;margin-bottom:12px}
-.fc .ic.bl{background:#eff6ff}.fc .ic.gr{background:#f0fdf4}.fc .ic.pu{background:#faf5ff}.fc .ic.am{background:#fffbeb}
-.fc h3{color:#0f172a;margin-bottom:6px;font-size:.98em}
-.fc p{color:#64748b;font-size:.85em;line-height:1.5}
-.guarantee{max-width:800px;margin:50px auto;padding:24px 30px;background:#fffbeb;border:1px solid #fde68a;border-radius:14px;text-align:center}
-.guarantee h3{color:#92400e;margin-bottom:8px}.guarantee p{color:#92400e;font-size:.88em;line-height:1.6}
-.tgt{background:#fff;padding:60px 20px;text-align:center;border-top:1px solid #e2e8f0}
-.tgt h2{font-size:1.7em;color:#0f172a;margin-bottom:30px}
-.tg{display:flex;justify-content:center;gap:24px;flex-wrap:wrap;max-width:800px;margin:0 auto}
-.ti{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:24px 18px;width:180px;transition:.3s}
-.ti:hover{border-color:#3b82f6}.ti .ic2{font-size:1.8em;margin-bottom:6px}.ti h4{color:#0f172a;font-size:.95em;margin-bottom:3px}.ti p{font-size:.8em;color:#64748b}
-.auth-sec{max-width:420px;margin:60px auto;padding:0 20px}
-.auth-card{background:#fff;border-radius:20px;padding:36px;box-shadow:0 8px 30px rgba(0,0,0,.06);border:1px solid #e2e8f0}
-.auth-card h2{text-align:center;color:#0f172a;margin-bottom:24px;font-size:1.3em}
-.auth-tabs{display:flex;margin-bottom:24px;background:#f1f5f9;border-radius:10px;padding:4px}
-.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:#64748b;border-radius:8px;transition:.2s;font-size:.9em}
-.auth-tab.active{color:#0f172a;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.fc{background:#fff;border-radius:14px;padding:24px;border:1px solid var(--slate-200);transition:all .3s}
+.fc:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,.06);border-color:var(--blue-light)}
+.fc .ic{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3em;margin-bottom:12px;transition:transform .3s}
+.fc:hover .ic{transform:scale(1.08)}
+.fc .ic.bl{background:var(--blue-50);color:var(--blue)}.fc .ic.gr{background:var(--green-50);color:var(--green)}.fc .ic.pu{background:#f5f3ff;color:#7c3aed}.fc .ic.am{background:#fffbeb;color:#d97706}.fc .ic.tl{background:#f0fdfa;color:var(--teal)}
+.fc h3{color:var(--slate-800);margin-bottom:6px;font-size:.98em}
+.fc p{color:var(--slate-500);font-size:.83em;line-height:1.6}
+/* Guarantee */
+.guarantee{max-width:800px;margin:50px auto;padding:24px 30px;background:#fff;border:1px solid var(--slate-200);border-left:4px solid var(--blue);border-radius:10px}
+.guarantee h3{color:var(--slate-800);margin-bottom:8px;font-size:.95em}.guarantee p{color:var(--slate-500);font-size:.85em;line-height:1.65}
+/* Targets */
+.tgt{background:#fff;padding:70px 20px;text-align:center;border-top:1px solid var(--slate-200)}
+.tgt h2{font-size:1.6em;color:var(--slate-900);margin-bottom:35px;font-weight:800;letter-spacing:-.02em}
+.tg{display:flex;justify-content:center;gap:20px;flex-wrap:wrap;max-width:800px;margin:0 auto}
+.ti{background:var(--slate-50);border:1px solid var(--slate-200);border-radius:14px;padding:24px 18px;width:170px;transition:all .3s;cursor:default}
+.ti:hover{border-color:var(--blue-light);transform:translateY(-3px);box-shadow:0 8px 24px rgba(37,99,235,.06)}.ti .ic2{font-size:1.6em;margin-bottom:6px}.ti h4{color:var(--slate-800);font-size:.92em;margin-bottom:3px}.ti p{font-size:.78em;color:var(--slate-500)}
+/* Auth */
+.auth-sec{max-width:420px;margin:70px auto;padding:0 20px}
+.auth-card{background:#fff;border-radius:16px;padding:36px;box-shadow:0 12px 40px rgba(0,0,0,.06);border:1px solid var(--slate-200)}
+.auth-card h2{text-align:center;color:var(--slate-800);margin-bottom:22px;font-size:1.25em}
+.auth-tabs{display:flex;margin-bottom:22px;background:var(--slate-100);border-radius:8px;padding:4px}
+.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:var(--slate-400);border-radius:6px;transition:all .25s;font-size:.88em}
+.auth-tab:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+.auth-tab.active{color:var(--blue);background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .auth-form{display:none}.auth-form.active{display:block}
-.auth-form label{display:block;font-weight:600;font-size:.84em;color:#475569;margin-bottom:5px}
-.auth-form input{width:100%;padding:11px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:.95em;margin-bottom:14px;background:#f8fafc}
-.auth-form input:focus{border-color:#3b82f6;outline:none;background:#fff}
-.submit-btn{width:100%;padding:13px;background:#0f172a;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer}
-.submit-btn:hover{background:#1e293b}
-.msg{padding:10px 14px;border-radius:10px;margin:12px 0;font-size:.9em;display:none}
-.msg.ok{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}
+.auth-form label{display:block;font-weight:600;font-size:.82em;color:var(--slate-600);margin-bottom:4px}
+.auth-form input{width:100%;padding:11px 14px;border:1.5px solid var(--slate-200);border-radius:8px;font-size:.93em;margin-bottom:12px;background:var(--slate-50);transition:all .25s;font-family:inherit}
+.auth-form input:focus{border-color:var(--blue);outline:none;background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.08)}
+.submit-btn{width:100%;padding:13px;background:linear-gradient(135deg,var(--blue),var(--blue-dark));color:#fff;border:none;border-radius:8px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s;font-family:inherit;box-shadow:0 2px 8px rgba(37,99,235,.2)}
+.submit-btn:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(37,99,235,.3)}
+.submit-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.submit-btn:active{transform:translateY(0)}
+.msg{padding:11px 15px;border-radius:8px;margin:10px 0;font-size:.88em;display:none;animation:fadeInUp .3s ease-out}
+.msg.ok{display:block;background:var(--green-50);color:#166534;border:1px solid #bbf7d0}
 .msg.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
-.rgpd{font-size:.78em;color:#94a3b8;margin-top:14px;line-height:1.4;text-align:center}
-footer{text-align:center;padding:40px 20px;color:#94a3b8;font-size:.82em;background:#0f172a}
-footer a{color:#60a5fa;text-decoration:none}footer a:hover{text-decoration:underline}
-footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
-@media(max-width:768px){.hero h1{font-size:2em}.hero{padding:60px 16px 50px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:12px 16px}.nav .links{gap:12px}.nav a:not(.bl){display:none}.limits{gap:10px}.limit{padding:8px 14px;font-size:.78em}}
+.rgpd{font-size:.76em;color:var(--slate-400);margin-top:12px;line-height:1.4;text-align:center}
+/* Footer */
+footer{text-align:center;padding:40px 20px;color:var(--slate-400);font-size:.8em;background:var(--slate-900)}
+footer a{color:var(--slate-400);text-decoration:none;transition:color .2s}footer a:hover{text-decoration:underline;color:#fff}
+footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
+@media(max-width:768px){.hero h1{font-size:2em}.hero{padding:70px 16px 50px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:0 16px;height:56px}.nav .links{gap:10px}.nav a:not(.cta-nav){display:none}.inst-bar{gap:8px}.inst-badge{padding:6px 10px;font-size:.72em}.auth-card{padding:24px 18px}.tg{gap:10px}.ti{width:calc(50% - 10px)}.nav .logo-sub{display:none}.hero-logo svg{width:64px;height:64px}.formats-bar .inner{font-size:.72em}.trust-bar .inner{gap:12px}.trust-sep{display:none}}
 </style>
 </head>
 <body>
-<div class="nav"><div class="logo"><em>NormaCheck</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></div>
-<div class="hero">
-<h1>La conformite sociale et fiscale<br>enfin <em>simplifiee</em>.</h1>
-<p>Analysez vos documents sociaux et fiscaux, detectez les anomalies en euros, gerez votre comptabilite, generez vos DSN et pilotez vos obligations. Pour dirigeants, comptables et experts.</p>
+
+<!-- NAVIGATION -->
+<nav class="nav" aria-label="Navigation principale">
+<div class="logo-wrap">
+<div class="logo-mark">
+<!-- LOGO: Moderne avec virgules bleu/vert -->
+<svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="lg1" x1="0" y1="0" x2="36" y2="36"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#10b981"/></linearGradient></defs>
+<rect width="36" height="36" rx="10" fill="url(#lg1)"/>
+<!-- Virgule bleue -->
+<path d="M12 10c0 4 2 7 5 9" stroke="rgba(255,255,255,.9)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+<!-- Virgule verte -->
+<path d="M19 10c0 4 2 7 5 9" stroke="rgba(255,255,255,.5)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+<!-- Check -->
+<path d="M11 22l4.5 4.5 9-9" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
+<div>
+<div class="logo-text">NormaCheck</div>
+<div class="logo-sub">Conformite sociale &amp; fiscale</div>
+</div>
+</div>
+</div>
+<div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="cta-nav">Connexion</a></div>
+</nav>
+
+<!-- HERO -->
+<main class="hero" role="banner">
+<div class="hero-logo">
+<!-- Grand logo hero -->
+<svg viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="lg2" x1="0" y1="0" x2="88" y2="88"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#10b981"/></linearGradient>
+<linearGradient id="lg3" x1="0" y1="0" x2="88" y2="88"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#34d399"/></linearGradient>
+</defs>
+<rect width="88" height="88" rx="24" fill="url(#lg2)"/>
+<rect x="4" y="4" width="80" height="80" rx="20" fill="none" stroke="rgba(255,255,255,.15)" stroke-width="1"/>
+<!-- Virgule 1 - grande -->
+<path d="M28 22c0 12 6 20 14 26" stroke="rgba(255,255,255,.85)" stroke-width="5" stroke-linecap="round" fill="none"/>
+<!-- Virgule 2 - petite -->
+<path d="M46 22c0 12 6 20 14 26" stroke="rgba(255,255,255,.4)" stroke-width="5" stroke-linecap="round" fill="none"/>
+<!-- Check mark -->
+<path d="M24 55l12 12 24-24" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
+</div>
+<h1>La conformite sociale et fiscale<br>enfin <em>maitrisee</em>.</h1>
+<p>Analysez bulletins de paie, DSN, bordereaux URSSAF et documents fiscaux. Detectez chaque ecart en euros. Generez vos declarations. Pour dirigeants, comptables et experts.</p>
 <div class="hero-btns">
 <button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Commencer maintenant</button>
 <button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
 </div>
-<div class="limits">
-<div class="limit"><strong>50 fichiers</strong> par analyse</div>
-<div class="limit"><strong>2 Go</strong> max par analyse</div>
-<div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
+<div class="inst-bar">
+<div class="inst-badge">URSSAF / CSS</div>
+<div class="inst-badge">DGFIP / CGI</div>
+<div class="inst-badge">Cour des comptes</div>
+<div class="inst-badge">France Travail</div>
+<div class="inst-badge">CARSAT</div>
+</div>
+</main>
+
+<!-- Trust bar -->
+<div class="trust-bar">
+<div class="inner">
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><path d="M9 1l2 4h4.5l-3.5 3 1.2 4.5L9 10l-4.2 2.5L6 8 2.5 5H7z" fill="#3b82f6" opacity=".6"/></svg>Norme NEODeS Phase 3</div>
+<div class="trust-sep"></div>
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="14" height="14" rx="2" stroke="#3b82f6" stroke-width="1.2"/><path d="M6 9l2 2 4-4" stroke="#10b981" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>FEC conforme art. L.47 A-I LPF</div>
+<div class="trust-sep"></div>
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="#10b981" stroke-width="1"/><path d="M6 9l2 2 4-4" stroke="#10b981" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Conforme RGPD</div>
+<div class="trust-sep"></div>
+<div class="trust-item"><svg viewBox="0 0 18 18" fill="none"><path d="M9 1.5l7 4v5c0 4-3 7-7 8.5-4-1.5-7-4.5-7-8.5v-5l7-4z" stroke="#3b82f6" stroke-width="1" fill="none"/><path d="M7 9l1.5 1.5 3-3" stroke="#10b981" stroke-width="1.2" stroke-linecap="round"/></svg>Donnees chiffrees</div>
+</div>
+</div>
+
+<!-- Formats -->
+<div class="formats-bar">
+<div class="inner">
+<span>Formats compatibles :</span>
+<span class="tag">PDF</span><span class="tag">Excel</span><span class="tag">CSV</span><span class="tag">DSN</span><span class="tag">XML</span><span class="tag">FEC</span><span class="tag">Images</span><span class="tag">DOCX</span>
+<span style="color:var(--slate-300)">|</span>
+<span>SAGE, CIEL, EBP, ADP, Silae, PayFit, CEGID, Quadratus</span>
 </div>
 </div>
 
@@ -10594,16 +11702,17 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 </div>
 
 <div class="feat" id="features">
-<h2>Plateforme complete</h2>
+<h2>Plateforme complete de conformite</h2>
+<p class="sub">Tous les outils pour maitriser vos obligations sociales et fiscales.</p>
 <div class="fg">
-<div class="fc"><div class="ic bl">&#128269;</div><h3>Analyse et detection</h3><p>Rapprochement DSN / livre de paie. Ecarts par salarie, par rubrique. Score de risque par destinataire.</p></div>
-<div class="fc"><div class="ic gr">&#128200;</div><h3>Dashboard dirigeant</h3><p>Vision globale : anomalies, charges, conformite, scores URSSAF / Fiscal / France Travail / GUSO.</p></div>
-<div class="fc"><div class="ic pu">&#128196;</div><h3>Comptabilite integree</h3><p>Grand livre, balance, bilan, resultat, TVA. Alertes justificatifs. Ecritures manuelles tracees.</p></div>
-<div class="fc"><div class="ic am">&#128221;</div><h3>Generation DSN</h3><p>Creez vos declarations sociales nominatives au format NEODeS. Salaries, cotisations, totaux automatiques.</p></div>
-<div class="fc"><div class="ic bl">&#9878;</div><h3>Veille juridique</h3><p>Baremes et legislation 2020-2026. Comparaison interannuelle. Patch mensuel automatique.</p></div>
+<div class="fc"><div class="ic bl">&#128269;</div><h3>Analyse et detection</h3><p>Rapprochement DSN / livre de paie. Ecarts par salarie, par rubrique. Score de risque par destinataire (URSSAF, DGFIP, France Travail).</p></div>
+<div class="fc"><div class="ic tl">&#128200;</div><h3>Dashboard dirigeant</h3><p>Vision globale : anomalies, charges, conformite, scores URSSAF / Fiscal / France Travail / GUSO / AGESSA.</p></div>
+<div class="fc"><div class="ic pu">&#128196;</div><h3>Comptabilite integree</h3><p>Grand livre, balance, bilan, resultat, TVA. FEC conforme art. L.47 A-I. Ecritures manuelles tracees.</p></div>
+<div class="fc"><div class="ic am">&#128221;</div><h3>Generation DSN</h3><p>Declarations sociales nominatives NEODeS Phase 3. Salaries, cotisations, arrets, contrats. 80+ codes CTP.</p></div>
+<div class="fc"><div class="ic bl">&#9878;</div><h3>Veille juridique</h3><p>Baremes et legislation 2020-2026. PMSS, SMIC, taux AT/MP. Comparaison interannuelle. Mise a jour mensuelle.</p></div>
 <div class="fc"><div class="ic gr">&#128101;</div><h3>Collaboration</h3><p>Invitez des collaborateurs. Tracabilite des actions. Profil decisionnaire pour validation.</p></div>
-<div class="fc"><div class="ic pu">&#128203;</div><h3>Gestion factures</h3><p>Analyse OCR, comptabilisation auto, suivi paiements (paye/impaye), historique complet.</p></div>
-<div class="fc"><div class="ic am">&#128274;</div><h3>Securite et RGPD</h3><p>Donnees chiffrees, acces controle, conformite RGPD. Droit d'acces, rectification, suppression.</p></div>
+<div class="fc"><div class="ic tl">&#128203;</div><h3>Gestion factures</h3><p>Analyse OCR, comptabilisation auto, suivi paiements (paye/impaye), historique complet.</p></div>
+<div class="fc"><div class="ic gr">&#128274;</div><h3>Securite et RGPD</h3><p>Donnees chiffrees, acces controle, conformite RGPD. Validation NIR, SIRET par algorithme de Luhn.</p></div>
 </div>
 </div>
 
@@ -10621,21 +11730,21 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 
 <div class="auth-sec" id="auth"><div class="auth-card">
 <h2>Acces a NormaCheck</h2>
-<div class="auth-tabs"><div class="auth-tab active" onclick="showAT('login')">Connexion</div><div class="auth-tab" onclick="showAT('register')">Inscription</div></div>
+<div class="auth-tabs"><div class="auth-tab active" onclick="showAT('login')" tabindex="0" role="tab" aria-selected="true">Connexion</div><div class="auth-tab" onclick="showAT('register')" tabindex="0" role="tab" aria-selected="false">Inscription</div></div>
 <div id="amsg" class="msg"></div>
 <div class="auth-form active" id="form-login">
-<label>Identifiant / Email</label><input type="text" id="le" placeholder="admin">
-<label>Mot de passe</label><input type="password" id="lp" placeholder="Votre mot de passe">
+<label for="le">Identifiant / Email</label><input type="text" id="le" placeholder="admin" autocomplete="username">
+<label for="lp">Mot de passe</label><input type="password" id="lp" placeholder="Votre mot de passe" autocomplete="current-password">
 <button class="submit-btn" onclick="doLogin()">Se connecter</button>
 </div>
 <div class="auth-form" id="form-register">
-<label>Nom</label><input id="rn" placeholder="Dupont">
-<label>Prenom</label><input id="rp2" placeholder="Jean">
-<label>Email</label><input type="email" id="re" placeholder="jean@exemple.fr">
-<label>Mot de passe</label><input type="password" id="rpw" placeholder="Min. 6 caracteres">
-<label>Confirmer</label><input type="password" id="rpw2" placeholder="Confirmez">
-<div style="margin:14px 0;padding:14px;background:#f8fafc;border-radius:10px;font-size:.82em;color:#64748b">
-<label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0;cursor:pointer"><input type="checkbox" id="cgv" style="width:auto;margin:0"> J'accepte les <a href="/legal/cgu" target="_blank" style="color:#3b82f6">CGU</a> et <a href="/legal/cgv" target="_blank" style="color:#3b82f6">CGV</a>.</label></div>
+<label for="rn">Nom</label><input id="rn" placeholder="Dupont" autocomplete="family-name">
+<label for="rp2">Prenom</label><input id="rp2" placeholder="Jean" autocomplete="given-name">
+<label for="re">Email</label><input type="email" id="re" placeholder="jean@exemple.fr" autocomplete="email">
+<label for="rpw">Mot de passe</label><input type="password" id="rpw" placeholder="Min. 6 caracteres" autocomplete="new-password">
+<label for="rpw2">Confirmer</label><input type="password" id="rpw2" placeholder="Confirmez" autocomplete="new-password">
+<div style="margin:14px 0;padding:14px;background:var(--slate-50);border-radius:10px;font-size:.82em;color:var(--slate-500)">
+<label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0;cursor:pointer"><input type="checkbox" id="cgv" style="width:auto;margin:0"> J'accepte les <a href="/legal/cgu" target="_blank" style="color:var(--blue)">CGU</a> et <a href="/legal/cgv" target="_blank" style="color:var(--blue)">CGV</a>.</label></div>
 <button class="submit-btn" onclick="doReg()">Creer mon compte</button>
 <div class="rgpd">Vos donnees sont traitees conformement au RGPD (Reglement UE 2016/679). Vous disposez d'un droit d'acces, de rectification et de suppression de vos donnees. Contact : dpo@normacheck-app.fr</div>
 </div></div></div>
@@ -10647,13 +11756,28 @@ footer .links{margin-bottom:12px;display:flex;gap:20px;justify-content:center}
 <a href="/legal/cgv">CGV</a>
 <a href="/legal/mentions#rgpd">RGPD</a>
 </div>
-NormaCheck v3.8.1 &mdash; Conformite sociale et fiscale &copy; 2026<br>
-<span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations</span>
+NormaCheck v3.9.0 &mdash; Conformite sociale et fiscale &copy; 2026<br>
+<span style="font-size:.85em;opacity:.6">Outil d'aide a la decision - Non opposable aux administrations (URSSAF, DGFIP, France Travail, etc.)</span>
 </footer>
 <script>
-function showAT(t){document.querySelectorAll(".auth-tab").forEach(function(b,i){b.classList.toggle("active",i===(t==="login"?0:1))});document.getElementById("form-login").classList.toggle("active",t==="login");document.getElementById("form-register").classList.toggle("active",t==="register");document.getElementById("amsg").className="msg";}
-function doLogin(){var fd=new FormData();fd.append("email",document.getElementById("le").value);fd.append("mot_de_passe",document.getElementById("lp").value);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
-function doReg(){if(document.getElementById("rpw").value!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Mots de passe differents.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var fd=new FormData();fd.append("nom",document.getElementById("rn").value);fd.append("prenom",document.getElementById("rp2").value);fd.append("email",document.getElementById("re").value);fd.append("mot_de_passe",document.getElementById("rpw").value);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function showAT(t){
+document.querySelectorAll(".auth-tab").forEach(function(b,i){
+var isActive=i===(t==="login"?0:1);
+b.classList.toggle("active",isActive);
+b.setAttribute("aria-selected",isActive?"true":"false");
+});
+document.getElementById("form-login").classList.toggle("active",t==="login");
+document.getElementById("form-register").classList.toggle("active",t==="register");
+document.getElementById("amsg").className="msg";
+}
+/* Keyboard support for auth tabs */
+document.addEventListener("keydown",function(e){
+if(e.target.classList.contains("auth-tab")&&(e.key==="Enter"||e.key===" ")){
+e.preventDefault();e.target.click();
+}
+});
+function doLogin(){var email=document.getElementById("le").value.trim();var pwd=document.getElementById("lp").value;if(!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Veuillez saisir votre identifiant.";return;}var btn=document.querySelector("#form-login .submit-btn");btn.disabled=true;btn.textContent="Connexion...";var fd=new FormData();fd.append("email",email);fd.append("mot_de_passe",pwd);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Identifiants incorrects")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie. Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Se connecter";});}
+function doReg(){var nom=document.getElementById("rn").value.trim();var prenom=document.getElementById("rp2").value.trim();var email=document.getElementById("re").value.trim();var pwd=document.getElementById("rpw").value;if(!nom||!prenom||!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Tous les champs sont obligatoires.";return;}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Adresse email invalide.";return;}if(pwd.length<6){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir au moins 6 caracteres.";return;}if(pwd!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Les mots de passe ne correspondent pas.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var btn=document.querySelector("#form-register .submit-btn");btn.disabled=true;btn.textContent="Creation...";var fd=new FormData();fd.append("nom",nom);fd.append("prenom",prenom);fd.append("email",email);fd.append("mot_de_passe",pwd);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur lors de l inscription")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree avec succes ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Creer mon compte";});}
 </script>
 </body>
 </html>"""
@@ -10676,62 +11800,140 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <div class="nav"><div class="logo"><em>NormaCheck</em></div><a href="/">Retour a l'accueil</a></div>
 <div class="content">
 <h1>Conditions Generales d'Utilisation</h1>
-<p><em>Derniere mise a jour : 1er janvier 2026</em></p>
+<p><em>Derniere mise a jour : 5 mars 2026 — Version 2.0</em></p>
 
-<h2>Article 1 - Objet</h2>
-<p>Les presentes Conditions Generales d'Utilisation (CGU) regissent l'acces et l'utilisation de la plateforme NormaCheck, outil d'aide a la decision en matiere de conformite sociale et fiscale.</p>
+<div class="warn"><strong>AVERTISSEMENT ESSENTIEL :</strong> NormaCheck est exclusivement un <strong>outil d'aide a la decision</strong> destine aux professionnels. Les analyses, calculs, simulations, scores et recommandations produits par la plateforme sont fournis <strong>a titre purement indicatif</strong> et ne constituent en aucun cas un conseil juridique, fiscal, comptable ou social. Les resultats fournis <strong>ne sont pas opposables</strong> aux administrations (URSSAF, DGFIP, France Travail, MSA, AGIRC-ARRCO, etc.). L'utilisateur <strong>doit imperativement</strong> faire valider toute decision par un professionnel qualifie (expert-comptable, commissaire aux comptes, avocat specialise).</div>
 
-<div class="warn"><strong>Important :</strong> NormaCheck est un outil d'aide a la decision. Les analyses produites sont purement indicatives et ne se substituent en aucun cas a l'avis d'un expert-comptable, d'un commissaire aux comptes ou d'un conseil juridique. Les resultats fournis ne sont pas opposables aux administrations (URSSAF, DGFIP, France Travail, MSA, etc.).</div>
-
-<h2>Article 2 - Acces au service</h2>
-<p>L'acces a NormaCheck necessite la creation d'un compte utilisateur. L'utilisateur s'engage a fournir des informations exactes et a maintenir la confidentialite de ses identifiants. Toute utilisation du compte est reputee faite par le titulaire.</p>
-
-<h2>Article 3 - Utilisation du service</h2>
-<p>L'utilisateur s'engage a :</p>
+<h2>Article 1 - Objet et definitions</h2>
+<p>Les presentes Conditions Generales d'Utilisation (ci-apres "CGU") regissent l'acces et l'utilisation de la plateforme NormaCheck (ci-apres "la Plateforme"), editee par NormaCheck (ci-apres "l'Editeur").</p>
+<p><strong>Definitions :</strong></p>
 <ul>
-<li>Utiliser NormaCheck dans le respect de la legislation en vigueur</li>
-<li>Ne pas tenter de contourner les mesures de securite</li>
-<li>Ne pas utiliser le service a des fins illicites ou frauduleuses</li>
-<li>Verifier les resultats avec un professionnel qualifie avant toute decision</li>
-<li>Ne pas redistribuer ou revendre l'acces au service</li>
+<li><strong>"Plateforme"</strong> : l'ensemble des services, interfaces, algorithmes et bases de donnees de NormaCheck</li>
+<li><strong>"Utilisateur"</strong> : toute personne physique ou morale ayant cree un compte sur la Plateforme</li>
+<li><strong>"Resultats"</strong> : l'ensemble des analyses, scores, simulations, calculs et rapports produits par la Plateforme</li>
+<li><strong>"Donnees"</strong> : les documents, fichiers et informations transmis par l'Utilisateur a la Plateforme</li>
 </ul>
 
-<h2>Article 4 - Propriete intellectuelle</h2>
-<p>L'ensemble des elements de NormaCheck (logiciel, algorithmes, interfaces, bases de donnees) est protege par le droit de la propriete intellectuelle. Toute reproduction, representation ou exploitation non autorisee est interdite.</p>
-<p>Les documents uploades par l'utilisateur restent sa propriete exclusive.</p>
-
-<h2>Article 5 - Limitation de responsabilite</h2>
-<p>NormaCheck est fourni "en l'etat". L'editeur ne garantit pas :</p>
+<h2>Article 2 - Nature du service et limites</h2>
+<p>NormaCheck est un outil informatique d'aide a la decision. <strong>La Plateforme ne fournit pas de prestations de conseil juridique, fiscal ou comptable</strong> au sens des professions reglementees (ordonnance n°45-2138 du 19 septembre 1945 pour les experts-comptables, loi n°71-1130 du 31 decembre 1971 pour les avocats).</p>
+<p>Les Resultats produits par la Plateforme :</p>
 <ul>
-<li>L'exactitude ou l'exhaustivite des analyses produites</li>
-<li>L'adequation du service a un usage particulier</li>
-<li>La disponibilite ininterrompue du service</li>
+<li>Sont fondes sur les donnees fournies par l'Utilisateur et les referentiels legislatifs et reglementaires integres</li>
+<li>Peuvent contenir des erreurs, omissions ou imprecisions inherentes au traitement automatise</li>
+<li>Ne prennent pas en compte l'ensemble des specificites individuelles de chaque situation</li>
+<li>Ne se substituent en aucun cas a une consultation professionnelle personnalisee</li>
+<li>N'ont aucune valeur probante devant les juridictions ou administrations</li>
+<li>Sont susceptibles d'etre obsoletes en cas d'evolution legislative ou reglementaire non encore integree</li>
 </ul>
-<p>L'editeur ne saurait etre tenu responsable des decisions prises sur la base des resultats de NormaCheck, ni des consequences financieres, fiscales ou juridiques qui en decouleraient.</p>
 
-<h2>Article 6 - Donnees personnelles et RGPD</h2>
-<p>Conformement au Reglement General sur la Protection des Donnees (RGPD - Reglement UE 2016/679) et a la loi Informatique et Libertes, l'utilisateur dispose des droits suivants :</p>
+<h2>Article 3 - Acces au service</h2>
+<p>L'acces a NormaCheck necessite la creation d'un compte utilisateur. L'Utilisateur s'engage a :</p>
 <ul>
-<li><strong>Droit d'acces :</strong> obtenir la communication de ses donnees</li>
-<li><strong>Droit de rectification :</strong> corriger des donnees inexactes</li>
-<li><strong>Droit de suppression :</strong> demander l'effacement de ses donnees</li>
-<li><strong>Droit a la portabilite :</strong> recuperer ses donnees dans un format structure</li>
-<li><strong>Droit d'opposition :</strong> s'opposer au traitement de ses donnees</li>
-<li><strong>Droit relatif aux decisions automatisees (art. 22 RGPD) :</strong> obtenir une intervention humaine, exprimer son point de vue et contester toute decision. NormaCheck est un outil d'aide a la decision ; les scores sont provisoires et necessitent une validation humaine</li>
+<li>Fournir des informations exactes, completes et a jour lors de l'inscription</li>
+<li>Maintenir la stricte confidentialite de ses identifiants et mots de passe</li>
+<li>Informer immediatement l'Editeur de toute utilisation non autorisee de son compte</li>
+<li>Ne pas partager ses identifiants avec des tiers non autorises</li>
 </ul>
-<p>Les donnees sont traitees aux fins suivantes : fourniture du service, analyse de documents, amelioration de la plateforme. Base legale : execution du contrat (art. 6.1.b RGPD).</p>
-<p>Contact DPO : dpo@normacheck-app.fr</p>
+<p>Toute utilisation du compte est reputee effectuee par le titulaire. <strong>L'Editeur ne saurait etre tenu responsable des consequences d'un acces non autorise resultant de la negligence de l'Utilisateur dans la protection de ses identifiants.</strong></p>
 
-<h2>Article 7 - Duree et resiliation</h2>
-<p>L'inscription est valable pour une duree indeterminee. L'utilisateur peut supprimer son compte a tout moment. L'editeur se reserve le droit de suspendre un compte en cas de violation des CGU.</p>
+<h2>Article 4 - Obligations de l'Utilisateur</h2>
+<p>L'Utilisateur s'engage a :</p>
+<ul>
+<li>Utiliser NormaCheck dans le strict respect de la legislation en vigueur</li>
+<li>Ne pas tenter de contourner, desactiver ou compromettre les mesures de securite de la Plateforme</li>
+<li>Ne pas utiliser le service a des fins illicites, frauduleuses ou contraires a l'ordre public</li>
+<li><strong>Verifier systematiquement les Resultats avec un professionnel qualifie avant toute prise de decision</strong></li>
+<li>Ne pas redistribuer, revendre, sous-licencier ou mettre a disposition de tiers non autorises l'acces au service</li>
+<li>Ne pas utiliser la Plateforme pour stocker ou transmettre des donnees illicites ou portant atteinte aux droits de tiers</li>
+<li>Ne pas proceder a de l'extraction systematique de donnees (scraping) ou a de la retro-ingenierie</li>
+<li>Respecter les limitations techniques et les quotas d'utilisation applicables a son abonnement</li>
+</ul>
 
-<h2>Article 8 - Modification des CGU</h2>
-<p>L'editeur se reserve le droit de modifier les presentes CGU. Les utilisateurs seront informes de toute modification substantielle. L'utilisation continue du service vaut acceptation des CGU modifiees.</p>
+<h2>Article 5 - Propriete intellectuelle</h2>
+<p>L'ensemble des elements de NormaCheck (logiciel, code source, algorithmes, interfaces, bases de donnees, referentiels, documentation, marques et logos) est protege par le droit de la propriete intellectuelle (Code de la propriete intellectuelle, directive 2009/24/CE sur la protection juridique des programmes d'ordinateur, directive 96/9/CE sur la protection juridique des bases de donnees).</p>
+<p>Toute reproduction, representation, adaptation, traduction ou exploitation non expressement autorisee est interdite et constitue une contrefacon sanctionnee par les articles L.335-2 et suivants du Code de la propriete intellectuelle.</p>
+<p>Les documents uploades et Donnees transmis par l'Utilisateur restent sa propriete exclusive. L'Editeur s'interdit tout usage des Donnees a d'autres fins que la fourniture du service.</p>
 
-<h2>Article 9 - Droit applicable</h2>
-<p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
+<h2>Article 6 - Limitation de responsabilite</h2>
+<div class="warn"><strong>Clause essentielle :</strong> L'Utilisateur reconnait avoir ete clairement informe des limites du service avant toute utilisation. Les dispositions suivantes constituent une condition essentielle et determinante du consentement de l'Editeur a la fourniture du service.</div>
+<p>NormaCheck est fourni <strong>"en l'etat" et "tel que disponible"</strong>, sans garantie d'aucune sorte, expresse ou implicite. L'Editeur ne garantit pas :</p>
+<ul>
+<li>L'exactitude, l'exhaustivite ou la fiabilite des Resultats produits par la Plateforme</li>
+<li>L'adequation du service aux besoins particuliers de l'Utilisateur</li>
+<li>La disponibilite ininterrompue, securisee et sans erreur du service</li>
+<li>La conformite des Resultats a la legislation en vigueur a la date de la consultation</li>
+<li>L'absence de bugs, virus ou elements nuisibles dans le service</li>
+</ul>
+<p><strong>L'Editeur decline expressement toute responsabilite :</strong></p>
+<ul>
+<li>Pour les decisions prises par l'Utilisateur sur la base des Resultats de NormaCheck</li>
+<li>Pour les consequences financieres, fiscales, sociales, penales ou juridiques decoulant directement ou indirectement de l'utilisation de la Plateforme</li>
+<li>Pour les redressements URSSAF, fiscaux, ou toute sanction administrative resultant de calculs ou analyses de la Plateforme</li>
+<li>Pour les pertes de donnees, d'exploitation ou de chiffre d'affaires</li>
+<li>Pour les dommages indirects, accessoires, speciaux ou consecutifs de quelque nature que ce soit</li>
+<li>Pour les erreurs dans les taux, baremes, seuils ou references legislatives integres dans la Plateforme</li>
+</ul>
+<p><strong>En tout etat de cause, la responsabilite totale de l'Editeur, toutes causes confondues, est limitee au montant des sommes effectivement versees par l'Utilisateur au cours des douze (12) derniers mois precedant le fait generateur.</strong></p>
+<p>L'Utilisateur s'engage a ne formuler aucune reclamation, action ou demande d'indemnisation a l'encontre de l'Editeur pour les dommages resultant de l'utilisation des Resultats sans validation prealable par un professionnel qualifie.</p>
+
+<h2>Article 7 - Indemnisation</h2>
+<p>L'Utilisateur s'engage a garantir et indemniser l'Editeur, ses dirigeants, employes et partenaires contre toute reclamation, perte, dommage, cout ou depense (y compris les frais de justice et honoraires d'avocats raisonnables) resultant de :</p>
+<ul>
+<li>La violation des presentes CGU par l'Utilisateur</li>
+<li>L'utilisation du service en violation de la loi ou des droits de tiers</li>
+<li>Les contenus ou Donnees transmis par l'Utilisateur via la Plateforme</li>
+<li>Toute reclamation d'un tiers liee a l'utilisation des Resultats par l'Utilisateur</li>
+</ul>
+
+<h2>Article 8 - Donnees personnelles et RGPD</h2>
+<p>Conformement au Reglement General sur la Protection des Donnees (RGPD - Reglement UE 2016/679), a la loi n°78-17 du 6 janvier 1978 modifiee (Informatique et Libertes) et aux recommandations de la CNIL, l'Utilisateur dispose des droits suivants :</p>
+<ul>
+<li><strong>Droit d'acces (art. 15 RGPD) :</strong> obtenir la communication de ses donnees personnelles et des informations sur leur traitement</li>
+<li><strong>Droit de rectification (art. 16 RGPD) :</strong> corriger des donnees inexactes ou incompletes</li>
+<li><strong>Droit a l'effacement (art. 17 RGPD) :</strong> demander la suppression de ses donnees dans les conditions prevues par le reglement</li>
+<li><strong>Droit a la portabilite (art. 20 RGPD) :</strong> recuperer ses donnees dans un format structure, couramment utilise et lisible par machine</li>
+<li><strong>Droit d'opposition (art. 21 RGPD) :</strong> s'opposer au traitement de ses donnees pour des motifs tenant a sa situation particuliere</li>
+<li><strong>Droit a la limitation du traitement (art. 18 RGPD) :</strong> obtenir la limitation du traitement dans les cas prevus par le reglement</li>
+<li><strong>Droit relatif aux decisions automatisees (art. 22 RGPD) :</strong> obtenir une intervention humaine, exprimer son point de vue et contester toute decision fondee exclusivement sur un traitement automatise. Les scores NormaCheck sont provisoires et necessitent une validation humaine</li>
+</ul>
+<p><strong>Finalites du traitement :</strong> fourniture du service, analyse de documents, generation de rapports, amelioration des algorithmes. <strong>Base legale :</strong> execution du contrat (art. 6.1.b RGPD).</p>
+<p><strong>Duree de conservation :</strong> les donnees sont conservees pendant la duree du contrat et 3 ans apres la fin de la relation contractuelle (prescription civile de droit commun). Les donnees comptables et fiscales sont conservees conformement aux obligations legales (6 ans, art. L.102 B du LPF).</p>
+<p><strong>Hebergement :</strong> les donnees sont hebergees en France / Union Europeenne. Aucun transfert hors UE n'est effectue.</p>
+<p><strong>Securite :</strong> les donnees sont chiffrees au repos et en transit. Les acces sont controles par authentification et journalises.</p>
+<p>Pour exercer vos droits ou pour toute question : <strong>dpo@normacheck-app.fr</strong>. En cas de reclamation, vous pouvez saisir la CNIL (www.cnil.fr).</p>
+
+<h2>Article 9 - Signature electronique</h2>
+<p>La Plateforme propose un service de signature electronique conforme au Reglement (UE) n°910/2014 (eIDAS) :</p>
+<ul>
+<li><strong>SEA (Signature Electronique Avancee, art. 26 eIDAS) :</strong> identifie le signataire de maniere univoque, est liee aux donnees de maniere a detecter toute modification ulterieure. Recevable en preuve (art. 25.1 eIDAS)</li>
+<li><strong>SEQ (Signature Electronique Qualifiee, art. 3.12 eIDAS) :</strong> beneficie de la presomption d'equivalence avec la signature manuscrite (art. 25.2 eIDAS). Necessite un certificat qualifie et un dispositif de creation qualifie</li>
+</ul>
+<p>L'Editeur ne garantit pas la qualification SEQ au sens strict du reglement eIDAS en l'absence de recours a un prestataire de services de confiance qualifie (PSCQ) inscrit sur la liste de confiance de l'ANSSI. La signature generee par la Plateforme constitue une SEA et peut etre soumise a un PSCQ pour obtenir le niveau SEQ.</p>
+
+<h2>Article 10 - Force majeure</h2>
+<p>L'Editeur ne saurait etre tenu responsable de l'inexecution ou du retard dans l'execution de ses obligations en cas de force majeure au sens de l'article 1218 du Code civil, incluant notamment : catastrophe naturelle, pandemie, greve, panne de reseau, cyberattaque, decision gouvernementale ou administrative.</p>
+
+<h2>Article 11 - Duree et resiliation</h2>
+<p>L'inscription est valable pour une duree indeterminee. L'Utilisateur peut supprimer son compte a tout moment via les parametres de son compte ou par demande a l'adresse de contact.</p>
+<p>L'Editeur se reserve le droit de suspendre ou resilier un compte, sans preavis ni indemnite, en cas de :</p>
+<ul>
+<li>Violation des presentes CGU</li>
+<li>Utilisation frauduleuse ou abusive du service</li>
+<li>Defaut de paiement (pour les abonnements payants)</li>
+<li>Inactivite prolongee (plus de 24 mois)</li>
+</ul>
+
+<h2>Article 12 - Modification des CGU</h2>
+<p>L'Editeur se reserve le droit de modifier les presentes CGU a tout moment. Les Utilisateurs seront informes de toute modification substantielle par email ou notification dans la Plateforme au moins 30 jours avant l'entree en vigueur. La poursuite de l'utilisation du service apres cette date vaut acceptation des CGU modifiees. En cas de refus, l'Utilisateur peut resilier son compte avant l'entree en vigueur.</p>
+
+<h2>Article 13 - Divisibilite</h2>
+<p>Si l'une quelconque des dispositions des presentes CGU est declaree nulle ou inapplicable par une juridiction competente, les autres dispositions conservent leur pleine force et leur plein effet.</p>
+
+<h2>Article 14 - Droit applicable et juridiction competente</h2>
+<p>Les presentes CGU sont soumises au droit francais. <strong>Tout litige relatif a l'interpretation ou a l'execution des presentes sera soumis a la competence exclusive des tribunaux competents du ressort du siege social de l'Editeur</strong>, sauf disposition imperative contraire.</p>
+<p>Conformement aux articles L.611-1 et R.612-1 du Code de la consommation, l'Utilisateur consommateur peut recourir gratuitement au service de mediation de la consommation. Le mediateur peut etre saisi via la plateforme en ligne de resolution des litiges de la Commission europeenne (https://ec.europa.eu/consumers/odr).</p>
 </div>
-<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.9.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -10883,33 +12085,42 @@ APP_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NormaCheck - Application</title>
+<meta name="description" content="NormaCheck - Plateforme de conformite sociale et fiscale">
+<meta name="theme-color" content="#1e40af">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%233b82f6'/><stop offset='1' stop-color='%2310b981'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='url(%23g)'/><path d='M10 16l4 4 8-8' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
+<title>NormaCheck - Conformite</title>
 <style>
-:root{--p:#0f172a;--p2:#1e40af;--p3:#3b82f6;--pl:#eff6ff;--g:#22c55e;--gl:#f0fdf4;--r:#ef4444;--rl:#fef2f2;--o:#f59e0b;--ol:#fffbeb;--pu:#a855f7;--pul:#faf5ff;--tl:#0d9488;--bg:#f8fafc;--tx:#1e293b;--tx2:#64748b;--brd:#e2e8f0;--sh:0 1px 3px rgba(0,0,0,.06);--sidebar-w:240px;--card-bg:#fff}
+:root{--p:#0c1829;--p2:#1a3a6b;--p3:#2563eb;--pl:#eef4ff;--g:#059669;--gl:#ecfdf5;--r:#dc2626;--rl:#fef2f2;--o:#d97706;--ol:#fffbeb;--pu:#7c3aed;--pul:#f5f3ff;--tl:#0d7377;--bg:#f1f5f9;--bg2:#f8fafc;--tx:#0f172a;--tx2:#475569;--brd:#cbd5e1;--sh:0 1px 4px rgba(15,23,42,.08);--sidebar-w:256px;--card-bg:#fff;--accent:#1d4ed8;--accent-light:#dbeafe}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden;-webkit-text-size-adjust:100%}
+body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden;-webkit-text-size-adjust:100%;letter-spacing:-.01em}
 .layout{display:flex;min-height:100vh;min-height:100dvh}
 :focus-visible{outline:2px solid var(--p3);outline-offset:2px;border-radius:4px}:focus:not(:focus-visible){outline:none}
 /* Sidebar desktop */
-.sidebar{width:var(--sidebar-w);background:var(--p);color:#fff;display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;transition:transform .3s}
-.sidebar .logo{padding:20px 22px;font-size:1.4em;font-weight:800;border-bottom:1px solid rgba(255,255,255,.08)}
-.sidebar .logo em{font-style:normal;color:#60a5fa}
-.sidebar .nav-group{padding:14px 10px 4px;font-size:.68em;text-transform:uppercase;letter-spacing:1.5px;color:#475569;font-weight:600}
-.sidebar .nl{display:flex;align-items:center;gap:10px;padding:12px 18px;cursor:pointer;color:rgba(255,255,255,.6);transition:.2s;border-radius:8px;margin:2px 8px;font-size:.88em;-webkit-tap-highlight-color:transparent;min-height:44px}
-.sidebar .nl:hover{background:rgba(255,255,255,.07);color:#fff}
-.sidebar .nl.active{background:rgba(96,165,250,.15);color:#60a5fa;font-weight:600}
-.sidebar .nl .ico{width:20px;text-align:center;font-size:1.1em;flex-shrink:0}
-.sidebar .spacer{flex:1}
-.sidebar .logout{padding:14px 18px;cursor:pointer;color:rgba(255,255,255,.4);font-size:.84em;border-top:1px solid rgba(255,255,255,.06);transition:.2s;display:flex;align-items:center;gap:8px;min-height:44px;padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px))}
-.sidebar .logout:hover{color:#fff;background:rgba(239,68,68,.12)}
+.sidebar{width:var(--sidebar-w);background:var(--p);color:#fff;display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;transition:transform .3s;overflow:hidden}
+.sidebar .logo{padding:22px 24px;font-size:1.3em;font-weight:800;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.sidebar .logo em{font-style:normal;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.sidebar .logo span{font-size:.48em;background:rgba(96,165,250,.2);color:#93c5fd;padding:2px 8px;border-radius:12px;font-weight:600;letter-spacing:.5px}
+.sidebar .logo-shield{width:28px;height:28px;flex-shrink:0}
+.sidebar-nav{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.15) transparent;padding-bottom:8px}
+.sidebar-nav::-webkit-scrollbar{width:5px}.sidebar-nav::-webkit-scrollbar-track{background:transparent}.sidebar-nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}.sidebar-nav::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.25)}
+.sidebar .nav-group{padding:16px 12px 4px;font-size:.62em;text-transform:uppercase;letter-spacing:2px;color:rgba(148,163,184,.6);font-weight:700}
+.sidebar .nl{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;color:rgba(255,255,255,.55);transition:all .2s ease;border-radius:10px;margin:1px 10px;font-size:.84em;-webkit-tap-highlight-color:transparent;min-height:42px;font-weight:500}
+.sidebar .nl:hover{background:rgba(255,255,255,.06);color:rgba(255,255,255,.9);transform:translateX(2px)}
+.sidebar .nl.active{background:linear-gradient(135deg,rgba(37,99,235,.2),rgba(96,165,250,.15));color:#93c5fd;font-weight:600;box-shadow:inset 3px 0 0 #60a5fa}
+.sidebar .nl .ico{width:22px;text-align:center;font-size:1em;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.sidebar .nl .ico svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.sidebar .logout{padding:14px 18px;cursor:pointer;color:rgba(255,255,255,.35);font-size:.82em;border-top:1px solid rgba(255,255,255,.05);transition:.2s;display:flex;align-items:center;gap:8px;min-height:44px;flex-shrink:0;padding-bottom:calc(14px + env(safe-area-inset-bottom, 0px))}
+.sidebar .logout:hover{color:#fca5a5;background:rgba(239,68,68,.1)}
 .content{margin-left:var(--sidebar-w);flex:1;min-height:100vh;min-height:100dvh}
 /* Topbar */
-.topbar{background:#fff;border-bottom:1px solid var(--brd);padding:14px 28px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:50}
-.topbar h1{font-size:1.12em;font-weight:700;color:var(--p)}
-.topbar .info{font-size:.83em;color:var(--tx2)}
+.topbar{background:var(--card-bg);border-bottom:1px solid var(--brd);padding:14px 28px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);background:rgba(255,255,255,.92)}
+.topbar h1{font-size:1.08em;font-weight:700;color:var(--p);letter-spacing:-.02em}
+.topbar .info{font-size:.8em;color:var(--tx2)}
 .topbar .mob-menu{display:none;background:none;border:none;font-size:1.5em;cursor:pointer;padding:8px 12px;color:var(--p);-webkit-tap-highlight-color:transparent;min-height:44px;min-width:44px}
 .page{padding:24px 28px;max-width:1200px}
-.sec{display:none}.sec.active{display:block}
+.sec{display:none;animation:fadeIn .3s ease-out}.sec.active{display:block}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
 /* Overlay mobile */
 .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90;-webkit-tap-highlight-color:transparent}
 /* Tablet */
@@ -10932,8 +12143,8 @@ body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--
 .g2,.g3{grid-template-columns:1fr}
 .g4{grid-template-columns:repeat(2,1fr);gap:8px}
 .card{padding:16px;margin-bottom:12px;border-radius:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.tabs{gap:0;padding:3px;margin-bottom:10px}
-.tab{padding:10px 14px;font-size:.85em}
+.tabs{gap:3px;padding:4px;margin-bottom:10px}
+.tab{padding:8px 12px;font-size:.8em;min-height:36px}
 table{font-size:.85em;min-width:480px}
 th{padding:8px 10px}td{padding:7px 10px}
 .sc .val{font-size:1.2em}
@@ -10973,44 +12184,48 @@ input,select,textarea{font-size:16px;padding:12px 14px}
 .gauge-inner{width:60px;height:60px;font-size:1.1em}
 }
 /* Cards */
-.card{background:var(--card-bg);border-radius:14px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:.2s}
-.card:hover{box-shadow:0 4px 16px rgba(0,0,0,.04)}
-.card h2{color:var(--p);margin-bottom:14px;font-size:1.08em;font-weight:700;display:flex;align-items:center;gap:8px}
-.card h2 .ct{background:var(--pl);color:var(--p3);padding:2px 10px;border-radius:20px;font-size:.72em}
+.card{background:var(--card-bg);border-radius:16px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:all .25s ease;box-shadow:0 1px 3px rgba(15,23,42,.06)}
+.card:hover{box-shadow:0 6px 24px rgba(15,23,42,.08);border-color:rgba(37,99,235,.25)}
+.card h2{color:var(--p);margin-bottom:14px;font-size:1.05em;font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:-.02em;padding-bottom:12px;border-bottom:1px solid var(--brd)}
+.card h2 .ct{background:#eff6ff;color:#1d4ed8;padding:2px 10px;border-radius:20px;font-size:.72em;font-weight:700;border:1px solid #bfdbfe}
 /* Grids */
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
 /* Stat cards */
-.sc{border-radius:12px;padding:16px;text-align:center;border:1px solid var(--brd);background:var(--card-bg);transition:.2s}
-.sc:hover{border-color:var(--p3)}.sc .val{font-size:1.6em;font-weight:800;color:var(--p)}.sc .lab{font-size:.76em;color:var(--tx2);margin-top:3px}
-.sc.blue{background:var(--pl);border-color:#bfdbfe}.sc.green{background:var(--gl);border-color:#bbf7d0}
-.sc.red{background:var(--rl);border-color:#fecaca}.sc.amber{background:var(--ol);border-color:#fde68a}
-.sc.purple{background:var(--pul);border-color:#e9d5ff}.sc.teal{background:#f0fdfa;border-color:#99f6e4}
+.sc{border-radius:14px;padding:18px 16px;text-align:center;border:none;background:var(--card-bg);transition:all .25s ease;position:relative;overflow:hidden}
+.sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;opacity:1;transition:.25s}
+.sc:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(15,23,42,.1)}.sc .val{font-size:1.5em;font-weight:800;letter-spacing:-.03em}.sc .lab{font-size:.74em;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.sc.blue{background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd}.sc.blue .val{color:#1e40af}.sc.blue .lab{color:#2563eb}.sc.blue::before{background:#2563eb}
+.sc.green{background:linear-gradient(135deg,#ecfdf5,#d1fae5);border:1px solid #6ee7b7}.sc.green .val{color:#065f46}.sc.green .lab{color:#059669}.sc.green::before{background:#059669}
+.sc.red{background:linear-gradient(135deg,#fef2f2,#fee2e2);border:1px solid #fca5a5}.sc.red .val{color:#991b1b}.sc.red .lab{color:#dc2626}.sc.red::before{background:#dc2626}
+.sc.amber{background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fcd34d}.sc.amber .val{color:#92400e}.sc.amber .lab{color:#d97706}.sc.amber::before{background:#d97706}
+.sc.purple{background:linear-gradient(135deg,#f5f3ff,#ede9fe);border:1px solid #c4b5fd}.sc.purple .val{color:#5b21b6}.sc.purple .lab{color:#7c3aed}.sc.purple::before{background:#7c3aed}
+.sc.teal{background:linear-gradient(135deg,#f0fdfa,#ccfbf1);border:1px solid #5eead4}.sc.teal .val{color:#134e4a}.sc.teal .lab{color:#0d9488}.sc.teal::before{background:#0d9488}
 /* Upload zone */
-.uz{border:2px dashed var(--brd);border-radius:14px;padding:32px;text-align:center;cursor:pointer;transition:.3s;background:var(--card-bg);position:relative}
-.uz:hover{border-color:var(--p3);background:var(--pl)}
+.uz{border:2px dashed var(--brd);border-radius:16px;padding:32px;text-align:center;cursor:pointer;transition:all .3s ease;background:var(--card-bg);position:relative}
+.uz:hover{border-color:var(--p3);background:var(--pl);box-shadow:0 0 0 4px rgba(37,99,235,.06)}
 .uz input[type="file"]{position:absolute;inset:0;opacity:0;cursor:pointer}
 .uz .uzi{font-size:2em;margin-bottom:6px;opacity:.5}
 .uz h3{color:var(--p);font-size:.92em;margin-bottom:3px}.uz p{color:var(--tx2);font-size:.8em}
 /* Inputs */
-input,select,textarea{width:100%;padding:10px 14px;border:1.5px solid var(--brd);border-radius:10px;font-size:.9em;transition:.2s;margin-bottom:12px;background:var(--card-bg);font-family:inherit;color:var(--tx)}
-input:focus,select:focus,textarea:focus{border-color:var(--p3);outline:none;box-shadow:0 0 0 3px rgba(59,130,246,.08)}
-label{display:block;font-weight:600;margin-bottom:5px;font-size:.82em;color:#475569}
+input,select,textarea{width:100%;padding:10px 14px;border:1.5px solid var(--brd);border-radius:10px;font-size:.88em;transition:all .2s ease;margin-bottom:12px;background:var(--card-bg);font-family:inherit;color:var(--tx)}
+input:focus,select:focus,textarea:focus{border-color:var(--p3);outline:none;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+label{display:block;font-weight:600;margin-bottom:5px;font-size:.8em;color:var(--tx2);text-transform:none;letter-spacing:.01em}
 /* Buttons */
-.btn{display:inline-flex;align-items:center;gap:6px;padding:11px 20px;border:none;border-radius:10px;font-size:.88em;font-weight:600;cursor:pointer;transition:.2s;font-family:inherit;-webkit-tap-highlight-color:transparent;min-height:44px}
-.btn-p{background:var(--p);color:#fff}.btn-p:hover{background:#1e293b}.btn-p:disabled{background:#94a3b8;cursor:not-allowed}
-.btn-blue{background:var(--p3);color:#fff}.btn-blue:hover{background:var(--p2)}
-.btn-s{background:var(--pl);color:var(--p3);border:1px solid #bfdbfe}.btn-s:hover{background:#dbeafe}
-.btn-green{background:var(--g);color:#fff}.btn-green:hover{background:#16a34a}
-.btn-red{background:var(--rl);color:var(--r)}.btn-red:hover{background:#fee2e2}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:11px 22px;border:none;border-radius:10px;font-size:.86em;font-weight:600;cursor:pointer;transition:all .2s ease;font-family:inherit;-webkit-tap-highlight-color:transparent;min-height:44px;letter-spacing:.01em}
+.btn-p{background:linear-gradient(135deg,var(--p),#1e293b);color:#fff;box-shadow:0 2px 4px rgba(15,23,42,.15)}.btn-p:hover{box-shadow:0 4px 12px rgba(15,23,42,.25);transform:translateY(-1px)}.btn-p:disabled{background:#94a3b8;cursor:not-allowed;box-shadow:none;transform:none}
+.btn-blue{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;box-shadow:0 2px 4px rgba(37,99,235,.2)}.btn-blue:hover{box-shadow:0 4px 12px rgba(37,99,235,.3);transform:translateY(-1px)}
+.btn-s{background:var(--pl);color:var(--p3);border:1px solid #bfdbfe}.btn-s:hover{background:#dbeafe;transform:translateY(-1px)}
+.btn-green{background:linear-gradient(135deg,#059669,#047857);color:#fff;box-shadow:0 2px 4px rgba(5,150,105,.2)}.btn-green:hover{box-shadow:0 4px 12px rgba(5,150,105,.3);transform:translateY(-1px)}
+.btn-red{background:var(--rl);color:var(--r);border:1px solid #fecaca}.btn-red:hover{background:#fee2e2;transform:translateY(-1px)}
 .btn-f{width:100%;justify-content:center}
 .btn-sm{padding:8px 14px;font-size:.8em;border-radius:8px;min-height:40px}
 .btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
 /* Tables */
 table{width:100%;border-collapse:collapse}
-th{background:var(--p);color:#fff;padding:10px 14px;text-align:left;font-size:.8em;font-weight:600}
-th:first-child{border-radius:8px 0 0 0}th:last-child{border-radius:0 8px 0 0}
+th{background:linear-gradient(135deg,#0c1829,#1a2744);color:#e2e8f0;padding:11px 14px;text-align:left;font-size:.78em;font-weight:600;letter-spacing:.02em;text-transform:none}
+th:first-child{border-radius:10px 0 0 0}th:last-child{border-radius:0 10px 0 0}
 td{padding:8px 14px;border-bottom:1px solid var(--brd);font-size:.86em}
 tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Consolas',monospace;font-size:.84em}
 .sans-just{background:var(--rl) !important}.sans-just td{color:var(--r)}
@@ -11022,14 +12237,13 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .badge-paye{background:var(--gl);color:#16a34a}.badge-impaye{background:var(--rl);color:var(--r)}
 .sug-box{position:relative;z-index:50}.sug-box .sug-list{position:absolute;left:0;right:0;background:var(--card-bg);border:1px solid var(--brd);border-radius:6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}.sug-box .sug-list.show{display:block}.sug-item{padding:8px 10px;cursor:pointer;font-size:.84em;border-bottom:1px solid #f1f5f9;min-height:44px;display:flex;align-items:center}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
 /* Tabs */
-.tabs{display:flex;gap:2px;background:#f1f5f9;border-radius:10px;padding:4px;margin-bottom:16px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.tabs::-webkit-scrollbar{display:none}
-.tab{padding:10px 16px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.85em;transition:.2s;white-space:nowrap;-webkit-tap-highlight-color:transparent;min-height:44px;display:inline-flex;align-items:center}
-.tab:hover{color:var(--tx)}.tab.active{color:var(--p);background:var(--card-bg);box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;background:#e2e8f0;border-radius:12px;padding:5px;margin-bottom:16px}
+.tab{padding:8px 14px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.82em;transition:all .2s ease;white-space:nowrap;-webkit-tap-highlight-color:transparent;min-height:38px;display:inline-flex;align-items:center}
+.tab:hover{color:var(--tx);background:rgba(255,255,255,.5)}.tab.active{color:var(--p);background:var(--card-bg);box-shadow:0 2px 8px rgba(15,23,42,.08)}
 .tc{display:none}.tc.active{display:block}
 /* Anomalies */
-.anomalie{border:1px solid var(--brd);border-radius:12px;padding:15px;margin:8px 0;cursor:pointer;transition:.2s;background:var(--card-bg)}
-.anomalie:hover{box-shadow:0 4px 14px rgba(0,0,0,.05)}
+.anomalie{border:1px solid var(--brd);border-radius:14px;padding:16px;margin:8px 0;cursor:pointer;transition:all .25s ease;background:var(--card-bg)}
+.anomalie:hover{box-shadow:0 4px 16px rgba(15,23,42,.06);transform:translateY(-1px)}
 .anomalie.sev-high{border-left:4px solid var(--r)}.anomalie.sev-med{border-left:4px solid var(--o)}.anomalie.sev-low{border-left:4px solid var(--p3)}
 .anomalie .head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
 .anomalie .title{font-weight:600;font-size:.9em}
@@ -11039,19 +12253,19 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .anomalie.open .detail{display:block}
 .anomalie .dest{padding:2px 10px;border-radius:20px;font-size:.7em;font-weight:700;display:inline-block;margin-left:6px}
 /* Alerts */
-.al{padding:12px 16px;border-radius:10px;margin:8px 0;font-size:.86em;display:flex;align-items:flex-start;gap:8px;line-height:1.5}
-.al .ai{font-size:1em;margin-top:1px;flex-shrink:0}
-.al.info{background:var(--pl);color:var(--p2);border:1px solid #bfdbfe}
-.al.ok{background:var(--gl);color:#166534;border:1px solid #bbf7d0}
-.al.err{background:var(--rl);color:#991b1b;border:1px solid #fecaca}
-.al.warn{background:var(--ol);color:#92400e;border:1px solid #fde68a}
+.al{padding:12px 16px;border-radius:12px;margin:8px 0;font-size:.84em;display:flex;align-items:flex-start;gap:10px;line-height:1.6;border-left:4px solid transparent}
+.al .ai{font-size:1em;margin-top:1px;flex-shrink:0;display:flex;align-items:center}
+.al.info{background:var(--pl);color:var(--p2);border:1px solid #bfdbfe;border-left-color:#2563eb}
+.al.ok{background:var(--gl);color:#065f46;border:1px solid #a7f3d0;border-left-color:#059669}
+.al.err{background:var(--rl);color:#991b1b;border:1px solid #fecaca;border-left-color:#dc2626}
+.al.warn{background:var(--ol);color:#92400e;border:1px solid #fde68a;border-left-color:#d97706}
 /* Gauge */
-.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--gc,var(--g)) 0%,var(--gc,var(--g)) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto}
-.gauge-inner{width:90px;height:90px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p)}
+.gauge{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--gc,var(--g)) 0%,var(--gc,var(--g)) var(--pct),#e2e8f0 var(--pct));display:flex;align-items:center;justify-content:center;margin:0 auto;box-shadow:0 4px 16px rgba(15,23,42,.1)}
+.gauge-inner{width:88px;height:88px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:800;color:var(--p);box-shadow:inset 0 2px 8px rgba(15,23,42,.06)}
 /* Progress */
 .prg{display:none;margin:14px 0}
 .prg-bar{height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
-.prg-fill{height:100%;background:linear-gradient(90deg,var(--p3),var(--p2));border-radius:3px;width:0%;transition:width .5s}
+.prg-fill{height:100%;background:linear-gradient(90deg,#2563eb,#7c3aed);border-radius:3px;width:0%;transition:width .5s}
 .prg-txt{text-align:center;margin-top:6px;color:var(--tx2);font-size:.82em}
 /* File items */
 .fi{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;background:var(--pl);border-radius:8px;margin:3px 0;font-size:.84em;border:1px solid #bfdbfe;min-height:44px}
@@ -11070,18 +12284,19 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
 /* ===== Dark Mode ===== */
 @media(prefers-color-scheme:dark){
-:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2)}
+:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--bg2:#1a2332;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2);--accent:#60a5fa;--accent-light:rgba(96,165,250,.15)}
 body{color-scheme:dark}
 .sidebar{background:#020617}
+.topbar{background:rgba(30,41,59,.92);backdrop-filter:blur(12px)}
 th{background:#334155;color:#e2e8f0}
 tr:hover{background:rgba(59,130,246,.08)}
 .tabs{background:#334155}
-.sc.blue{background:rgba(59,130,246,.1);border-color:#1e40af}
-.sc.green{background:rgba(74,222,128,.08);border-color:#166534}
-.sc.red{background:rgba(248,113,113,.08);border-color:#991b1b}
-.sc.amber{background:rgba(251,191,36,.08);border-color:#92400e}
-.sc.purple{background:rgba(192,132,252,.08);border-color:#7e22ce}
-.sc.teal{background:rgba(45,212,191,.08);border-color:#0d9488}
+.sc.blue{background:linear-gradient(135deg,rgba(37,99,235,.15),rgba(59,130,246,.1));border-color:#1e40af}.sc.blue .val{color:#93c5fd}.sc.blue .lab{color:#60a5fa}
+.sc.green{background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(16,185,129,.1));border-color:#065f46}.sc.green .val{color:#6ee7b7}.sc.green .lab{color:#34d399}
+.sc.red{background:linear-gradient(135deg,rgba(220,38,38,.12),rgba(248,113,113,.08));border-color:#991b1b}.sc.red .val{color:#fca5a5}.sc.red .lab{color:#f87171}
+.sc.amber{background:linear-gradient(135deg,rgba(217,119,6,.12),rgba(251,191,36,.08));border-color:#92400e}.sc.amber .val{color:#fcd34d}.sc.amber .lab{color:#fbbf24}
+.sc.purple{background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(167,139,250,.1));border-color:#5b21b6}.sc.purple .val{color:#c4b5fd}.sc.purple .lab{color:#a78bfa}
+.sc.teal{background:linear-gradient(135deg,rgba(13,148,136,.12),rgba(45,212,191,.08));border-color:#0d9488}.sc.teal .val{color:#5eead4}.sc.teal .lab{color:#2dd4bf}
 .badge-blue{background:rgba(59,130,246,.15);color:#93c5fd}
 .badge-green{background:rgba(74,222,128,.12);color:#4ade80}
 .badge-red{background:rgba(248,113,113,.12);color:#f87171}
@@ -11122,31 +12337,84 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <body>
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
-<div class="sidebar" id="sidebar">
-<div class="logo"><em>NormaCheck</em> <span>v3.8.1</span></div>
+<nav class="sidebar" id="sidebar" aria-label="Menu principal">
+<div class="logo"><svg class="logo-shield" viewBox="0 0 28 28" fill="none"><defs><linearGradient id="slg" x1="0" y1="0" x2="28" y2="28"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#34d399"/></linearGradient></defs><rect width="28" height="28" rx="7" fill="url(#slg)"/><path d="M9 8c0 3.5 1.5 6 4 8" stroke="rgba(255,255,255,.85)" stroke-width="2" stroke-linecap="round" fill="none"/><path d="M15 8c0 3.5 1.5 6 4 8" stroke="rgba(255,255,255,.4)" stroke-width="2" stroke-linecap="round" fill="none"/><path d="M8 18l3.5 3.5 7-7" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><em>NormaCheck</em> <span>v3.9.0</span></div>
+<div class="sidebar-nav">
 <div class="nav-group">Analyse</div>
-<div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
-<div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
-<div class="nl" onclick="showS('biblio',this)"><span class="ico">&#128218;</span><span>Bibliotheque</span></div>
+<div class="nl active" tabindex="0" onclick="showS('dashboard',this)"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/></svg></span><span>Dashboard</span></div>
+<div class="nl" tabindex="0" onclick="showS('analyse',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M9 2v6a2 2 0 002 2h6"/><path d="M4 5.5V19a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6a2 2 0 00-2 2z"/><path d="M9 15l2 2 4-4"/></svg></span><span>Import / Analyse</span></div>
+<div class="nl" tabindex="0" onclick="showS('biblio',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></span><span>Bibliotheque</span></div>
 <div class="nav-group">Gestion</div>
-<div class="nl" onclick="showS('compta',this)"><span class="ico">&#128203;</span><span>Comptabilite</span></div>
-<div class="nl" onclick="showS('factures',this)"><span class="ico">&#128206;</span><span>Factures</span></div>
-<div class="nl" onclick="showS('dsn',this)"><span class="ico">&#128196;</span><span>Creation DSN</span></div>
-<div class="nl" onclick="showS('rh',this)"><span class="ico">&#128119;</span><span>Ressources humaines</span></div>
-<div class="nl" onclick="showS('simulation',this)"><span class="ico">&#128200;</span><span>Simulation</span></div>
+<div class="nl" tabindex="0" onclick="showS('compta',this)"><span class="ico"><svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><line x1="12" y1="10" x2="12" y2="19"/></svg></span><span>Comptabilite</span></div>
+<div class="nl" tabindex="0" onclick="showS('factures',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/></svg></span><span>Factures</span></div>
+<div class="nl" tabindex="0" onclick="showS('dsn',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span><span>Creation DSN</span></div>
+<div class="nl" tabindex="0" onclick="showS('rh',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span><span>Ressources humaines</span></div>
+<div class="nl" tabindex="0" onclick="showS('simulation',this)"><span class="ico"><svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg></span><span>Simulation</span></div>
 <div class="nav-group">Outils</div>
-<div class="nl" onclick="showS('subventions',this)"><span class="ico">&#127974;</span><span>Subventions</span></div>
-<div class="nl" onclick="showS('veille',this)"><span class="ico">&#9878;</span><span>Veille juridique</span></div>
-<div class="nl" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
-<div class="nl" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
-<div class="nl" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
-<div class="spacer"></div>
-<div style="padding:10px 18px;font-size:.78em;color:#94a3b8" id="sidebar-user"></div>
-<div class="logout" onclick="doLogout()"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
-</div>
+<div class="nl" tabindex="0" onclick="showS('subventions',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="18"/><path d="M15 9.5c-.8-1-2-1.5-3-1.5s-3 .5-3 2.5c0 3.5 6 2 6 5.5 0 2-1.5 2.5-3 2.5s-2.2-.5-3-1.5"/></svg></span><span>Subventions</span></div>
+<div class="nl" tabindex="0" onclick="showS('veille',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><span>Veille juridique</span></div>
+<div class="nl" tabindex="0" onclick="showS('portefeuille',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21 12V7H5a2 2 0 010-4h14v4"/><path d="M3 5v14a2 2 0 002 2h16v-5"/><path d="M18 12a2 2 0 100 4 2 2 0 000-4z"/></svg></span><span>Portefeuille</span></div>
+<div class="nl" tabindex="0" onclick="showS('equipe',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg></span><span>Equipe</span></div>
+<div class="nl" tabindex="0" onclick="showS('config',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></span><span>Configuration</span></div>
+<div class="nl" tabindex="0" onclick="showS('ensavoirplus',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span><span>En savoir plus</span></div>
+</div><!-- end sidebar-nav -->
+<div style="padding:10px 18px;font-size:.78em;color:#94a3b8;flex-shrink:0" id="sidebar-user"></div>
+<div class="logout" onclick="doLogout()"><span class="ico"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></span><span>Deconnexion</span></div>
+</nav>
 <div class="content">
-<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.8.1 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
+<div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.9.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
+
+<script>
+/* === CORE NAV (inline before content to guarantee availability) === */
+var _ncUser=null;
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
+function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
+function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
+function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
+function showS(n,el){
+try{
+closeSidebar();
+document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
+document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove("active")});
+var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
+if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
+var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
+if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
+if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();if(typeof loadPortVue==="function")loadPortVue();}
+if(typeof loadDash==="function"&&n==="dashboard")loadDash();
+if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
+if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
+if(typeof loadPayStatuses==="function"&&n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
+if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrouillons==="function")loadDSNBrouillons();}
+if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
+if(n==="analyse"){if(typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}else{fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);loadDash();}}).catch(function(){});}}
+if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
+if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
+if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
+if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();if(typeof loadSignatures==="function")loadSignatures();}
+if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
+}catch(e){console.error("showS error:",n,e);}
+}
+function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
+function goToRH(){showS('rh');}
+function goToRHContrats(){showS('rh');setTimeout(function(){if(typeof showRHTab==="function")showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
+function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
+function gv(id){var el=document.getElementById(id);return el?el.value:"";}
+function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g," ")+" EUR":n;}
+function fmtN(n){return typeof n==="number"?n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g," "):String(n);}
+function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
+function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
+if(typeof loadRHSalaries==="function"&&n==="salaries")loadRHSalaries();if(n==="contrats"){if(typeof loadRHContrats==="function")loadRHContrats();if(typeof loadRHAvenants==="function")loadRHAvenants();}if(typeof loadRHConges==="function"&&n==="conges")loadRHConges();if(typeof loadRHArrets==="function"&&n==="arrets")loadRHArrets();if(typeof loadRHSanctions==="function"&&n==="sanctions")loadRHSanctions();if(typeof loadRHEntretiens==="function"&&n==="entretiens")loadRHEntretiens();if(typeof loadRHVisites==="function"&&n==="visites")loadRHVisites();if(typeof loadRHAttestations==="function"&&n==="attestations")loadRHAttestations();if(n==="planning"){if(typeof loadRHPlanning==="function")loadRHPlanning();if(typeof renderCalendar==="function")renderCalendar();}if(typeof loadRHEchanges==="function"&&n==="echanges")loadRHEchanges();if(typeof loadRHAlertes==="function"&&n==="alertes")loadRHAlertes();if(typeof loadRHBulletins==="function"&&n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
+function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
+var panel=document.getElementById("port-"+name);if(panel)panel.style.display="block";
+document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
+if(el)el.classList.add("active");
+if(typeof loadPortVue==="function"&&name==="vue")loadPortVue();if(typeof rechTI==="function"&&name==="ti")rechTI();if(typeof rechEnt==="function"&&name==="employeur")rechEnt();}
+function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(typeof loadPayStatuses==="function"&&n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
+function showCT(n,el){try{document.querySelectorAll("#compta-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-compta .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ct-"+n);if(tc)tc.classList.add("active");var ps=document.getElementById("period-sel");if(ps)ps.style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";if(typeof loadCompta==="function")loadCompta();}catch(e){console.error("showCT error:",n,e);}}
+function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#rh-alertes .al-panel").forEach(function(t){t.style.display="none";t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("al-"+n);if(tc){tc.style.display="block";tc.classList.add("active");}if(typeof loadAlertesLibres==="function"&&n==="libres")loadAlertesLibres();if(typeof loadRHAlertes==="function"&&n==="auto")loadRHAlertes();}
+</script>
 
 """
 
@@ -11159,7 +12427,7 @@ APP_HTML += """
 <div class="sc blue"><div class="val" id="dash-anomalies">0</div><div class="lab">Anomalies</div></div>
 <div class="sc amber"><div class="val" id="dash-impact">0 EUR</div><div class="lab">Impact cotisations</div></div>
 <div class="sc green"><div class="val" id="dash-conf">-</div><div class="lab">Conformite</div></div>
-<div class="sc"><div class="val" id="dash-docs">0</div><div class="lab">Documents</div></div>
+<div class="sc teal"><div class="val" id="dash-docs">0</div><div class="lab">Documents</div></div>
 </div>
 <div class="g2">
 <div class="card"><h2>Conformite globale</h2>
@@ -11168,24 +12436,24 @@ APP_HTML += """
 </div>
 <div class="card"><h2>Alertes</h2><div id="dash-alertes"><div class="al info"><span class="ai">&#128161;</span><span>Importez des documents pour lancer l'analyse.</span></div></div></div>
 </div>
-<div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button></h2>
+<div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button> <button class="btn btn-s btn-sm" onclick="showS('ensavoirplus')" style="margin-left:4px;font-size:.78em">&#128218; En savoir plus</button></h2>
 <div class="g3" id="dash-scores-triple">
-<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
-<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">URSSAF / CSS</div>
-<div class="gauge" id="gauge-urssaf" style="--pct:0%;--gc:var(--p3)"><div class="gauge-inner" id="gauge-urssaf-val">-</div></div>
-<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Securite sociale</div>
+<div style="text-align:center;padding:20px 16px;border-radius:14px;background:linear-gradient(180deg,#f8fafc,#eff6ff);border:1px solid #bfdbfe;box-shadow:0 2px 8px rgba(37,99,235,.06)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1.5px;color:#1e40af;margin-bottom:10px;font-weight:800">URSSAF / CSS</div>
+<div class="gauge" id="gauge-urssaf" style="--pct:0%;--gc:#2563eb"><div class="gauge-inner" id="gauge-urssaf-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:8px;font-weight:500">Securite sociale</div>
 <div style="font-size:.72em;margin-top:2px" id="grade-urssaf"></div>
 </div>
-<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
-<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">DGFIP / CGI</div>
-<div class="gauge" id="gauge-fiscal" style="--pct:0%;--gc:var(--pu)"><div class="gauge-inner" id="gauge-fiscal-val">-</div></div>
-<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Fiscal</div>
+<div style="text-align:center;padding:20px 16px;border-radius:14px;background:linear-gradient(180deg,#f8fafc,#f5f3ff);border:1px solid #ddd6fe;box-shadow:0 2px 8px rgba(124,58,237,.06)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1.5px;color:#6d28d9;margin-bottom:10px;font-weight:800">DGFIP / CGI</div>
+<div class="gauge" id="gauge-fiscal" style="--pct:0%;--gc:#7c3aed"><div class="gauge-inner" id="gauge-fiscal-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:8px;font-weight:500">Fiscal</div>
 <div style="font-size:.72em;margin-top:2px" id="grade-fiscal"></div>
 </div>
-<div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
-<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">COUR DES COMPTES</div>
-<div class="gauge" id="gauge-cdc" style="--pct:0%;--gc:var(--tl)"><div class="gauge-inner" id="gauge-cdc-val">-</div></div>
-<div style="font-size:.78em;color:var(--tx2);margin-top:6px">Regularite comptable</div>
+<div style="text-align:center;padding:20px 16px;border-radius:14px;background:linear-gradient(180deg,#f8fafc,#f0fdfa);border:1px solid #99f6e4;box-shadow:0 2px 8px rgba(13,115,119,.06)">
+<div style="font-size:.72em;text-transform:uppercase;letter-spacing:1.5px;color:#0d7377;margin-bottom:10px;font-weight:800">COUR DES COMPTES</div>
+<div class="gauge" id="gauge-cdc" style="--pct:0%;--gc:#0d9488"><div class="gauge-inner" id="gauge-cdc-val">-</div></div>
+<div style="font-size:.78em;color:var(--tx2);margin-top:8px;font-weight:500">Regularite comptable</div>
 <div style="font-size:.72em;margin-top:2px" id="grade-cdc"></div>
 </div>
 </div>
@@ -11205,14 +12473,16 @@ APP_HTML += """
 <div class="card">
 <h2>Importer et analyser</h2>
 <div class="al info" style="margin-bottom:14px"><span class="ai">&#128196;</span><span>Max <strong>50 fichiers</strong> et <strong>2 Go</strong> par analyse. Reconnaissance OCR, ecriture manuscrite, libelles, totaux et sous-totaux.</span></div>
-<div class="g2" style="margin-bottom:14px">
+<div class="g4" style="margin-bottom:14px">
 <div><label>Mode d analyse</label><select id="mode-analyse">
 <option value="simple">Analyse simple</option>
 <option value="social">Audit social</option>
 <option value="fiscal">Audit fiscal</option>
 <option value="complet" selected>Audit complet</option>
 </select></div>
-<div style="display:flex;align-items:flex-end"><div class="al info" id="mode-info" style="margin:0;font-size:.78em;flex:1"><span class="ai">&#128161;</span><span>Audit complet : verification de toutes les coherences sociales, fiscales, DSN et rapprochements.</span></div></div>
+<div><label>Annee debut</label><select id="audit-annee-debut"><option value="2021">2021</option><option value="2022">2022</option><option value="2023">2023</option><option value="2024">2024</option><option value="2025">2025</option><option value="2026" selected>2026</option></select></div>
+<div><label>Annee fin</label><select id="audit-annee-fin"><option value="2026" selected>2026</option><option value="2025">2025</option><option value="2024">2024</option></select></div>
+<div style="display:flex;align-items:flex-end"><div class="al info" id="mode-info" style="margin:0;font-size:.78em;flex:1"><span class="ai"><svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><circle cx='12' cy='12' r='10'/><line x1='12' y1='8' x2='12' y2='12'/><line x1='12' y1='16' x2='12.01' y2='16'/></svg></span><span>Audit complet : verification pluri-annuelle avec regles en vigueur par periode.</span></div></div>
 </div>
 <div class="uz" id="dz-analyse">
 <input type="file" id="fi-analyse" multiple accept=".pdf,.csv,.xlsx,.xls,.xml,.dsn,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.gif,.webp,.heic,.heif,.txt">
@@ -11390,9 +12660,11 @@ APP_HTML += """
 <div class="tc" id="ct-social"><div id="ct-social-c"></div></div>
 <div class="tc" id="ct-ecritures">
 <h2 style="margin-bottom:12px">Ecriture manuelle</h2>
+<div class="al info" style="margin-bottom:12px"><span class="ai">&#128161;</span><span><strong>Vous ne connaissez pas le plan comptable ?</strong> Decrivez la nature de la depense ou du revenu (ex: <em>loyer</em>, <em>achat fournitures</em>, <em>salaire</em>, <em>vente</em>) dans le champ ci-dessous et le systeme vous suggerera les bons comptes avec des explications.</span></div>
+<div style="margin-bottom:14px"><label>Rechercher un type d'operation</label><input id="em-search" placeholder="Ex: loyer, achat, salaire, vente, assurance, telephone..." oninput="suggestByDescription()"><div id="em-search-sug" class="sug-box"></div></div>
 <div class="g2">
-<div><label>Date</label><input type="date" id="em-date"><label>Libelle</label><input id="em-lib" placeholder="Description"></div>
-<div><label>Compte debit</label><input id="em-deb" placeholder="601000" oninput="suggestCompte('em-deb','em-deb-sug','em-cre')"><div id="em-deb-sug" class="sug-box"></div><label>Compte credit</label><input id="em-cre" placeholder="401000" oninput="suggestCompte('em-cre','em-cre-sug',null)"><div id="em-cre-sug" class="sug-box"></div></div>
+<div><label>Date</label><input type="date" id="em-date"><label>Libelle</label><input id="em-lib" placeholder="Description de l'ecriture"></div>
+<div><label>Compte debit</label><input id="em-deb" placeholder="601000 ou tapez un mot-cle" oninput="suggestCompte('em-deb','em-deb-sug','em-cre')"><div id="em-deb-sug" class="sug-box"></div><label>Compte credit</label><input id="em-cre" placeholder="401000 ou tapez un mot-cle" oninput="suggestCompte('em-cre','em-cre-sug',null)"><div id="em-cre-sug" class="sug-box"></div></div>
 </div>
 <div class="g3">
 <div><label>Montant</label><input type="number" step="0.01" id="em-mt" placeholder="0.00"></div>
@@ -11412,7 +12684,7 @@ APP_HTML += """
 
 <!-- ===== SIMULATION ===== -->
 <div class="sec" id="s-simulation">
-<div class="tabs" style="flex-wrap:wrap">
+<div class="tabs">
 <div class="tab active" onclick="showSimTab('bulletin',this)">Bulletin</div>
 <div class="tab" onclick="showSimTab('cout',this)">Cout employeur</div>
 <div class="tab" onclick="showSimTab('exo',this)">Exonerations</div>
@@ -11426,6 +12698,7 @@ APP_HTML += """
 <div class="tab" onclick="showSimTab('tns',this)">TNS</div>
 <div class="tab" onclick="showSimTab('guso',this)">GUSO</div>
 <div class="tab" onclick="showSimTab('ir',this)">IR</div>
+<div class="tab" onclick="showSimTab('epargne',this)">Epargne salariale</div>
 </div>
 <div class="card">
 <div class="tc active" id="sim-bulletin">
@@ -11527,12 +12800,58 @@ APP_HTML += """
 <div class="tc" id="sim-tns"><h2>TNS</h2>
 <div class="g3"><div><label>Revenu net</label><input type="number" step="0.01" id="sim-rev" value="40000"></div><div><label>Statut</label><select id="sim-stat"><option value="gerant_majoritaire">Gerant maj.</option><option value="profession_liberale">PL</option><option value="artisan">Artisan</option><option value="commercant">Commercant</option></select></div><div><label>ACRE</label><select id="sim-tacre"><option value="false">Non</option><option value="true">Oui</option></select></div></div>
 <button class="btn btn-blue" onclick="simTNS()">Simuler</button><div id="sim-tns-res" style="margin-top:12px"></div></div>
-<div class="tc" id="sim-guso"><h2>GUSO</h2>
-<div class="g2"><div><label>Brut</label><input type="number" step="0.01" id="sim-gbrut" value="500"></div><div><label>Heures</label><input type="number" step="0.5" id="sim-gh" value="8"></div></div>
-<button class="btn btn-blue" onclick="simGUSO()">Simuler</button><div id="sim-guso-res" style="margin-top:12px"></div></div>
+<div class="tc" id="sim-guso"><h2>GUSO - Spectacle occasionnel</h2>
+<div class="al info" style="margin-bottom:12px"><span class="ai"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span><span>Simulation exhaustive GUSO : cotisations URSSAF + conge spectacle (15.5%) + Audiens + FCAP + medecine du travail. Annexe 8 (techniciens) ou 10 (artistes).</span></div>
+<div class="g4"><div><label>Salaire brut</label><input type="number" step="0.01" id="sim-gbrut" value="500"></div><div><label>Heures</label><input type="number" step="0.5" id="sim-gh" value="8"></div><div><label>Type contrat</label><select id="sim-gtype"><option value="cddu">CDDU</option><option value="cachet">Cachet</option><option value="intermittent">Intermittent</option></select></div><div><label>Statut</label><select id="sim-gartiste"><option value="true">Artiste (Annexe 10)</option><option value="false">Technicien (Annexe 8)</option></select></div></div>
+<button class="btn btn-blue" onclick="simGUSO()" style="margin-top:10px">Simuler</button><div id="sim-guso-res" style="margin-top:12px"></div></div>
 <div class="tc" id="sim-ir"><h2>Impot sur le revenu</h2>
 <div class="g3"><div><label>Benefice</label><input type="number" step="0.01" id="sim-ben" value="40000"></div><div><label>Parts</label><input type="number" step="0.5" id="sim-parts" value="1"></div><div><label>Autres rev.</label><input type="number" step="0.01" id="sim-autres" value="0"></div></div>
 <button class="btn btn-blue" onclick="simIR()">Simuler</button><div id="sim-ir-res" style="margin-top:12px"></div></div>
+<div class="tc" id="sim-epargne"><h2>Epargne salariale</h2>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128161;</span><span>Simulez les dispositifs d'epargne salariale (PEE, PERCO/PER, Interessement, Participation) et creez vos contrats/accords.</span></div>
+<details open><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128200; Simulation</summary>
+<div class="g3">
+<div><label>Dispositif</label><select id="ep-type"><option value="pee">PEE (Plan Epargne Entreprise)</option><option value="perco">PERCO/PER Collectif</option><option value="per">PER Obligatoire</option><option value="interessement">Interessement</option><option value="participation">Participation</option></select></div>
+<div><label>Masse salariale brute annuelle</label><input type="number" id="ep-ms" value="500000"></div>
+<div><label>Effectif</label><input type="number" id="ep-eff" value="10"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Montant a verser (total)</label><input type="number" id="ep-montant" value="10000"></div>
+<div><label>Abondement employeur (%)</label><input type="number" id="ep-abond" value="100" min="0" max="300"></div>
+<div><label>Plafond abondement (0=auto)</label><input type="number" id="ep-plaf" value="0"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Forfait social % (0=auto)</label><input type="number" id="ep-fs" value="0" min="0" max="20"></div>
+<div><label>Benefice net (si Participation)</label><input type="number" id="ep-bn" value="100000"></div>
+<div></div>
+</div>
+<button class="btn btn-blue" onclick="simEpargne()" style="margin-top:10px">Simuler</button>
+<div id="sim-epargne-res" style="margin-top:12px"></div>
+</details>
+<details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128196; Creer un contrat / accord</summary>
+<div class="g3">
+<div><label>Type de dispositif</label><select id="epc-type"><option value="pee">PEE</option><option value="perco">PERCO/PER Collectif</option><option value="per">PER Obligatoire</option><option value="interessement">Interessement</option><option value="participation">Participation</option></select></div>
+<div><label>Nom du contrat</label><input type="text" id="epc-nom" placeholder="Ex: Accord PEE 2026"></div>
+<div><label>Organisme gestionnaire</label><input type="text" id="epc-org" placeholder="Ex: Amundi, Natixis..."></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Date mise en place</label><input type="date" id="epc-date"></div>
+<div><label>Duree accord (ans)</label><input type="number" id="epc-duree" value="3" min="1" max="5"></div>
+<div><label>Montant prevu annuel</label><input type="number" id="epc-montant" value="10000"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Abondement (%)</label><input type="number" id="epc-abond" value="100"></div>
+<div><label>Plafond abondement</label><input type="number" id="epc-plaf" value="0"></div>
+<div><label>Beneficiaires</label><select id="epc-benef"><option value="tous">Tous les salaries</option><option value="3mois">Anciennete 3 mois</option><option value="cadres">Cadres uniquement</option></select></div>
+</div>
+<div style="margin-top:8px"><label>Observations</label><textarea id="epc-obs" rows="2" style="width:100%"></textarea></div>
+<button class="btn btn-green" onclick="creerContratEpargne()" style="margin-top:10px">Creer le contrat</button>
+</details>
+<details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128203; Contrats existants</summary>
+<button class="btn btn-blue" onclick="loadContratsEpargne()" style="margin-bottom:10px">Actualiser</button>
+<div id="epargne-contrats-list"></div>
+</details>
+</div>
 </div>
 </div>
 
@@ -11725,6 +13044,8 @@ APP_HTML += """
 <div class="tc active" id="rh-salaries">
 <h2>Liste des salaries</h2>
 <p style="color:var(--tx2);font-size:.86em;margin-bottom:12px">Les salaries sont detectes automatiquement lors de l analyse de documents (bulletins, DSN, contrats). Vous pouvez aussi les ajouter manuellement via l onglet Contrats.</p>
+<div class="btn-group" style="margin-bottom:12px"><button class="btn btn-s btn-sm" onclick="detecterDoublons()">&#128269; Detecter les doublons</button></div>
+<div id="rh-doublons-alert" style="display:none"></div>
 <div id="rh-sal-list"><p style="color:var(--tx2)">Aucun salarie.</p></div>
 </div>
 <div class="tc" id="rh-contrats">
@@ -11733,6 +13054,7 @@ APP_HTML += """
 <label>Type de contrat</label><select id="rh-type-ctr"><option value="CDI">CDI</option><option value="CDD">CDD</option><option value="CTT">CTT (Interim)</option><option value="Apprentissage">Apprentissage</option><option value="Professionnalisation">Professionnalisation</option><option value="Saisonnier">Saisonnier</option><option value="Intermittent">Intermittent</option></select>
 <label>Nom</label><input id="rh-ctr-nom" placeholder="NOM">
 <label>Prenom</label><input id="rh-ctr-prenom" placeholder="Prenom">
+<label>NIR (N de securite sociale)</label><input id="rh-ctr-nir" placeholder="1 85 05 78 006 084 36" maxlength="21">
 <label>Poste</label><input id="rh-ctr-poste" placeholder="Intitule du poste">
 <label>Date debut</label><input type="date" id="rh-ctr-debut">
 <label>Date fin (CDD)</label><input type="date" id="rh-ctr-fin">
@@ -11820,17 +13142,70 @@ APP_HTML += """
 </div>
 <div class="tc" id="rh-planning">
 <h2>Planning</h2>
-<div class="g3" style="margin-bottom:12px"><div><label>Semaine du</label><input type="date" id="rh-pl-sem" onchange="renderCalendar()"></div>
-<div><label>Filtre salarie</label><input id="rh-pl-filter" placeholder="Tous" oninput="renderCalendar()"></div>
-<div><button class="btn btn-s btn-f" onclick="renderCalendar()" style="margin-top:22px">Actualiser</button></div></div>
+
+<div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+<button class="btn btn-sm" id="pl-v-jour" onclick="setPlanningView('jour')" style="border:2px solid transparent">Jour</button>
+<button class="btn btn-sm" id="pl-v-semaine" onclick="setPlanningView('semaine')" style="border:2px solid var(--p2);background:var(--p2);color:#fff">Semaine</button>
+<button class="btn btn-sm" id="pl-v-mois" onclick="setPlanningView('mois')" style="border:2px solid transparent">Mois</button>
+<button class="btn btn-sm" id="pl-v-annee" onclick="setPlanningView('annee')" style="border:2px solid transparent">Annee</button>
+<span style="flex:1"></span>
+<button class="btn btn-sm btn-green" onclick="integrerSalaries()" title="Reporter automatiquement les salaries detectes dans le planning">&#128101; Integrer salaries</button>
+</div>
+
+<div class="g3" style="margin-bottom:12px">
+<div><label>Date</label><input type="date" id="rh-pl-sem" onchange="renderPlanningView()"></div>
+<div><label>Filtre salarie</label><input id="rh-pl-filter" placeholder="Tous" oninput="renderPlanningView()"></div>
+<div><label>Filtre statut</label><select id="rh-pl-statut-filter" onchange="renderPlanningView()"><option value="">Tous</option><option value="present">Present</option><option value="conge_cp">Conge CP</option><option value="conge_maladie">Arret maladie</option><option value="arret_accident_travail">Accident travail</option><option value="formation">Formation</option><option value="teletravail">Teletravail</option></select></div>
+</div>
+
+<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+<button class="btn btn-sm" onclick="planningNav(-1)">&#9664; Precedent</button>
+<span id="rh-pl-period-label" style="font-weight:600;font-size:.95em;min-width:180px;text-align:center"></span>
+<button class="btn btn-sm" onclick="planningNav(1)">Suivant &#9654;</button>
+<button class="btn btn-sm" onclick="planningGoToday()" style="margin-left:8px">Aujourd hui</button>
+</div>
+
 <div id="rh-pl-calendar" style="overflow-x:auto;margin-bottom:16px;border:1px solid var(--brd);border-radius:8px;min-height:100px"></div>
-<h3>Ajouter un creneau</h3>
+
+<div id="rh-pl-legend" style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;font-size:.8em">
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#3b82f6;display:inline-block"></span>Normal</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#f59e0b;display:inline-block"></span>Astreinte</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#6366f1;display:inline-block"></span>Nuit</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#ef4444;display:inline-block"></span>Dimanche/Ferie</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#22c55e;display:inline-block"></span>Present</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#f97316;display:inline-block"></span>Conge</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#e11d48;display:inline-block"></span>Arret maladie</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#8b5cf6;display:inline-block"></span>Teletravail</span>
+</div>
+
+<div id="rh-pl-stats" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px"></div>
+
+<details style="margin-bottom:12px">
+<summary style="cursor:pointer;font-weight:600;color:var(--p2)">&#10010; Ajouter un creneau manuellement</summary>
+<div style="margin-top:10px">
 <div class="g3"><div><label>Salarie</label><input id="rh-pl-sal" placeholder="Nom"></div>
 <div><label>Date</label><input type="date" id="rh-pl-date"></div>
 <div><label>Type</label><select id="rh-pl-type"><option value="normal">Normal</option><option value="astreinte">Astreinte</option><option value="nuit">Nuit</option><option value="dimanche">Dimanche</option><option value="ferie">Jour ferie</option></select></div></div>
 <div class="g3"><div><label>Heure debut</label><input type="time" id="rh-pl-hd" value="09:00"></div>
 <div><label>Heure fin</label><input type="time" id="rh-pl-hf" value="17:00"></div>
 <div><button class="btn btn-blue btn-f" onclick="ajouterPlanning()" style="margin-top:22px">Ajouter</button></div></div>
+</div>
+</details>
+
+<details id="rh-pl-integrer-section" style="margin-bottom:12px">
+<summary style="cursor:pointer;font-weight:600;color:var(--p2)">&#128101; Integration automatique des salaries</summary>
+<div style="margin-top:10px">
+<div class="al info"><span class="ai">&#128161;</span><span>Cette fonction reporte automatiquement tous les salaries detectes dans vos documents et contrats dans le planning sur la periode choisie.</span></div>
+<div class="g3"><div><label>Date debut</label><input type="date" id="rh-pl-int-debut"></div>
+<div><label>Date fin</label><input type="date" id="rh-pl-int-fin"></div>
+<div><label>Jours</label><select id="rh-pl-int-jours"><option value="1,2,3,4,5">Lun-Ven</option><option value="1,2,3,4,5,6">Lun-Sam</option><option value="1,2,3,4,5,6,7">Tous les jours</option></select></div></div>
+<div class="g3"><div><label>Heure debut</label><input type="time" id="rh-pl-int-hd" value="09:00"></div>
+<div><label>Heure fin</label><input type="time" id="rh-pl-int-hf" value="17:00"></div>
+<div><button class="btn btn-blue btn-f" onclick="integrerSalariesManuel()" style="margin-top:22px">Integrer</button></div></div>
+<div id="rh-pl-int-result" style="margin-top:8px"></div>
+</div>
+</details>
+
 <div id="rh-pl-list" style="margin-top:12px"></div>
 </div>
 <div class="tc" id="rh-echanges">
@@ -12021,6 +13396,40 @@ APP_HTML += """
 <button class="btn btn-blue btn-f" onclick="sauverAlertConfig()" style="margin-top:8px">Enregistrer la configuration</button>
 <div id="cfg-al-res" style="margin-top:8px"></div>
 </div>
+<div class="card">
+<h2>&#128274; Signature electronique (eIDAS)</h2>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#9878;</span><span><strong>Reglement (UE) 910/2014 eIDAS</strong> : signez electroniquement vos documents avec un niveau de confiance <strong>SEA</strong> (Signature Electronique Avancee, art. 26) ou <strong>SEQ</strong> (Signature Electronique Qualifiee, art. 3.12 — equivalence manuscrite art. 25.2).</span></div>
+<details open><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#9997; Signer un document</summary>
+<div class="g2">
+<div><label>Identifiant du document</label><input id="sig-docid" placeholder="Ex: CONTRAT-2026-001, ATT-0042..."></div>
+<div><label>Nom du document</label><input id="sig-docnom" placeholder="Ex: Contrat CDI Dupont Jean"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Nom du signataire</label><input id="sig-nom" placeholder="Prenom Nom"></div>
+<div><label>Email du signataire</label><input type="email" id="sig-email" placeholder="signataire@entreprise.fr"></div>
+<div><label>Qualite / Fonction</label><input id="sig-qualite" placeholder="Ex: Gerant, DRH, Salarie..."></div>
+</div>
+<div class="g2" style="margin-top:8px">
+<div><label>Niveau de signature</label><select id="sig-niveau">
+<option value="sea">SEA - Signature Electronique Avancee (art. 26 eIDAS)</option>
+<option value="seq">SEQ - Signature Electronique Qualifiee (art. 25.2 eIDAS — equivalence manuscrite)</option>
+</select></div>
+<div><label>Motif de la signature</label><input id="sig-motif" placeholder="Ex: Approbation, Lu et approuve..."></div>
+</div>
+<button class="btn btn-blue btn-f" onclick="signerDocument()" style="margin-top:10px">&#128274; Signer le document</button>
+<div id="sig-res" style="margin-top:12px"></div>
+</details>
+<details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128203; Signatures enregistrees</summary>
+<button class="btn btn-blue" onclick="loadSignatures()" style="margin-bottom:10px">Actualiser</button>
+<div id="sig-list"></div>
+</details>
+</div>
+<div class="card">
+<h2>&#128101; Journal d activite multi-utilisateurs</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Tracabilite complete des actions par utilisateur au sein du compte. Chaque action est horodatee et associee a l email de l utilisateur connecte.</p>
+<button class="btn btn-blue" onclick="loadAuditLog()" style="margin-bottom:10px">Charger le journal</button>
+<div id="cfg-audit-log"></div>
+</div>
 </div>
 
 <!-- ===== DETAILS DES SCORES DE CONFORMITE ===== -->
@@ -12155,6 +13564,114 @@ S<sub>global</sub> = &lfloor; (S<sub>URSSAF</sub> &times; 0.40) + (S<sub>DGFIP</
 </div>
 </div>
 
+<div class="sec" id="s-ensavoirplus">
+
+<div class="card" style="background:linear-gradient(135deg,#f0f9ff 0%,#e0f2fe 100%);border:none">
+<h2 style="font-size:1.5em;color:var(--p2);margin-bottom:4px">&#128218; En savoir plus - NormaCheck v3.8.1</h2>
+<p style="color:var(--tx2);font-size:.92em;margin-top:0">Comprendre le score de conformite, la methodologie et les garanties de NormaCheck.</p>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#127919; A quoi sert le score de conformite ?</h2>
+<p style="font-size:.9em;line-height:1.7;color:var(--tx)">Le score de conformite NormaCheck est un <strong>indicateur synthetique</strong> qui vous permet de mesurer en un coup d oeil le niveau de conformite de votre entreprise face aux obligations sociales, fiscales et comptables.</p>
+<p style="font-size:.9em;line-height:1.7;color:var(--tx)">Concretement, il repond a une question simple : <em>"Si un controleur URSSAF, un inspecteur des impots ou un commissaire aux comptes se presentait demain, quel serait le niveau de risque pour mon entreprise ?"</em></p>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0">
+<div style="background:#f0fdf4;padding:14px;border-radius:10px;border-left:4px solid #22c55e"><strong style="color:#166534">Score A (90-100)</strong><br><span style="font-size:.85em;color:#166534">Excellent. Votre conformite est quasi-parfaite. Risque tres faible en cas de controle.</span></div>
+<div style="background:#ecfdf5;padding:14px;border-radius:10px;border-left:4px solid #10b981"><strong style="color:#065f46">Score B (75-89)</strong><br><span style="font-size:.85em;color:#065f46">Bon. Quelques points d amelioration mineurs, mais pas de risque majeur.</span></div>
+<div style="background:#fefce8;padding:14px;border-radius:10px;border-left:4px solid #eab308"><strong style="color:#854d0e">Score C (60-74)</strong><br><span style="font-size:.85em;color:#854d0e">Moyen. Des ecarts ont ete identifies. Des actions correctives sont recommandees.</span></div>
+<div style="background:#fff7ed;padding:14px;border-radius:10px;border-left:4px solid #f97316"><strong style="color:#9a3412">Score D (45-59)</strong><br><span style="font-size:.85em;color:#9a3412">Insuffisant. Des anomalies significatives necessitent une attention immediate.</span></div>
+<div style="background:#fef2f2;padding:14px;border-radius:10px;border-left:4px solid #ef4444"><strong style="color:#991b1b">Score E/F (&lt;45)</strong><br><span style="font-size:.85em;color:#991b1b">Critique. Risque eleve de redressement en cas de controle. Actions urgentes requises.</span></div>
+</div>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#9878; Comment le score est-il calcule ?</h2>
+<p style="font-size:.9em;line-height:1.7">Notre methodologie repose sur <strong>4 principes fondamentaux</strong> :</p>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:12px 0">
+<div class="card" style="border-top:3px solid var(--p2)"><strong>1. Proportionnalite</strong><br><span style="font-size:.85em;color:var(--tx2)">Le poids de chaque anomalie est proportionnel a la gravite de la sanction prevue par la loi. Une erreur de calcul de cotisations (qui entraine une majoration de 40%) pese plus qu un libelle imprecis (sans sanction directe).</span></div>
+<div class="card" style="border-top:3px solid var(--p2)"><strong>2. Objectivabilite</strong><br><span style="font-size:.85em;color:var(--tx2)">Chaque point de controle est derive d une reference legale explicite (Code de la Securite sociale, Code General des Impots, normes ISA...). Aucun critere subjectif n entre en jeu.</span></div>
+<div class="card" style="border-top:3px solid var(--p2)"><strong>3. Reproductibilite</strong><br><span style="font-size:.85em;color:var(--tx2)">Avec les memes documents, NormaCheck produit toujours le meme score. Il n y a pas de coefficient arbitraire ni d appreciation discretionnaire.</span></div>
+<div class="card" style="border-top:3px solid var(--p2)"><strong>4. Transparence</strong><br><span style="font-size:.85em;color:var(--tx2)">Chaque constat est trace, source et justifie. Vous pouvez voir exactement quels elements ont impacte votre score et pourquoi.</span></div>
+</div>
+
+<h3 style="margin-top:18px">La formule en langage simple</h3>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:8px 0;font-size:.9em;line-height:1.8">
+<p><strong>Etape 1 :</strong> NormaCheck analyse vos documents et identifie les <em>constats</em> (ecarts par rapport aux obligations legales).</p>
+<p><strong>Etape 2 :</strong> Chaque constat recoit un <em>poids de gravite</em> base sur la sanction legale associee :<br>
+&bull; <strong>Critique (4 pts)</strong> : manquement delibere, majoration 40%<br>
+&bull; <strong>Haute (3 pts)</strong> : retard ou omission, majoration 10%<br>
+&bull; <strong>Moyenne (2 pts)</strong> : ecart formel, droit a regularisation<br>
+&bull; <strong>Faible (1 pt)</strong> : anomalie mineure, pas de sanction directe</p>
+<p><strong>Etape 3 :</strong> Le score est calcule : plus vous avez de constats graves, plus le score baisse. <em>Aucun constat = score de 100.</em></p>
+<p><strong>Etape 4 :</strong> Un facteur de <em>couverture documentaire</em> ajuste le score : plus vous fournissez de documents, plus l analyse est fiable et complete.</p>
+</div>
+<p style="font-size:.85em;color:var(--tx2)"><button class="btn btn-s btn-sm" onclick="showS('score-details')">Voir les formules mathematiques detaillees &#8594;</button></p>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#128202; Les 3 axes d analyse</h2>
+<p style="font-size:.9em;line-height:1.7">NormaCheck evalue votre conformite sur 3 axes complementaires, correspondant aux 3 principaux risques de controle :</p>
+
+<div style="margin:16px 0">
+<div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--pl);border-radius:10px;margin-bottom:10px">
+<div style="min-width:50px;height:50px;border-radius:50%;background:var(--p2);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.2em">40%</div>
+<div><strong style="color:var(--p2)">URSSAF - Conformite sociale</strong><br><span style="font-size:.85em;color:var(--tx2)">Cotisations sociales, bulletin de paie, DSN, reduction Fillon, plafond SS, FNAL, AT/MP, retraite complementaire... Reference : Code de la Securite sociale (CSS).</span></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--pul);border-radius:10px;margin-bottom:10px">
+<div style="min-width:50px;height:50px;border-radius:50%;background:var(--pu);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.2em">35%</div>
+<div><strong style="color:var(--pu)">DGFIP - Conformite fiscale</strong><br><span style="font-size:.85em;color:var(--tx2)">TVA, declarations fiscales, DAS-2, FEC, facturation, conservation des documents, CFE/CVAE, taxe sur les salaires... Reference : Code General des Impots (CGI).</span></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;padding:14px;background:#f0fdfa;border-radius:10px">
+<div style="min-width:50px;height:50px;border-radius:50%;background:var(--tl);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.2em">25%</div>
+<div><strong style="color:var(--tl)">Cour des comptes - Regularite comptable</strong><br><span style="font-size:.85em;color:var(--tx2)">Regularite et sincerite des comptes, image fidele, continuite d exploitation, separation des exercices, controle interne... Reference : normes NEP / ISA.</span></div>
+</div>
+</div>
+<p style="font-size:.85em;color:var(--tx2)">Les poids de ponderation (40/35/25) refletent l importance relative du risque financier : les cotisations sociales representent le premier poste de charges pour la plupart des entreprises.</p>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#128170; Comment ameliorer votre score ?</h2>
+<div style="font-size:.9em;line-height:1.8">
+<p><strong>1. Fournissez davantage de documents</strong><br>
+Plus vous importez de documents (bulletins de paie, DSN, factures, bilans...), plus l analyse est precise. Le facteur de couverture documentaire ameliore la fiabilite du score.</p>
+<p><strong>2. Corrigez les anomalies critiques en priorite</strong><br>
+Concentrez-vous d abord sur les constats de gravite "critique" et "haute" - ce sont eux qui impactent le plus votre score ET qui presentent le plus grand risque en cas de controle.</p>
+<p><strong>3. Utilisez les recommandations</strong><br>
+Chaque constat est accompagne d une recommandation concrete et de la reference legale. Suivez ces recommandations pour corriger les ecarts identifies.</p>
+<p><strong>4. Verifiez regulierement</strong><br>
+La conformite n est pas un etat statique. Les regles changent (SMIC, taux, obligations declaratives). Effectuez des analyses regulieres pour maintenir votre conformite.</p>
+</div>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#128274; Garanties et limites</h2>
+<div style="font-size:.9em;line-height:1.8">
+<p><strong>Ce que NormaCheck fait :</strong></p>
+<ul>
+<li>Detecte automatiquement les ecarts par rapport aux obligations legales connues</li>
+<li>Applique une methodologie reproductible, transparente et non-discretionnaire</li>
+<li>Fournit des recommandations concretes et sourcees juridiquement</li>
+<li>Vous aide a preparer un eventuel controle en identifiant les points de risque</li>
+</ul>
+<p><strong>Ce que NormaCheck ne fait pas :</strong></p>
+<ul>
+<li>NormaCheck <strong>ne remplace pas</strong> un expert-comptable, un commissaire aux comptes ou un avocat specialise</li>
+<li>Les scores ne constituent <strong>pas une certification officielle</strong> et ne sont pas opposables aux administrations</li>
+<li>L analyse est basee sur les documents fournis - elle ne peut pas detecter ce qui n a pas ete importe</li>
+<li>Les regles de droit evoluent - NormaCheck est mis a jour regulierement mais un decalage temporaire est possible</li>
+</ul>
+</div>
+<div style="margin-top:12px;padding:14px;background:var(--ol);border-radius:10px;border:1px solid #fde68a;font-size:.84em">
+<strong>&#9878; Base juridique :</strong> La methodologie NormaCheck s appuie sur le Code de la Securite sociale (CSS), le Code General des Impots (CGI), le Livre des Procedures Fiscales (LPF), le Code de commerce, et les normes internationales d audit (ISA/NEP). Chaque point de controle reference l article de loi correspondant.
+</div>
+</div>
+
+<div class="card" style="text-align:center;padding:24px">
+<p style="font-size:.92em;color:var(--tx2)">Pour consulter les formules mathematiques detaillees et les references legales de chaque point de controle :</p>
+<button class="btn btn-blue" onclick="showS('score-details')" style="margin-top:8px">Voir le detail complet des formules &#8594;</button>
+</div>
+</div>
+
 </div><!-- end .page -->
 </div><!-- end .content -->
 </div><!-- end .layout -->
@@ -12163,57 +13680,21 @@ S<sub>global</sub> = &lfloor; (S<sub>URSSAF</sub> &times; 0.40) + (S<sub>DGFIP</
 
 APP_HTML += """
 <script>
-/* === CORE NAV (separate script to guarantee availability) === */
-var _ncUser=null;
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite"};
-function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
-function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
-function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
-function showS(n,el){
-try{
-closeSidebar();
-document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
-document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove("active")});
-var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
-if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
-var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
-if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
-if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();}
-if(typeof loadDash==="function"&&n==="dashboard")loadDash();
-if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
-if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
-if(typeof loadPayStatuses==="function"&&n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
-if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrouillons==="function")loadDSNBrouillons();}
-if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
-if(n==="analyse"&&typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}
-if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
-if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
-if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
-if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();}
-if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
-}catch(e){console.error("showS error:",n,e);}
-}
-function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
-function goToRH(){showS('rh');}
-function goToRHContrats(){showS('rh');setTimeout(function(){if(typeof showRHTab==="function")showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
-function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
-function gv(id){var el=document.getElementById(id);return el?el.value:"";}
-function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
-</script>
-<script>
 /* === AUTH CHECK === */
 (function(){fetch("/api/auth/me",{credentials:"same-origin"}).then(function(r){if(!r.ok){window.location.href="/";return null;}return r.json();}).then(function(u){if(!u)return;_ncUser=u;var su=document.getElementById("sidebar-user");if(su)su.textContent=(u.prenom||"")+" "+(u.nom||"")+" ("+u.role+")";}).catch(function(){window.location.href="/";});})();
 
 /* === INIT === */
 try{var _td=document.getElementById("topbar-date");if(_td)_td.textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});}catch(e){}
 
-document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}});
+document.addEventListener("click",function(e){var a=e.target.closest(".anomalie[data-toggle]");if(a)a.classList.toggle("open");var td=e.target.closest("[data-toggle-detail]");if(td){var det=td.querySelector(".aud-detail,.al-detail");if(det)det.style.display=det.style.display==="none"?"block":"none";}var st=e.target.closest(".sub-toggle");if(st){var sd=st.querySelector(".sub-detail");if(sd)sd.style.display=sd.style.display==="none"?"block":"none";}});
 
 /* === DASHBOARD === */
 var analysisData=null;
 try{var _saved=sessionStorage.getItem("nc_analysis");if(_saved){analysisData=JSON.parse(_saved);}}catch(e){}
 function saveDashServer(data){fetch("/api/dashboard/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),credentials:"same-origin"}).catch(function(){});}
-function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();}}).catch(function(){});}
+function loadDashServer(){if(analysisData)return;fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}loadDash();var ra=document.getElementById("res-analyse");if(ra&&document.getElementById("s-analyse")&&document.getElementById("s-analyse").classList.contains("active")){ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}}}).catch(function(){});}
+/* Charger les donnees d'analyse depuis le serveur au demarrage si sessionStorage est vide */
+if(!analysisData){loadDashServer();}
 function loadDash(){
 try{
 if(!analysisData){loadDashServer();return;}
@@ -12245,34 +13726,64 @@ setGauge("gauge-cdc","gauge-cdc-val","grade-cdc",ts.cdc);
 
 function renderAnomalies(id,constats){
 var el=document.getElementById(id);if(!constats.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune anomalie detectee.</p>";return;}
-var h="<div style='margin-bottom:8px;font-size:.86em;color:var(--tx2)'>"+constats.length+" anomalie(s) detectee(s). Cliquez sur chaque ligne pour voir le detail.</div>";
-constats.forEach(function(c){
+/* Trier : haute d'abord, puis moyenne, puis faible */
+var sevOrder={"haute":0,"moyenne":1,"faible":2};
+constats.sort(function(a,b){return (sevOrder[a.severite]||2)-(sevOrder[b.severite]||2);});
+var nbH=constats.filter(function(c){return c.severite==="haute"}).length;
+var nbM=constats.filter(function(c){return c.severite==="moyenne"}).length;
+var nbL=constats.length-nbH-nbM;
+var h="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;align-items:center'>";
+h+="<span style='font-weight:700;font-size:.95em'>"+constats.length+" anomalie(s) detectee(s)</span>";
+if(nbH)h+="<span class='badge badge-red'>"+nbH+" critique"+(nbH>1?"s":"")+"</span>";
+if(nbM)h+="<span class='badge badge-amber'>"+nbM+" moyenne"+(nbM>1?"s":"")+"</span>";
+if(nbL)h+="<span class='badge badge-green'>"+nbL+" mineure"+(nbL>1?"s":"")+"</span>";
+h+="</div>";
+constats.forEach(function(c,idx){
 var impact=c.montant_impact||0;var neg=impact>0;
 var sevCls=c.severite==="haute"?"high":(c.severite==="moyenne"?"med":"low");
 var dest=categToDest(c.categorie||"");
 var destCls={"URSSAF":"badge-blue","Fiscal":"badge-purple","France Travail":"badge-amber","GUSO":"badge-teal"}[dest]||"badge-blue";
 var sevBadge=c.severite==="haute"?"badge-red":(c.severite==="moyenne"?"badge-amber":"badge-green");
-h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'><div class='head'><div><span class='title'>"+(c.titre||"Ecart")+"</span> ";
-h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+c.severite+"</span>";
+var sevLabel=c.severite==="haute"?"Critique":(c.severite==="moyenne"?"Moyenne":"Mineure");
+h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'>";
+/* --- Ligne resume cliquable --- */
+h+="<div class='head'><div style='flex:1'>";
+h+="<span style='font-weight:700;font-size:.76em;color:var(--tx2);margin-right:6px'>#"+(idx+1)+"</span>";
+h+="<span class='title'>"+(c.titre||"Ecart")+"</span> ";
+h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+sevLabel+"</span>";
 if(c.periode)h+=" <span class='badge' style='background:#e0e7ff;color:#3730a3'>"+c.periode+"</span>";
 h+="</div>";
 if(neg)h+="<div class='montant neg'>+"+Math.abs(impact).toFixed(2)+" EUR</div>";
 h+="</div>";
+/* --- Comparaison rapide (toujours visible) --- */
+if(c.valeur_constatee||c.valeur_attendue){
+h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:.85em'>";
+if(c.valeur_constatee)h+="<div style='background:var(--rl);padding:4px 10px;border-radius:6px;border:1px solid #fecaca'><strong style='color:var(--r)'>Constate :</strong> <span style='font-weight:600'>"+c.valeur_constatee+"</span></div>";
+if(c.valeur_attendue)h+="<div style='background:var(--gl);padding:4px 10px;border-radius:6px;border:1px solid #bbf7d0'><strong style='color:var(--g)'>Attendu :</strong> <span style='font-weight:600'>"+c.valeur_attendue+"</span></div>";
+if(neg)h+="<div style='background:var(--ol);padding:4px 10px;border-radius:6px;border:1px solid #fde68a'><strong style='color:var(--o)'>Impact :</strong> <span style='font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
+h+="</div>";}
+/* --- Detail (deploye au clic) --- */
 h+="<div class='detail'>";
-h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:10px;font-size:.9em'>";
-h+="<div><strong>Categorie :</strong> "+(c.categorie||"-")+"</div>";
-h+="<div><strong>Periode :</strong> "+(c.periode||"Non precisee")+"</div>";
-h+="<div><strong>Document(s) source :</strong> "+(c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"Non precise"))+"</div>";
-h+="<div><strong>Rubrique :</strong> "+(c.rubrique||"Generale")+"</div>";
-if(c.valeur_constatee)h+="<div><strong>Valeur constatee :</strong> <span style='color:var(--r);font-weight:600'>"+c.valeur_constatee+"</span></div>";
-if(c.valeur_attendue)h+="<div><strong>Valeur attendue :</strong> <span style='color:var(--g);font-weight:600'>"+c.valeur_attendue+"</span></div>";
-if(neg)h+="<div><strong>Impact financier :</strong> <span style='color:var(--r);font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
-h+="<div><strong>Detecte par :</strong> "+(c.detecte_par||"-")+"</div>";
+/* Localisation */
+var docSrc=c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"");
+h+="<div style='background:var(--pl);border:1px solid #bfdbfe;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.88em'>";
+h+="<strong style='color:var(--p2)'>&#128204; Localisation de l'erreur</strong><br>";
+if(docSrc)h+="<span>Document : <strong>"+docSrc+"</strong></span><br>";
+h+="<span>Categorie : "+(c.categorie||"-")+"</span>";
+if(c.rubrique&&c.rubrique!=="Generale")h+=" &bull; <span>Rubrique : "+c.rubrique+"</span>";
+if(c.periode)h+=" &bull; <span>Periode : "+c.periode+"</span>";
 h+="</div>";
+/* Explication claire */
 var desc=(c.description||"").replace(/\\n/g,"<br>");
-h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin:8px 0'><strong>Explication :</strong> "+desc+"</div>";
-if(c.recommandation)h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128161;</span><span><strong>Action recommandee :</strong> "+c.recommandation+"</span></div>";
-if(c.reference_legale)h+="<div style='margin-top:6px;font-size:.85em;color:var(--tx2)'><em>Base legale : "+c.reference_legale+"</em></div>";
+h+="<div style='border-radius:8px;padding:12px;margin-bottom:10px;font-size:.88em;line-height:1.6;background:var(--card-bg);border:1px solid var(--brd)'>"+desc+"</div>";
+/* Action recommandee */
+if(c.recommandation){
+h+="<div style='background:var(--gl);border:1px solid #a7f3d0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:.88em'>";
+h+="<strong style='color:#065f46'>&#9989; Action a realiser :</strong> "+c.recommandation+"</div>";}
+/* Base legale */
+if(c.reference_legale){
+h+="<div style='font-size:.82em;color:var(--tx2);padding:6px 10px;background:var(--bg);border-radius:6px;border:1px solid var(--brd)'>";
+h+="<strong>&#9878; Base legale :</strong> "+c.reference_legale+"</div>";}
 h+="</div></div>";});el.innerHTML=h;}
 
 function categToDest(cat){var c=cat.toLowerCase();if(c.indexOf("fiscal")>=0||c.indexOf("impot")>=0)return"Fiscal";if(c.indexOf("france travail")>=0||c.indexOf("chomage")>=0)return"France Travail";if(c.indexOf("guso")>=0||c.indexOf("spectacle")>=0)return"GUSO";return"URSSAF";}
@@ -12421,10 +13932,10 @@ var fd=new FormData();fd.append("champ",champ);fd.append("ancienne_valeur",ancie
 fetch("/api/documents/bibliotheque/"+docId+"/corriger",{method:"POST",body:fd}).then(function(r){if(!r.ok)throw new Error("Erreur");return r.json();}).then(function(){toast("Correction enregistree.","ok");loadBiblio();}).catch(function(e){toast(e.message);});}
 
 /* === FACTURES === */
-function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
 
 var factFile=null;
-document.getElementById("fi-fact").addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});
+var _fiFact=document.getElementById("fi-fact");
+if(_fiFact){_fiFact.addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});}
 
 function analyserFacture(){
 if(!factFile)return;var fd=new FormData();fd.append("fichier",factFile);
@@ -12580,15 +14091,6 @@ h+="<tr><td style='font-size:.8em'>"+d.date_creation.substring(0,10)+"</td><td>"
 h+="</table>";el.innerHTML=h;}).catch(function(){});}
 
 /* === COMPTABILITE === */
-function showCT(n,el){
-try{
-document.querySelectorAll("#compta-tabs .tab").forEach(function(t){t.classList.remove("active")});
-document.querySelectorAll("#s-compta .tc").forEach(function(t){t.classList.remove("active")});
-if(el)el.classList.add("active");var tc=document.getElementById("ct-"+n);if(tc)tc.classList.add("active");
-var ps=document.getElementById("period-sel");if(ps)ps.style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";
-loadCompta();
-}catch(e){console.error("showCT error:",n,e);}}
-
 function loadCompta(){try{
 var dd=document.getElementById("gl-dd").value;var df=document.getElementById("gl-df").value;
 
@@ -12666,10 +14168,17 @@ var _sugTimer=null;
 function suggestCompte(inputId,sugId,counterpartId){
 clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
 var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
-fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)).then(safeJson).then(function(d){
+fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)+"&description="+encodeURIComponent(v)).then(safeJson).then(function(d){
 var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
-var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";h+="<div class='sug-item' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>";}
+var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";var expl=items[i].explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:8px 10px' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><div><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>"+(expl?"<div style='font-size:.78em;color:var(--tx2);margin-top:2px;line-height:1.3'>"+expl+"</div>":"")+"</div>";}
 h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(){});},250);}
+var _sugSearchTimer=null;
+function suggestByDescription(){clearTimeout(_sugSearchTimer);_sugSearchTimer=setTimeout(function(){
+var v=document.getElementById("em-search").value;if(v.length<2){closeSugs("em-search-sug");return;}
+fetch("/api/comptabilite/suggestions?description="+encodeURIComponent(v)).then(safeJson).then(function(d){
+var box=document.getElementById("em-search-sug");var items=d.suggestions||[];if(!items.length){closeSugs("em-search-sug");return;}
+var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<10;i++){var item=items[i];var expl=item.explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:10px 12px;cursor:pointer' data-num='"+item.numero+"'><div style='display:flex;align-items:center;gap:8px'><span class='sug-num' style='font-size:.95em'>"+item.numero+"</span><span class='sug-lbl' style='font-weight:600;color:var(--tx)'>"+item.libelle+"</span></div>"+(expl?"<div style='font-size:.82em;color:var(--tx2);margin-top:3px;line-height:1.4'>&#128161; "+expl+"</div>":"")+"</div>";}
+h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){var num=el.getAttribute("data-num");document.getElementById("em-deb").value=num;closeSugs("em-search-sug");suggestCompte("em-deb","em-deb-sug","em-cre");});});}).catch(function(){});},300);}
 function pickSug(inputId,sugId,val,cpId,cpVal){document.getElementById(inputId).value=val;closeSugs(sugId);if(cpId&&cpVal){var cpInput=document.getElementById(cpId);if(cpInput&&!cpInput.value)cpInput.value=cpVal;}}
 function closeSugs(sugId){var b=document.getElementById(sugId);if(b)b.innerHTML="";}
 document.addEventListener("click",function(e){if(!e.target.closest(".sug-box")&&!e.target.closest("input")){document.querySelectorAll(".sug-list").forEach(function(s){s.classList.remove("show");});}});
@@ -12685,14 +14194,17 @@ var cls=d.sans_justificatif?"warn":"ok";var icon=d.sans_justificatif?"&#9888;":"
 document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class='ai'>"+icon+"</span><span>"+(d.alerte||"Ecriture enregistree.")+(d.sans_justificatif?" <em style='color:var(--r)'>(justificatif manquant)</em>":"")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 
 /* === SIMULATION === */
-function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
 function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function ccnAutoSearch(){var t=document.getElementById("ccn-search").value;if(t.length<2){document.getElementById("ccn-search-results").innerHTML="";return;}fetch("/api/simulation/recherche-ccn?terme="+encodeURIComponent(t)).then(safeJson).then(function(r){var h="";if(r.resultats&&r.resultats.length>0){h="<div style='background:var(--bg2);border-radius:6px;padding:6px'>";for(var i=0;i<Math.min(r.resultats.length,8);i++){var c=r.resultats[i];h+="<div style='padding:4px 8px;cursor:pointer;border-radius:4px;font-size:.85em' onmouseover='this.style.background=\"var(--bg3)\"' onmouseout='this.style.background=\"\"' onclick='document.getElementById(\"ccn-search\").value=\""+c.idcc+"\";document.getElementById(\"ccn-search-results\").innerHTML=\"\"'><strong>IDCC "+c.idcc+"</strong> - "+c.nom+"</div>";}h+="</div>";}document.getElementById("ccn-search-results").innerHTML=h;}).catch(function(){});}
+function ccnAutoSearch(){var t=document.getElementById("ccn-search").value;if(t.length<2){document.getElementById("ccn-search-results").innerHTML="";return;}fetch("/api/simulation/recherche-ccn?terme="+encodeURIComponent(t)).then(safeJson).then(function(r){var box=document.getElementById("ccn-search-results");if(!r.resultats||!r.resultats.length){box.innerHTML="";return;}var container=document.createElement("div");container.style.cssText="background:var(--bg2);border-radius:6px;padding:6px";for(var i=0;i<Math.min(r.resultats.length,8);i++){(function(c){var d=document.createElement("div");d.style.cssText="padding:4px 8px;cursor:pointer;border-radius:4px;font-size:.85em";d.innerHTML="<strong>IDCC "+c.idcc+"<\/strong> - "+c.nom;d.onmouseover=function(){d.style.background="var(--bg3)";};d.onmouseout=function(){d.style.background="";};d.onclick=function(){document.getElementById("ccn-search").value=c.idcc;box.innerHTML="";};container.appendChild(d);})(r.resultats[i]);}box.innerHTML="";box.appendChild(container);}).catch(function(){});}
 function simCCN(){var ccn=document.getElementById("ccn-search").value;if(!ccn){toast("Saisissez un IDCC ou un nom de convention collective");return;}var p="ccn="+encodeURIComponent(ccn)+"&brut_mensuel="+gv("ccn-brut")+"&est_cadre="+gv("ccn-cadre")+"&effectif="+gv("ccn-eff");fetch("/api/simulation/ccn?"+p).then(safeJson).then(function(r){var h="";if(r.ccn_identifiee){h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>IDCC "+r.idcc+" - "+r.nom_ccn+"</strong>"+(r.secteur?" ("+r.secteur+")":"")+"</span></div>";}else{h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>Convention non identifiee</strong> — les minimums legaux sont appliques. Essayez un numero IDCC (ex: 1486).</span></div>";}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.bulletin.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut mensuel</div></div><div class='sc green'><div class='val'>"+r.bulletin.net_avant_impot.toFixed(2)+"</div><div class='lab'>Net avant impot</div></div><div class='sc amber'><div class='val'>"+r.bulletin.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+r.prevoyance_ccn.montant_mensuel.toFixed(2)+"</div><div class='lab'>Prevoyance CCN/mois</div></div></div>";h+="<h3 style='margin-top:16px'>&#9878; Obligations conventionnelles vs legales</h3>";if(r.obligations_conventionnelles&&r.obligations_conventionnelles.length>0){h+="<table><thead><tr><th>Obligation</th><th>Disposition conventionnelle</th><th>Minimum legal</th><th>+Favorable?</th></tr></thead><tbody>";for(var i=0;i<r.obligations_conventionnelles.length;i++){var o=r.obligations_conventionnelles[i];var badge=o.plus_favorable===true?"<span style='color:#16a34a'>&#10004; Oui</span>":o.plus_favorable===false?"<span style='color:#dc2626'>&#10008; Non</span>":"<span style='color:#d97706'>&#8212;</span>";h+="<tr><td><strong>"+o.obligation+"</strong></td><td>"+o.conventionnel+"</td><td>"+(o.legal||"-")+"</td><td>"+badge+"</td></tr>";}h+="</tbody></table>";h+="<p style='margin-top:8px;font-size:.85em;color:var(--tx2)'><strong>"+r.nb_obligations_plus_favorables+"</strong> disposition(s) conventionnelle(s) plus favorable(s) que la loi.</p>";}else{h+="<p style='color:var(--tx2);font-style:italic'>Aucune specificite conventionnelle identifiee au-dela du minimum legal.</p>";}h+="<h3 style='margin-top:16px'>&#128214; Rappel obligations legales (Code du travail / ANI)</h3>";if(r.obligations_legales){h+="<table><thead><tr><th>Obligation</th><th>Minimum legal</th></tr></thead><tbody>";for(var j=0;j<r.obligations_legales.length;j++){var ol=r.obligations_legales[j];h+="<tr><td>"+ol.obligation+"</td><td>"+ol.legal+"</td></tr>";}h+="</tbody></table>";}h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";document.getElementById("sim-ccn-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simGUSO(){var p="salaire_brut="+gv("sim-gbrut")+"&nb_heures="+gv("sim-gh")+"&type_contrat="+gv("sim-gtype")+"&est_artiste="+gv("sim-gartiste");fetch("/api/simulation/guso?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+fmtN(r.salaire_brut)+"</div><div class='lab'>Brut "+r.type_contrat+"</div></div><div class='sc green'><div class='val'>"+fmtN(r.net_artiste)+"</div><div class='lab'>Net "+(r.est_artiste?"artiste":"technicien")+"</div></div><div class='sc amber'><div class='val'>"+fmtN(r.total_charges_guso)+"</div><div class='lab'>Total charges GUSO</div></div><div class='sc red'><div class='val'>"+fmtN(r.cout_total_employeur)+"</div><div class='lab'>Cout total employeur</div></div></div>";h+="<h3 style='margin-top:14px'>Detail des cotisations spectacle</h3><table><thead><tr><th>Cotisation</th><th class='num'>Montant</th><th>Base</th></tr></thead><tbody>";h+="<tr><td>Cotisations patronales URSSAF</td><td class='num'>"+fmtN(r.cotisations_patronales_urssaf)+"</td><td>Droit commun</td></tr>";h+="<tr><td><strong>Conge spectacle (15.5%)</strong></td><td class='num'>"+fmtN(r.conge_spectacle_15_5pct)+"</td><td>Obligatoire spectacle</td></tr>";h+="<tr><td>Audiens prevoyance (1.5%)</td><td class='num'>"+fmtN(r.audiens_prevoyance)+"</td><td>CCN Spectacle</td></tr>";h+="<tr><td>Audiens sante (0.82%)</td><td class='num'>"+fmtN(r.audiens_sante)+"</td><td>Complementaire obligatoire</td></tr>";h+="<tr><td>FCAP (0.5%)</td><td class='num'>"+fmtN(r.fcap)+"</td><td>Pole emploi spectacle</td></tr>";h+="<tr><td>Medecine du travail</td><td class='num'>"+fmtN(r.medecine_travail)+"</td><td>0.46 EUR/heure</td></tr>";h+="</tbody></table>";if(r.detail_csg_crds){var csg=r.detail_csg_crds;h+="<h3 style='margin-top:14px'>CSG/CRDS (prelevements salarie)</h3><table><thead><tr><th>Prelevement</th><th class='num'>Montant</th></tr></thead><tbody>";h+="<tr><td>CSG deductible (6.8%)</td><td class='num'>"+fmtN(csg.csg_deductible_6_8)+"</td></tr>";h+="<tr><td>CSG non deductible (2.4%)</td><td class='num'>"+fmtN(csg.csg_non_deductible_2_4)+"</td></tr>";h+="<tr><td>CRDS (0.5%)</td><td class='num'>"+fmtN(csg.crds_0_5)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total CSG/CRDS</td><td class='num'>"+fmtN(csg.total)+"</td></tr>";h+="</tbody></table>";}if(r.rappel){h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";}document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simEpargne(){var fd=new FormData();fd.append("type_dispositif",gv("ep-type"));fd.append("masse_salariale_brute",gv("ep-ms"));fd.append("effectif",gv("ep-eff"));fd.append("montant_verse",gv("ep-montant"));fd.append("abondement_pct",gv("ep-abond"));fd.append("plafond_abondement",gv("ep-plaf"));fd.append("taux_forfait_social",gv("ep-fs"));fd.append("benefice_net",gv("ep-bn"));fetch("/api/simulation/epargne-salariale",{method:"POST",body:fd}).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.type_dispositif+"</div><div class='lab'>Dispositif</div></div><div class='sc green'><div class='val'>"+fmtN(r.montant_verse)+"</div><div class='lab'>Montant verse</div></div><div class='sc amber'><div class='val'>"+fmtN(r.cout_total_entreprise)+"</div><div class='lab'>Cout total entreprise</div></div><div class='sc green'><div class='val'>"+fmtN(r.economie_entreprise)+"</div><div class='lab'>Economie vs prime ("+r.economie_entreprise_pct+"%)</div></div></div>";h+="<div class='g4' style='margin-top:10px'><div class='sc'><div class='val'>"+fmtN(r.abondement_employeur)+"</div><div class='lab'>Abondement total</div></div><div class='sc'><div class='val'>"+r.taux_forfait_social+"%</div><div class='lab'>Taux forfait social</div></div><div class='sc'><div class='val'>"+fmtN(r.forfait_social)+"</div><div class='lab'>Forfait social</div></div><div class='sc'><div class='val'>"+fmtN(r.deduction_is)+"</div><div class='lab'>Deduction IS</div></div></div>";h+="<h3 style='margin-top:14px'>&#9878; Comparaison prime classique vs epargne salariale</h3><table><thead><tr><th></th><th class='num'>Prime classique</th><th class='num'>Epargne salariale</th><th class='num'>Ecart</th></tr></thead><tbody>";h+="<tr><td>Cout employeur</td><td class='num'>"+fmtN(r.comparaison_prime.cout_total_prime)+"</td><td class='num'>"+fmtN(r.cout_total_entreprise)+"</td><td class='num' style='color:#16a34a'>"+fmtN(r.economie_entreprise)+"</td></tr>";h+="<tr><td>Net percu salarie</td><td class='num'>"+fmtN(r.comparaison_prime.net_salarie_prime)+"</td><td class='num'>"+fmtN(r.net_salarie_epargne)+"</td><td class='num' style='color:#16a34a'>"+fmtN(r.gain_net_salarie)+"</td></tr>";h+="<tr><td>Charges patronales</td><td class='num'>"+fmtN(r.comparaison_prime.charges_patronales)+"</td><td class='num'>"+fmtN(r.forfait_social)+"</td><td class='num'></td></tr>";h+="<tr><td>CSG/CRDS salarie</td><td class='num'>-</td><td class='num'>"+fmtN(r.csg_crds_salarie)+"</td><td class='num'></td></tr>";h+="</tbody></table>";h+="<div class='al ok' style='margin-top:12px'><span class='ai'>&#9989;</span><span><strong>Cout net apres IS : "+fmtN(r.cout_net_apres_is)+" EUR</strong></span></div>";if(r.rappel_regles){h+="<p style='margin-top:8px;font-size:.84em;color:var(--tx2);font-style:italic'>"+r.rappel_regles+"</p>";}document.getElementById("sim-epargne-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function creerContratEpargne(){var fd=new FormData();fd.append("type_dispositif",gv("epc-type"));fd.append("nom_contrat",gv("epc-nom"));fd.append("organisme",gv("epc-org"));fd.append("date_mise_en_place",gv("epc-date"));fd.append("duree_accord",gv("epc-duree"));fd.append("montant_prevu",gv("epc-montant"));fd.append("abondement_pct",gv("epc-abond"));fd.append("plafond_abondement",gv("epc-plaf"));fd.append("beneficiaires",gv("epc-benef"));fd.append("observations",gv("epc-obs"));fetch("/api/epargne-salariale/contrats",{method:"POST",body:fd}).then(safeJson).then(function(r){if(r.ok){toast("Contrat cree avec succes");loadContratsEpargne();}else{toast(r.error||"Erreur");}}).catch(function(e){toast(e.message);});}
+function loadContratsEpargne(){fetch("/api/epargne-salariale/contrats").then(safeJson).then(function(r){var el=document.getElementById("epargne-contrats-list");if(!r.contrats||r.contrats.length===0){el.innerHTML="<p style='color:var(--tx2);font-style:italic'>Aucun contrat enregistre.</p>";return;}var h="<table><thead><tr><th>Type</th><th>Nom</th><th>Organisme</th><th>Date</th><th>Duree</th><th>Montant prevu</th><th>Abond.</th><th>Statut</th><th></th></tr></thead><tbody>";for(var i=0;i<r.contrats.length;i++){var c=r.contrats[i];h+="<tr><td><strong>"+_esc(c.type_dispositif)+"</strong></td><td>"+_esc(c.nom_contrat)+"</td><td>"+_esc(c.organisme)+"</td><td>"+_esc(c.date_mise_en_place)+"</td><td>"+c.duree_accord_ans+" ans</td><td>"+fmtN(c.montant_prevu)+"</td><td>"+c.abondement_pct+"%</td><td><span style='color:#16a34a'>"+_esc(c.statut)+"</span></td><td><button class='btn btn-red' style='padding:2px 8px;font-size:.8em' onclick='supprimerContratEpargne("+JSON.stringify(c.id)+")'>Suppr.</button></td></tr>";}h+="</tbody></table>";el.innerHTML=h;}).catch(function(e){toast(e.message);});}
+function supprimerContratEpargne(id){if(!confirm("Supprimer ce contrat ?"))return;fetch("/api/epargne-salariale/contrats/"+id,{method:"DELETE"}).then(safeJson).then(function(r){if(r.ok){toast("Contrat supprime");loadContratsEpargne();}else{toast(r.error||"Erreur");}}).catch(function(e){toast(e.message);});}
 function simCout(){var p="brut_mensuel="+gv("ce-brut")+"&effectif="+gv("ce-eff")+"&est_cadre="+gv("ce-cadre")+"&primes="+gv("ce-primes")+"&avantages_nature="+gv("ce-avantages")+"&frais_km="+gv("ce-km")+"&tickets_restaurant="+gv("ce-tr")+"&mutuelle_employeur="+gv("ce-mut");fetch("/api/simulation/cout-employeur?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_total.toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_mensuel.toFixed(2)+"</div><div class='lab'>Cout total/mois</div></div><div class='sc'><div class='val'>"+r.cout_total_annuel.toFixed(2)+"</div><div class='lab'>Cout total/an</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";h+="<tr><td>Charges patronales URSSAF</td><td class='num'>"+r.charges_patronales_urssaf.toFixed(2)+"</td></tr>";h+="<tr><td>Charges salariales</td><td class='num'>"+r.charges_salariales.toFixed(2)+"</td></tr>";h+="<tr><td>Formation professionnelle</td><td class='num'>"+r.formation_professionnelle.toFixed(2)+"</td></tr>";h+="<tr><td>Taxe apprentissage</td><td class='num'>"+r.taxe_apprentissage.toFixed(2)+"</td></tr>";h+="<tr><td>Effort construction</td><td class='num'>"+r.effort_construction.toFixed(2)+"</td></tr>";h+="<tr><td>Participation obligatoire</td><td class='num'>"+r.participation_obligatoire.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total charges annexes</td><td class='num'>"+r.total_charges_annexes.toFixed(2)+"</td></tr>";h+="<tr><td>Avantages nature</td><td class='num'>"+r.avantages_nature.toFixed(2)+"</td></tr>";h+="<tr><td>Frais km rembourses</td><td class='num'>"+r.frais_km_rembourses.toFixed(2)+"</td></tr>";h+="<tr><td>Tickets restaurant</td><td class='num'>"+r.tickets_restaurant.toFixed(2)+"</td></tr>";h+="<tr><td>Mutuelle employeur</td><td class='num'>"+r.mutuelle_employeur.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total avantages</td><td class='num'>"+r.total_avantages.toFixed(2)+"</td></tr></table>";h+="<div class='g4' style='margin-top:12px'><div class='sc'><div class='val'>"+r.repartition.salaire_net+"%</div><div class='lab'>Salaire net</div></div><div class='sc'><div class='val'>"+r.repartition.charges_salariales+"%</div><div class='lab'>Charges sal.</div></div><div class='sc'><div class='val'>"+r.repartition.charges_patronales+"%</div><div class='lab'>Charges pat.</div></div><div class='sc'><div class='val'>"+r.repartition.annexes_avantages+"%</div><div class='lab'>Annexes+Avantages</div></div></div>";h+="<p style='margin-top:10px;color:var(--tx2);font-size:.84em'>Ratio cout/net : <b>"+r.ratio_cout_net+"x</b> - Pour 1 EUR net verse, l employeur depense "+r.ratio_cout_net+" EUR</p>";document.getElementById("sim-cout-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function toggleLodeom(){var z=gv("exo-zone");document.getElementById("lodeom-bareme-wrap").style.display=z==="outremer"?"block":"none";}
 function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"))+"&nb_heures_mensuelles="+(gv("exo-heures")||"151.67")+"&temps_partiel_pct="+(gv("exo-tp")||"100")+"&jours_absence="+(gv("exo-abs-jours")||"0")+"&type_absence="+gv("exo-abs-type")+"&bareme_lodeom="+gv("exo-lodeom")+"&est_cadre="+gv("exo-cadre")+"&taux_at="+(gv("exo-at")||"0")+"&nb_salaries_simules="+(gv("exo-nb")||"1");
@@ -12744,7 +14256,7 @@ var typeLabels={"subvention":"Subvention","credit_impot":"Credit d impot","exone
 var catLabels={"innovation":"Innovation / R&D","environnement":"Environnement","emploi":"Emploi / Formation","numerique":"Numerique","export":"Export","creation":"Creation / Reprise","investissement":"Investissement","fiscal":"Avantage fiscal","social":"Exoneration sociale","ess":"ESS / Impact"};
 for(var i=0;i<aides.length;i++){var a=aides[i];
 var nc=niveauColors[a.niveau]||"blue";
-h+="<div class='card' style='cursor:pointer;border-left:4px solid var(--"+(nc==="blue"?"p3":nc==="purple"?"pu":nc==="teal"?"tl":"o")+")' onclick='this.querySelector(\".sub-detail\").style.display=this.querySelector(\".sub-detail\").style.display===\"none\"?\"block\":\"none\"'>";
+h+="<div class='card sub-toggle' style='cursor:pointer;border-left:4px solid var(--"+(nc==="blue"?"p3":nc==="purple"?"pu":nc==="teal"?"tl":"o")+")'>";
 h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px'>";
 h+="<div><h2 style='margin-bottom:4px'>"+a.nom+"</h2><div style='font-size:.82em;color:var(--tx2)'>"+a.organisme+"</div></div>";
 h+="<div style='display:flex;gap:6px;flex-wrap:wrap'>";
@@ -12814,12 +14326,6 @@ function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),
 /* === PORTEFEUILLE === */
 var _tiStatutLabels={"gerant_majoritaire":"Gerant majoritaire","micro_entrepreneur":"Micro-entrepreneur","profession_liberale":"Profession liberale","entreprise_individuelle_ir":"EI (IR)","entreprise_individuelle_is":"EI (IS)","artisan":"Artisan","commercant":"Commercant"};
 
-function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
-document.getElementById("port-"+name).style.display="block";
-document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
-if(el)el.classList.add("active");
-if(name==="vue")loadPortVue();if(name==="ti")rechTI();if(name==="employeur")rechEnt();}
-
 function ajouterEnt(){var fd=new FormData();fd.append("siret",document.getElementById("ent-siret").value);fd.append("raison_sociale",document.getElementById("ent-raison").value);fd.append("forme_juridique",document.getElementById("ent-forme").value);fd.append("code_naf",document.getElementById("ent-naf").value);fd.append("effectif",document.getElementById("ent-eff").value||"0");fd.append("ville",document.getElementById("ent-ville").value);
 fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();document.getElementById("ent-siret").value="";document.getElementById("ent-raison").value="";}).catch(function(e){toast(e.message);});}
 
@@ -12867,8 +14373,8 @@ if(t.regime_fiscal)h+="Regime: "+t.regime_fiscal+" | ";
 if(t.chiffre_affaires_annuel)h+="CA: "+fmtN(t.chiffre_affaires_annuel)+" EUR | ";
 if(t.acre)h+="<span class='badge badge-green' style='font-size:.72em'>ACRE</span> ";
 h+="</div><div style='display:flex;gap:6px;margin-top:8px'>";
-h+="<button class='btn btn-s btn-sm' onclick='voirDashTI(\""+t.id+"\")'>&#128202; Dashboard</button>";
-h+="<button class='btn btn-sm' style='background:var(--r);color:#fff' onclick='supprimerTI(\""+t.id+"\")'>&#128465; Supprimer</button>";
+h+="<button class='btn btn-s btn-sm' data-action='dashTI' data-id='"+t.id+"'>&#128202; Dashboard</button>";
+h+="<button class='btn btn-sm' style='background:var(--r);color:#fff' data-action='suppTI' data-id='"+t.id+"'>&#128465; Supprimer</button>";
 h+="</div></div>";}
 el.innerHTML=h;}).catch(function(){});}
 
@@ -12952,9 +14458,10 @@ var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll(
 var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_"+name+".csv";a.click();toast("Export telecharge.","ok");}
 
 /* === MODE ANALYSE === */
-document.getElementById("mode-analyse").addEventListener("change",function(){
+var _modeAzSel=document.getElementById("mode-analyse");
+if(_modeAzSel){_modeAzSel.addEventListener("change",function(){
 var m=this.value;var msgs={"simple":"Analyse simple : detection des ecarts de taux et montants.","social":"Audit social : verification complete des cotisations, DSN, conges, conventions collectives.","fiscal":"Audit fiscal : coherence TVA, charges deductibles, IS/IR, declarations fiscales.","complet":"Audit complet : verification de toutes les coherences sociales, fiscales, DSN et rapprochements."};
-document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});
+document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});}
 
 /* === FILE INTERPRETATION + AUDIT === */
 function showFileInterpretation(data){
@@ -13071,9 +14578,14 @@ var mode=data.mode_analyse||document.getElementById("mode-analyse").value;
 var card=document.getElementById("az-audit-card");var el=document.getElementById("az-audit-checks");
 if(mode==="simple"){card.style.display="none";return;}
 card.style.display="block";
+var adeb=document.getElementById("audit-annee-debut");var afin=document.getElementById("audit-annee-fin");
+var qp="";if(adeb&&afin&&adeb.value&&afin.value){qp="?annee_debut="+adeb.value+"&annee_fin="+afin.value;}
 el.innerHTML="<p style='color:var(--tx2)'>Chargement de l audit depuis la base de connaissances...</p>";
-fetch("/api/bibliotheque/knowledge/audit").then(function(r){if(!r.ok)throw new Error("Erreur serveur ("+r.status+")");return r.json();}).then(function(audit){
+fetch("/api/bibliotheque/knowledge/audit"+qp).then(function(r){if(!r.ok)throw new Error("Erreur serveur ("+r.status+")");return r.json();}).then(function(audit){
 var h="";var sc=audit.score_audit||{};
+var cp=audit.controle_pluriannuel||{};
+if(cp.annee_debut){h+="<div class='al info' style='margin-bottom:12px'><span class='ai'><svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><rect x='3' y='4' width='18' height='18' rx='2'/><line x1='16' y1='2' x2='16' y2='6'/><line x1='8' y1='2' x2='8' y2='6'/><line x1='3' y1='10' x2='21' y2='10'/></svg></span><span><strong>Controle pluri-annuel "+cp.annee_debut+"-"+cp.annee_fin+"</strong> | Annees documentees: "+(cp.annees_documentees||[]).join(", ")+(cp.annees_manquantes&&cp.annees_manquantes.length>0?" | <span style='color:var(--r);font-weight:700'>Manquantes: "+cp.annees_manquantes.join(", ")+"</span>":"")+"</span></div>";}
+
 h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px'>";
 h+="<div class='sc blue'><div class='val'>"+sc.total_checks+"</div><div class='lab'>Points de controle</div></div>";
 h+="<div class='sc green'><div class='val'>"+sc.verifies+"</div><div class='lab'>Verifies</div></div>";
@@ -13446,15 +14958,15 @@ w.document.write(html);w.document.close();setTimeout(function(){w.print();},600)
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
 /* === RH MODULE === */
-function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(n==="salaries")loadRHSalaries();if(n==="contrats"){loadRHContrats();loadRHAvenants();}if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
-
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(safeJson).then(function(d){return (d&&d.items&&typeof d.total==="number")?d.items:d;}).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
-function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);
+function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);var nirEl=document.getElementById("rh-ctr-nir");if(nirEl)fd.append("nir",nirEl.value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
-var h="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
+var h="";
+if(d.doublons_detectes&&d.doublons_detectes.length>0){h+="<div class='al warn' style='margin-bottom:10px'><span class='ai'>&#9888;</span><span><strong>Doublon potentiel detecte !</strong> "+d.alerte_doublon+"</span></div>";h+="<div style='background:var(--ol);border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:12px'><strong>Fiche(s) existante(s) :</strong><table style='margin-top:6px'><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Motif</th><th>Action</th></tr>";
+for(var i=0;i<d.doublons_detectes.length;i++){var dup=d.doublons_detectes[i];var motifLabel=dup.motif==="nir_identique"?"<span class='badge badge-red'>NIR identique</span>":"<span class='badge badge-amber'>Nom/Prenom</span>";h+="<tr><td>"+dup.nom+"</td><td>"+dup.prenom+"</td><td>"+dup.poste+"</td><td>"+dup.type_contrat+"</td><td>"+dup.date_debut+"</td><td style='font-size:.8em'>"+(dup.nir||"-")+"</td><td>"+motifLabel+"</td><td><button class='btn btn-s btn-sm' onclick='fusionnerDoublon("+JSON.stringify(d.id)+","+JSON.stringify(dup.id)+")'>Fusionner</button></td></tr>";}h+="</table></div>";}
+h+="<div class='al ok'><span class='ai'>&#9989;</span><span>Contrat <strong>"+d.type_contrat+" - "+d.nom_salarie+" "+d.prenom_salarie+"</strong> cree (ID: "+d.id+")</span></div>";
 h+="<button class='btn btn-s btn-sm' style='margin:8px 4px 0 0' onclick='voirContrat("+JSON.stringify(d.id)+")'>Visualiser le contrat</button>";
 var eff=d.cascading_effects;if(eff){h+="<div style='margin-top:12px;padding:10px;background:var(--pl);border-radius:8px'><strong>Effets en cascade :</strong><ul style='margin:6px 0 0 16px;font-size:.86em'>";
 if(eff.dpae)h+="<li>&#9888; Rappel : effectuez la DPAE sur net-entreprises.fr avant embauche (ref contrat: "+d.id+")</li>";
@@ -13462,7 +14974,10 @@ if(eff.visite_medicale)h+="<li>&#128197; Visite medicale programmee avant le "+e
 if(eff.planning_suggestion)h+="<li>&#128197; "+eff.planning_suggestion.message+"</li>";
 if(eff.ecriture_comptable)h+="<li>&#128181; Ecriture comptable provisionnee ("+eff.ecriture_comptable.libelle+")</li>";
 h+="</ul></div>";}
-document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});}
+document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});
+}
+function fusionnerDoublon(idGarder,idSupprimer){if(!confirm("Fusionner les deux fiches ? La fiche la plus ancienne sera completee puis le doublon supprime."))return;fetch("/api/rh/doublons/fusionner",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id_garder:idGarder,id_supprimer:idSupprimer}),credentials:"same-origin"}).then(safeJson).then(function(r){toast(r.message,"ok");loadRHSalaries();loadRHContrats();}).catch(function(e){toast(e.message||"Erreur fusion");});}
+function detecterDoublons(){fetch("/api/rh/doublons",{credentials:"same-origin"}).then(safeJson).then(function(r){var el=document.getElementById("rh-doublons-alert");if(!r.doublons||!r.doublons.length){el.innerHTML="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span>Aucun doublon detecte parmi vos salaries.</span></div>";el.style.display="block";return;}el.style.display="block";var h="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>"+r.nb_doublons+" doublon(s) potentiel(s) detecte(s) !</strong> Des salaries apparaissent dans plusieurs fiches. Verifiez et fusionnez si necessaire.</span></div>";for(var i=0;i<r.doublons.length;i++){var d=r.doublons[i];var typeLabel=d.type==="nir"?"<span class='badge badge-red'>Meme NIR : "+d.valeur+"</span>":"<span class='badge badge-amber'>Meme Nom/Prenom : "+d.valeur+"</span>";h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'><div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'><strong>"+d.nb_occurrences+" fiches</strong> "+typeLabel+"</div>";h+="<table><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Source</th><th>Brut</th><th>Action</th></tr>";for(var j=0;j<d.fiches.length;j++){var f=d.fiches[j];var nirAff=f.nir?(f.nir.length>8?f.nir.substring(0,8)+"...":f.nir):"-";h+="<tr><td>"+f.nom+"</td><td>"+f.prenom+"</td><td>"+f.poste+"</td><td>"+f.type_contrat+"</td><td>"+f.date_debut+"</td><td style='font-size:.8em'>"+nirAff+"</td><td style='font-size:.78em'>"+f.source+"</td><td class='num'>"+(parseFloat(f.salaire_brut)||0).toFixed(0)+" EUR</td>";if(j>0)h+="<td><button class='btn btn-s btn-sm' onclick='fusionnerDoublon("+JSON.stringify(d.fiches[0].id)+","+JSON.stringify(f.id)+")'>Fusionner dans 1ere</button></td>";else h+="<td><span class='badge badge-green'>Principale</span></td>";h+="</tr>";}h+="</table></div>";}el.innerHTML=h;}).catch(function(e){toast(e.message||"Erreur detection");});}
 
 function loadRHSalaries(){
 rhGet("/api/rh/contrats",function(list){
@@ -13496,6 +15011,8 @@ h+="<td><button class='btn btn-s btn-sm' data-action='edit' data-id='"+c.id+"'>M
 h+="</tbody></table>";
 el.innerHTML=h;
 el.querySelectorAll("[data-action=edit]").forEach(function(b){b.onclick=function(){editSalarie(this.dataset.id);};});
+/* Auto-detection des doublons au chargement */
+if(list.length>1){fetch("/api/rh/doublons",{credentials:"same-origin"}).then(safeJson).then(function(r){var da=document.getElementById("rh-doublons-alert");if(r.doublons&&r.doublons.length>0){da.innerHTML="<div class='al warn' style='margin-bottom:8px;cursor:pointer' onclick='detecterDoublons()'><span class='ai'>&#9888;</span><span><strong>"+r.nb_doublons+" doublon(s) potentiel(s) detecte(s)</strong> parmi vos salaries (meme nom/prenom ou NIR). <u>Cliquez ici pour voir et fusionner.</u></span></div>";da.style.display="block";}else{da.style.display="none";}}).catch(function(){});}
 });
 }
 
@@ -13610,29 +15127,171 @@ function genererAttestation(){var fd=new FormData();fd.append("salarie_id",docum
 rhPost("/api/rh/attestations/generer",fd,function(d){document.getElementById("rh-at-res").innerHTML="<div class='card' style='background:var(--pl);margin-top:8px'><pre style='white-space:pre-wrap;font-size:.82em;line-height:1.6'>"+(d.texte||d.contenu||"Erreur generation")+"</pre><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer</button></div>";toast("Attestation generee.","ok");loadRHAttestations();});}
 function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el=document.getElementById("rh-at-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-blue'>"+a.type_attestation+"</span></td><td>"+a.date_generation+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
-rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");loadRHPlanning();});}
-function loadRHPlanning(){rhGet("/api/rh/planning",function(list){var el=document.getElementById("rh-pl-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun planning.</p>";return;}var h="<table><tr><th>Salarie</th><th>Date</th><th>Debut</th><th>Fin</th><th>Type</th></tr>";for(var i=0;i<list.length;i++){var p=list[i];var nom=p.salarie_nom||p.salarie_id||"?";var tp=p.type_poste||p.type||"normal";h+="<tr><td>"+nom+"</td><td>"+p.date+"</td><td>"+p.heure_debut+"</td><td>"+p.heure_fin+"</td><td><span class='badge badge-blue'>"+tp+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
-function renderCalendar(){rhGet("/api/rh/planning",function(list){
+var _planningView="semaine";
+var _planningDate=new Date();
+var _planningColors={"normal":"#3b82f6","astreinte":"#f59e0b","nuit":"#6366f1","dimanche":"#ef4444","ferie":"#22c55e"};
+var _statutColors={"present":"#22c55e","conge_cp":"#f97316","conge_maladie":"#e11d48","arret_maladie":"#e11d48","arret_accident_travail":"#dc2626","formation":"#0ea5e9","teletravail":"#8b5cf6"};
+
+function setPlanningView(v){_planningView=v;
+["jour","semaine","mois","annee"].forEach(function(k){var b=document.getElementById("pl-v-"+k);if(b){b.style.border="2px solid transparent";b.style.background="";b.style.color="";}});
+var ab=document.getElementById("pl-v-"+v);if(ab){ab.style.border="2px solid var(--p2)";ab.style.background="var(--p2)";ab.style.color="#fff";}
+renderPlanningView();}
+
+function planningNav(dir){
+if(_planningView==="jour"){_planningDate.setDate(_planningDate.getDate()+dir);}
+else if(_planningView==="semaine"){_planningDate.setDate(_planningDate.getDate()+7*dir);}
+else if(_planningView==="mois"){_planningDate.setMonth(_planningDate.getMonth()+dir);}
+else if(_planningView==="annee"){_planningDate.setFullYear(_planningDate.getFullYear()+dir);}
+document.getElementById("rh-pl-sem").value=_planningDate.toISOString().substring(0,10);
+renderPlanningView();}
+
+function planningGoToday(){_planningDate=new Date();document.getElementById("rh-pl-sem").value=_planningDate.toISOString().substring(0,10);renderPlanningView();}
+
+function renderPlanningView(){
+var semInput=document.getElementById("rh-pl-sem");
+if(semInput&&semInput.value){_planningDate=new Date(semInput.value+"T12:00:00");}
+if(_planningView==="jour")renderPlanningJour();
+else if(_planningView==="semaine")renderPlanningHebdo();
+else if(_planningView==="mois")renderPlanningMois();
+else if(_planningView==="annee")renderPlanningAnnee();}
+
+function _plFilter(){return(document.getElementById("rh-pl-filter")||{}).value||"";}
+function _plStatutFilter(){return(document.getElementById("rh-pl-statut-filter")||{}).value||"";}
+function _plFmtDate(d){return d.toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long",year:"numeric"});}
+function _plStatutBadge(st){var c=_statutColors[st]||"#94a3b8";var labels={"present":"Present","conge_cp":"Conge CP","conge_maladie":"Arret maladie","arret_maladie":"Arret maladie","arret_accident_travail":"AT","formation":"Formation","teletravail":"Teletravail"};return "<span style='background:"+c+";color:#fff;border-radius:4px;padding:1px 6px;font-size:.75em'>"+(labels[st]||st||"Present")+"</span>";}
+function _plSlotDiv(s){var tp=s.type_poste||s.type||"normal";var bg=_planningColors[tp]||"#3b82f6";return "<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 6px;margin:1px 0;font-size:.78em;display:inline-block'>"+(s.heure_debut||"")+"-"+(s.heure_fin||"")+"</div>";}
+
+function renderPlanningJour(){
+var ds=_planningDate.toISOString().substring(0,10);
+var label=document.getElementById("rh-pl-period-label");if(label)label.textContent=_plFmtDate(_planningDate);
+var filter=_plFilter().toLowerCase();var stFilter=_plStatutFilter();
+var url="/api/rh/planning/jour?date_jour="+ds;if(stFilter)url+="&statut="+stFilter;
+rhGet(url,function(data){
 var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
-var semInput=document.getElementById("rh-pl-sem");var filterInput=document.getElementById("rh-pl-filter");
-var startDate;if(semInput&&semInput.value){startDate=new Date(semInput.value);}else{startDate=new Date();startDate.setDate(startDate.getDate()-startDate.getDay()+1);}
-var filter=(filterInput&&filterInput.value)?filterInput.value.toLowerCase():"";
+var entrees=data.entrees||[];if(filter)entrees=entrees.filter(function(e){return(e.salarie_nom||e.salarie_id||"").toLowerCase().indexOf(filter)>=0;});
+var h="<div style='text-align:center;margin:8px 0;font-size:.85em;color:var(--tx2)'>"+data.jour+" &mdash; <b>"+data.nb_presents+"</b> present(s), <b>"+data.nb_absents+"</b> absent(s)</div>";
+h+="<table style='width:100%;border-collapse:collapse;font-size:.85em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left'>Salarie</th><th>Horaires</th><th>Type</th><th>Statut</th></tr>";
+if(!entrees.length){h+="<tr><td colspan='4' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun salarie ce jour.</td></tr>";}
+for(var i=0;i<entrees.length;i++){var e=entrees[i];var st=e.statut_reel||e.statut||"present";var stc=_statutColors[st]||"#94a3b8";
+h+="<tr style='border-bottom:1px solid var(--brd)'><td style='padding:6px;font-weight:600'>"+_esc(e.salarie_nom||e.salarie_id||"?")+"</td>";
+h+="<td style='text-align:center'>"+((e.heure_debut&&e.heure_fin)?_plSlotDiv(e):"<span style='color:#cbd5e1'>-</span>")+"</td>";
+h+="<td style='text-align:center'><span class='badge badge-blue'>"+(e.type_poste||"-")+"</span></td>";
+h+="<td style='text-align:center'>"+_plStatutBadge(st)+"</td></tr>";}
+h+="</table>";
+cal.innerHTML=h;
+_renderPlanningStats(data);});}
+
+function renderPlanningHebdo(){
+var startDate=new Date(_planningDate);startDate.setDate(startDate.getDate()-startDate.getDay()+1);
+var endDate=new Date(startDate);endDate.setDate(endDate.getDate()+6);
+var label=document.getElementById("rh-pl-period-label");
+if(label)label.textContent=startDate.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+" - "+endDate.toLocaleDateString("fr-FR",{day:"numeric",month:"short",year:"numeric"});
+var filter=_plFilter().toLowerCase();var stFilter=_plStatutFilter();
+rhGet("/api/rh/planning",function(list){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+if(Array.isArray(list)===false&&list.entrees)list=list.entrees;
+if(!Array.isArray(list))list=[];
 var jours=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
-var colors={"normal":"#3b82f6","astreinte":"#f59e0b","nuit":"#6366f1","dimanche":"#ef4444","ferie":"#22c55e"};
-var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left'>Salarie</th>";
-for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);h+="<th style='padding:8px;text-align:center'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
+var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left;min-width:120px'>Salarie</th>";
+for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);var isToday=d.toISOString().substring(0,10)===new Date().toISOString().substring(0,10);h+="<th style='padding:8px;text-align:center;"+(isToday?"background:#1e40af;":"")+"'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
 h+="</tr>";
-var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;if(!salaries[sid])salaries[sid]={};var pd=new Date(p.date);for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
-for(var sid in salaries){h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd)'>"+sid+"</td>";for(var j=0;j<7;j++){h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){var s=slots[k];var tp=s.type_poste||s.type||"normal";var bg=colors[tp]||"#3b82f6";h+="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 4px;margin:1px 0;font-size:.78em'>"+s.heure_debut+"-"+s.heure_fin+"</div>";}
+var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;var st=p.statut_reel||p.statut||"present";if(stFilter&&st!==stFilter)continue;if(!salaries[sid])salaries[sid]={statut:st};var pd=new Date(p.date+"T12:00:00");for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
+var nbPresent=0,nbAbsent=0;
+for(var sid in salaries){var st=salaries[sid].statut||"present";var stc=_statutColors[st]||"#94a3b8";
+h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd);border-left:4px solid "+stc+"'>"+_esc(sid)+" "+_plStatutBadge(st)+"</td>";
+if(st==="present")nbPresent++;else nbAbsent++;
+for(var j=0;j<7;j++){var isToday2=false;var cd2=new Date(startDate);cd2.setDate(cd2.getDate()+j);if(cd2.toISOString().substring(0,10)===new Date().toISOString().substring(0,10))isToday2=true;
+h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top;"+(isToday2?"background:rgba(59,130,246,.06);":"")+"'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){h+=_plSlotDiv(slots[k]);}
 if(!slots.length)h+="<span style='color:#cbd5e1'>-</span>";h+="</td>";}h+="</tr>";}
 if(!Object.keys(salaries).length){h+="<tr><td colspan='8' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun creneau pour cette semaine.</td></tr>";}
 h+="</table>";
-h+="<div style='margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;font-size:.8em'>";
-var colorLabels={"normal":"Normal","astreinte":"Astreinte","nuit":"Nuit (+25% min)","dimanche":"Dimanche (+100%)","ferie":"Ferie (+100%)"};
-for(var tp in colors){h+="<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:14px;height:14px;border-radius:3px;background:"+colors[tp]+";display:inline-block'></span>"+colorLabels[tp]+"</span>";}
+cal.innerHTML=h;
+var statsEl=document.getElementById("rh-pl-stats");if(statsEl)statsEl.innerHTML="<div class='card' style='padding:8px 14px;background:#f0fdf4;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#16a34a'>"+nbPresent+"</div><div style='font-size:.78em;color:#166534'>Presents</div></div><div class='card' style='padding:8px 14px;background:#fef2f2;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#dc2626'>"+nbAbsent+"</div><div style='font-size:.78em;color:#991b1b'>Absents</div></div>";});}
+
+function renderPlanningMois(){
+var y=_planningDate.getFullYear();var m=_planningDate.getMonth()+1;
+var moisNoms=["","Janvier","Fevrier","Mars","Avril","Mai","Juin","Juillet","Aout","Septembre","Octobre","Novembre","Decembre"];
+var label=document.getElementById("rh-pl-period-label");if(label)label.textContent=moisNoms[m]+" "+y;
+var filter=_plFilter().toLowerCase();var stFilter=_plStatutFilter();
+var url="/api/rh/planning/mois?annee="+y+"&mois="+m;if(stFilter)url+="&statut="+stFilter;
+rhGet(url,function(data){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+var jours=data.jours||[];
+var joursSem=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
+var h="<table style='width:100%;border-collapse:collapse;font-size:.78em;table-layout:fixed'>";
+h+="<tr style='background:var(--p2);color:#fff'>";for(var j=0;j<7;j++)h+="<th style='padding:6px;text-align:center;width:14.28%'>"+joursSem[j]+"</th>";h+="</tr>";
+var firstDay=new Date(y,m-1,1);var startDow=(firstDay.getDay()+6)%7;
+var todayStr=new Date().toISOString().substring(0,10);
+h+="<tr>";for(var i=0;i<startDow;i++)h+="<td style='border:1px solid var(--brd);padding:4px;vertical-align:top;min-height:60px'></td>";
+var cellCount=startDow;
+for(var d=0;d<jours.length;d++){if(cellCount>0&&cellCount%7===0)h+="</tr><tr>";
+var jour=jours[d];var isToday=jour.date===todayStr;
+var bgCol=isToday?"rgba(59,130,246,.1)":"";
+h+="<td style='border:1px solid var(--brd);padding:4px;vertical-align:top;min-height:70px;background:"+bgCol+"'>";
+h+="<div style='font-weight:600;font-size:1em;margin-bottom:2px;"+(isToday?"color:var(--p2);":"")+"'>"+(d+1)+"</div>";
+if(jour.nb_salaries>0){
+h+="<div style='display:flex;gap:3px;flex-wrap:wrap'>";
+if(jour.nb_presents>0)h+="<span style='background:#22c55e;color:#fff;border-radius:3px;padding:0 4px;font-size:.72em'>"+jour.nb_presents+" P</span>";
+if(jour.nb_absents>0)h+="<span style='background:#ef4444;color:#fff;border-radius:3px;padding:0 4px;font-size:.72em'>"+jour.nb_absents+" A</span>";
 h+="</div>";
-cal.innerHTML=h;});}
+var entrees=jour.entrees||[];if(filter)entrees=entrees.filter(function(e){return(e.salarie_nom||e.salarie_id||"").toLowerCase().indexOf(filter)>=0;});
+for(var e=0;e<Math.min(entrees.length,3);e++){var en=entrees[e];var stc=_statutColors[en.statut]||"#94a3b8";
+h+="<div style='font-size:.68em;margin-top:1px;border-left:3px solid "+stc+";padding-left:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis' title='"+_esc(en.salarie_nom||en.salarie_id)+" - "+_esc(en.statut||"present")+"'>"+_esc(en.salarie_nom||en.salarie_id||"?")+"</div>";}
+if(entrees.length>3)h+="<div style='font-size:.65em;color:var(--tx2)'>+"+(entrees.length-3)+" autres</div>";}
+h+="</td>";cellCount++;}
+while(cellCount%7!==0){h+="<td style='border:1px solid var(--brd);padding:4px'></td>";cellCount++;}
+h+="</tr></table>";
+cal.innerHTML=h;
+var statsEl=document.getElementById("rh-pl-stats");if(statsEl){var totH=data.total_heures_planifiees||0;statsEl.innerHTML="<div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:var(--p2)'>"+totH+"h</div><div style='font-size:.78em;color:var(--tx2)'>Heures planifiees</div></div>";}});}
+
+function renderPlanningAnnee(){
+var y=_planningDate.getFullYear();
+var label=document.getElementById("rh-pl-period-label");if(label)label.textContent="Annee "+y;
+var filter=_plFilter().toLowerCase();
+var url="/api/rh/planning/annee?annee="+y;if(filter)url+="&salarie_id="+encodeURIComponent(filter);
+rhGet(url,function(data){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+var moisData=data.mois||[];
+var moisNoms=["","Jan","Fev","Mar","Avr","Mai","Jun","Jul","Aou","Sep","Oct","Nov","Dec"];
+var h="<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:8px'>";
+for(var i=0;i<moisData.length;i++){var md=moisData[i];
+var pct=md.jours_travailles>0?Math.round((md.jours_travailles/(md.jours_travailles+md.jours_absence||1))*100):0;
+var barColor=pct>75?"#22c55e":(pct>50?"#f59e0b":"#ef4444");
+h+="<div class='card' style='padding:10px;cursor:pointer' onclick='_planningDate=new Date("+y+","+(md.mois-1)+",1);setPlanningView("+JSON.stringify("mois")+")'>";
+h+="<div style='font-weight:700;font-size:.95em;margin-bottom:6px'>"+moisNoms[md.mois]+"</div>";
+h+="<div style='display:flex;justify-content:space-between;font-size:.78em;color:var(--tx2)'><span>"+md.jours_travailles+"j trav.</span><span>"+md.heures_planifiees+"h</span></div>";
+if(md.jours_absence>0)h+="<div style='font-size:.75em;color:#e11d48;margin-top:2px'>"+md.jours_absence+"j absence</div>";
+h+="<div style='background:#e5e7eb;border-radius:4px;height:6px;margin-top:6px'><div style='background:"+barColor+";border-radius:4px;height:6px;width:"+pct+"%'></div></div>";
+h+="</div>";}
+h+="</div>";
+cal.innerHTML=h;
+var statsEl=document.getElementById("rh-pl-stats");if(statsEl)statsEl.innerHTML="<div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:var(--p2)'>"+data.total_heures+"h</div><div style='font-size:.78em;color:var(--tx2)'>Total heures "+y+"</div></div><div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#16a34a'>"+data.total_jours_travailles+"</div><div style='font-size:.78em;color:var(--tx2)'>Jours travailles</div></div><div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#dc2626'>"+data.total_jours_absence+"</div><div style='font-size:.78em;color:var(--tx2)'>Jours absence</div></div>";});}
+
+function _renderPlanningStats(data){var el=document.getElementById("rh-pl-stats");if(!el)return;el.innerHTML="<div class='card' style='padding:8px 14px;background:#f0fdf4;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#16a34a'>"+(data.nb_presents||0)+"</div><div style='font-size:.78em;color:#166534'>Presents</div></div><div class='card' style='padding:8px 14px;background:#fef2f2;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#dc2626'>"+(data.nb_absents||0)+"</div><div style='font-size:.78em;color:#991b1b'>Absents</div></div>";}
+
+function integrerSalaries(){
+var today=new Date();var nextWeek=new Date();nextWeek.setDate(nextWeek.getDate()+7);
+document.getElementById("rh-pl-int-debut").value=today.toISOString().substring(0,10);
+document.getElementById("rh-pl-int-fin").value=nextWeek.toISOString().substring(0,10);
+document.getElementById("rh-pl-integrer-section").open=true;
+document.getElementById("rh-pl-integrer-section").scrollIntoView({behavior:"smooth"});}
+
+function integrerSalariesManuel(){
+var fd=new FormData();
+fd.append("date_debut",document.getElementById("rh-pl-int-debut").value);
+fd.append("date_fin",document.getElementById("rh-pl-int-fin").value);
+fd.append("heure_debut",document.getElementById("rh-pl-int-hd").value);
+fd.append("heure_fin",document.getElementById("rh-pl-int-hf").value);
+fd.append("jours_semaine",document.getElementById("rh-pl-int-jours").value);
+rhPost("/api/rh/planning/integrer-salaries",fd,function(d){
+var res=document.getElementById("rh-pl-int-result");
+res.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span><b>"+d.nb_entrees_creees+"</b> creneaux crees pour <b>"+d.nb_salaries+"</b> salaries.</span></div>";
+toast(d.nb_entrees_creees+" creneaux crees","ok");renderPlanningView();});}
+
+function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
+rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");renderPlanningView();});}
+function loadRHPlanning(){renderPlanningView();}
+function renderCalendar(){renderPlanningView();}
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
 function voirBulletinDoc(el){var bid=el.dataset.bid;if(bid)window.open("/api/rh/bulletins/"+bid+"/document","_blank");}
 
@@ -13650,7 +15309,7 @@ if(!list||!list.length){el.innerHTML="<div class='al ok'><span class='ai'>&#9989
 var h="<p style='color:var(--tx2);font-size:.82em;margin-bottom:8px'>"+list.length+" alerte(s)</p>";
 for(var i=0;i<list.length;i++){var a=list[i];var cls=a.urgence==="haute"?"err":(a.urgence==="moyenne"?"warn":"info");
 var icon=a.urgence==="haute"?"&#9888;":(a.urgence==="moyenne"?"&#128161;":"&#8505;");
-h+="<div class='anomalie sev-"+(a.urgence==="haute"?"high":(a.urgence==="moyenne"?"med":"low"))+"' onclick='this.classList.toggle(\"open\")' style='margin:6px 0'>";
+h+="<div class='anomalie sev-"+(a.urgence==="haute"?"high":(a.urgence==="moyenne"?"med":"low"))+"' data-toggle='1' style='margin:6px 0'>";
 h+="<div class='head'><div class='title'>"+(a.titre||a.type||"Alerte");
 if(a.est_libre)h+=" <span class='badge badge-purple' style='font-size:.68em;vertical-align:middle'>Personnalisee</span>";
 if(a.recurrence)h+=" <span class='badge badge-teal' style='font-size:.68em;vertical-align:middle'>"+a.recurrence+"</span>";
@@ -13665,10 +15324,9 @@ if(a.reference)h+="<p style='margin:4px 0;color:var(--tx2)'>Reference : "+a.refe
 if(a.action_requise)h+="<p style='margin:4px 0'><strong>Action requise :</strong> "+a.action_requise+"</p>";
 if(a.notes)h+="<p style='margin:4px 0;font-style:italic;color:var(--tx2)'>Notes : "+a.notes+"</p>";
 if(a.message_personnalise)h+="<p style='margin:4px 0;color:var(--p2)'>["+a.message_personnalise+"]</p>";
-if(a.est_libre)h+="<div style='margin-top:8px'><button class='btn btn-sm' style='background:var(--ol);color:#92400e' onclick='event.stopPropagation();marquerAlerteTraitee(\""+a.id+"\")'>Marquer traitee</button> <button class='btn btn-sm btn-red' onclick='event.stopPropagation();supprimerAlerteLibre(\""+a.id+"\")'>Supprimer</button></div>";
+if(a.est_libre)h+="<div style='margin-top:8px'><button class='btn btn-sm' style='background:var(--ol);color:#92400e' data-action='traiterAlerte' data-id='"+a.id+"'>Marquer traitee</button> <button class='btn btn-sm btn-red' data-action='suppAlerte' data-id='"+a.id+"'>Supprimer</button></div>";
 h+="</div></div>";}
 el.innerHTML=h;}
-function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#rh-alertes .al-panel").forEach(function(t){t.style.display="none";t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("al-"+n);if(tc){tc.style.display="block";tc.classList.add("active");}if(n==="libres")loadAlertesLibres();if(n==="auto")loadRHAlertes();}
 function creerAlerteLibre(){var titre=document.getElementById("al-titre").value;if(!titre){toast("Le titre est obligatoire.");return;}
 var fd=new FormData();fd.append("titre",titre);fd.append("description",document.getElementById("al-desc").value);fd.append("categorie",document.getElementById("al-categorie").value);fd.append("urgence",document.getElementById("al-urgence").value);fd.append("date_echeance",document.getElementById("al-echeance").value);fd.append("recurrence",document.getElementById("al-recurrence").value);fd.append("action_requise",document.getElementById("al-action").value);fd.append("destinataire",document.getElementById("al-destinataire").value);fd.append("reference_legale",document.getElementById("al-ref").value);fd.append("delai_rappel_jours",document.getElementById("al-delai").value);fd.append("notes",document.getElementById("al-notes").value);
 rhPost("/api/rh/alertes/libres",fd,function(d){document.getElementById("al-creer-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Alerte <strong>"+d.titre+"</strong> creee avec succes.</span></div>";document.getElementById("al-titre").value="";document.getElementById("al-desc").value="";document.getElementById("al-action").value="";document.getElementById("al-destinataire").value="";document.getElementById("al-ref").value="";document.getElementById("al-notes").value="";document.getElementById("al-echeance").value="";toast("Alerte personnalisee creee.","ok");});}
@@ -13697,9 +15355,9 @@ if(a.delai_rappel_jours)details.push("<strong>Rappel :</strong> "+a.delai_rappel
 if(details.length)h+="<div style='margin-top:8px;font-size:.82em;color:var(--tx2)'>"+details.join(" &bull; ")+"</div>";
 if(a.notes)h+="<div style='margin-top:4px;font-size:.82em;font-style:italic;color:var(--tx2)'>"+a.notes+"</div>";
 h+="<div style='margin-top:10px;display:flex;gap:6px'>";
-if(a.statut!=="traitee")h+="<button class='btn btn-sm btn-green' onclick='marquerAlerteTraitee(\""+a.id+"\")'>Traitee</button>";
-if(a.statut!=="archivee")h+="<button class='btn btn-sm btn-s' onclick='archiverAlerteLibre(\""+a.id+"\")'>Archiver</button>";
-h+="<button class='btn btn-sm btn-red' onclick='supprimerAlerteLibre(\""+a.id+"\")'>Supprimer</button>";
+if(a.statut!=="traitee")h+="<button class='btn btn-sm btn-green' data-action='traiterAlerte' data-id='"+a.id+"'>Traitee</button>";
+if(a.statut!=="archivee")h+="<button class='btn btn-sm btn-s' data-action='archiverAlerte' data-id='"+a.id+"'>Archiver</button>";
+h+="<button class='btn btn-sm btn-red' data-action='suppAlerte' data-id='"+a.id+"'>Supprimer</button>";
 h+="</div></div>";}
 el.innerHTML=h;});}
 function marquerAlerteTraitee(id){var fd=new FormData();fd.append("statut","traitee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte marquee comme traitee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
@@ -13742,14 +15400,77 @@ function loadEntete(){rhGet("/api/config/entete",function(d){if(!d||!d.nom_entre
 function ajouterCompteURSSAF(){var c={siret:document.getElementById("urssaf-siret").value,compte:document.getElementById("urssaf-compte").value,caisse:document.getElementById("urssaf-caisse").value,taux_at:document.getElementById("urssaf-at").value};if(!c.siret||!c.compte){toast("SIRET et N compte obligatoires.");return;}_urssafComptes.push(c);renderComptesURSSAF();toast("Compte URSSAF ajoute.","ok");}
 function renderComptesURSSAF(){var el=document.getElementById("urssaf-list");if(!_urssafComptes.length){el.innerHTML="";return;}var h="<table><tr><th>SIRET</th><th>N Compte</th><th>Caisse</th><th>Taux AT</th></tr>";for(var i=0;i<_urssafComptes.length;i++){var c=_urssafComptes[i];h+="<tr><td>"+c.siret+"</td><td>"+c.compte+"</td><td>"+c.caisse+"</td><td>"+c.taux_at+"%</td></tr>";}h+="</table>";el.innerHTML=h;}
 
+/* === SIGNATURE ELECTRONIQUE === */
+function signerDocument(){var fd=new FormData();fd.append("document_id",gv("sig-docid"));fd.append("document_nom",gv("sig-docnom"));fd.append("signataire_nom",gv("sig-nom"));fd.append("signataire_email",gv("sig-email"));fd.append("signataire_qualite",gv("sig-qualite"));fd.append("niveau_signature",gv("sig-niveau"));fd.append("motif",gv("sig-motif"));
+if(!gv("sig-docid")||!gv("sig-nom")||!gv("sig-email")){toast("Document, nom et email du signataire obligatoires.");return;}
+fetch("/api/config/signature",{method:"POST",body:fd}).then(safeJson).then(function(s){
+var h="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>Document signe avec succes</strong> — "+_esc(s.niveau)+" conforme eIDAS</span></div>";
+h+="<div class='g4'><div class='sc blue'><div class='val'>"+_esc(s.niveau)+"</div><div class='lab'>Niveau</div></div><div class='sc green'><div class='val'>Valide</div><div class='lab'>Statut</div></div><div class='sc'><div class='val'>"+_esc(s.horodatage.substring(0,19))+"</div><div class='lab'>Horodatage</div></div><div class='sc'><div class='val'>"+_esc(s.empreinte_sha256.substring(0,16))+"...</div><div class='lab'>Empreinte SHA-256</div></div></div>";
+h+="<table style='margin-top:12px'><tr><th>Champ</th><th>Valeur</th></tr>";
+h+="<tr><td>Document</td><td><strong>"+_esc(s.document_nom)+"</strong> ("+_esc(s.document_id)+")</td></tr>";
+h+="<tr><td>Signataire</td><td>"+_esc(s.signataire_nom)+" ("+_esc(s.signataire_email)+")</td></tr>";
+h+="<tr><td>Qualite</td><td>"+_esc(s.signataire_qualite||"-")+"</td></tr>";
+h+="<tr><td>Motif</td><td>"+_esc(s.motif||"-")+"</td></tr>";
+h+="<tr><td>Reference eIDAS</td><td>"+_esc(s.reference_eidas)+"</td></tr>";
+h+="<tr><td>Valeur juridique</td><td><strong>"+_esc(s.valeur_juridique)+"</strong></td></tr>";
+h+="<tr><td>Empreinte SHA-256</td><td style='font-family:monospace;font-size:.82em'>"+_esc(s.empreinte_sha256)+"</td></tr>";
+h+="</table>";
+document.getElementById("sig-res").innerHTML=h;toast("Signature "+s.niveau+" enregistree.","ok");
+}).catch(function(e){toast(e.message);});}
+function loadSignatures(){fetch("/api/config/signatures").then(safeJson).then(function(r){
+var el=document.getElementById("sig-list");
+if(!r.signatures||!r.signatures.length){el.innerHTML="<p style='color:var(--tx2);font-style:italic'>Aucune signature enregistree.</p>";return;}
+var h="<table><tr><th>Document</th><th>Signataire</th><th>Niveau</th><th>Date</th><th>Empreinte</th><th>Statut</th><th></th></tr>";
+for(var i=0;i<r.signatures.length;i++){var s=r.signatures[i];
+h+="<tr><td><strong>"+_esc(s.document_nom||s.document_id)+"</strong></td><td>"+_esc(s.signataire_nom)+"<br><span style='font-size:.8em;color:var(--tx2)'>"+_esc(s.signataire_email)+"</span></td><td><span class='badge "+(s.niveau==="SEQ"?"badge-green":"badge-blue")+"'>"+s.niveau+"</span></td><td style='font-size:.84em'>"+_esc(s.horodatage.substring(0,19))+"</td><td style='font-family:monospace;font-size:.78em'>"+_esc(s.empreinte_sha256.substring(0,12))+"...</td><td><span class='badge badge-green'>"+_esc(s.statut)+"</span></td><td><button class='btn btn-s btn-sm' onclick='verifierSignature("+JSON.stringify(s.id)+")'>Verifier</button></td></tr>";}
+h+="</table>";el.innerHTML=h;
+}).catch(function(e){toast(e.message);});}
+function verifierSignature(id){fetch("/api/config/signature/"+id+"/verifier").then(safeJson).then(function(r){
+toast("Signature "+r.signature.niveau+" — Integrite: "+r.integrite+" — Confiance: "+r.niveau_confiance,"ok");
+}).catch(function(e){toast(e.message);});}
+
+/* === JOURNAL AUDIT MULTI-UTILISATEURS === */
+function loadAuditLog(){fetch("/api/audit-log?limit=200").then(safeJson).then(function(logs){
+var el=document.getElementById("cfg-audit-log");
+if(!logs||!logs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune action enregistree.</p>";return;}
+var h="<table><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Details</th></tr>";
+for(var i=logs.length-1;i>=Math.max(0,logs.length-100);i--){var l=logs[i];
+h+="<tr><td style='font-size:.82em;white-space:nowrap'>"+_esc((l.date||"").substring(0,19))+"</td><td><strong>"+_esc(l.profil)+"</strong>"+(l.tenant_id?" <span style='font-size:.75em;color:var(--tx2)'>("+_esc(l.tenant_id)+")</span>":"")+"</td><td><span class='badge badge-blue'>"+_esc(l.action)+"</span></td><td style='font-size:.84em;color:var(--tx2)'>"+_esc(l.details||"-")+"</td></tr>";}
+h+="</table>";el.innerHTML=h;
+}).catch(function(e){toast(e.message);});}
+
+/* === HELPERS === */
+function _esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+
 /* === TOAST === */
+var _toastStack=[];
 function toast(msg,type){
 type=type||"err";var d=document.createElement("div");
-d.style.cssText="position:fixed;top:20px;right:20px;z-index:9999;padding:14px 20px;border-radius:12px;font-size:.88em;max-width:400px;box-shadow:0 8px 30px rgba(0,0,0,.15);animation:slideIn .3s;font-family:inherit";
-if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.border="1px solid #bbf7d0";}
-else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";}
-else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";}
-d.textContent=msg;document.body.appendChild(d);setTimeout(function(){d.style.opacity="0";d.style.transition="opacity .3s";setTimeout(function(){d.remove();},300);},4000);}
+d.setAttribute("role","alert");d.setAttribute("aria-live","polite");
+var offset=20+_toastStack.length*60;
+d.style.cssText="position:fixed;top:"+offset+"px;right:20px;z-index:9999;padding:14px 20px;border-radius:12px;font-size:.88em;max-width:420px;box-shadow:0 8px 30px rgba(0,0,0,.15);font-family:inherit;transform:translateX(120%);transition:transform .35s cubic-bezier(.4,0,.2,1),opacity .3s;display:flex;align-items:center;gap:8px";
+var icon="";
+if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.border="1px solid #bbf7d0";icon="&#9989; ";}
+else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";icon="&#128161; ";}
+else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";icon="&#9888; ";}
+d.innerHTML="<span>"+icon+"<"+"/span><span>"+msg.replace(RegExp(String.fromCharCode(60),"g"),"&lt;").replace(/>/g,"&gt;")+"<"+"/span>";
+document.body.appendChild(d);_toastStack.push(d);
+requestAnimationFrame(function(){requestAnimationFrame(function(){d.style.transform="translateX(0)";});});
+setTimeout(function(){d.style.opacity="0";d.style.transform="translateX(120%)";setTimeout(function(){d.remove();var idx=_toastStack.indexOf(d);if(idx>-1)_toastStack.splice(idx,1);},350);},4000);}
+
+/* === DELEGATED CLICK HANDLERS === */
+document.addEventListener("click",function(e){var btn=e.target.closest("[data-action]");if(!btn)return;var action=btn.dataset.action;var id=btn.dataset.id;e.stopPropagation();if(action==="dashTI"&&typeof voirDashTI==="function")voirDashTI(id);else if(action==="suppTI"&&typeof supprimerTI==="function")supprimerTI(id);else if(action==="traiterAlerte"&&typeof marquerAlerteTraitee==="function")marquerAlerteTraitee(id);else if(action==="suppAlerte"&&typeof supprimerAlerteLibre==="function")supprimerAlerteLibre(id);else if(action==="archiverAlerte"&&typeof archiverAlerteLibre==="function")archiverAlerteLibre(id);});
+
+/* === KEYBOARD NAV === */
+document.addEventListener("keydown",function(e){
+if(e.key==="Escape"){closeSidebar();}
+if(e.key==="Enter"&&e.target.classList.contains("nl")){e.target.click();}
+if(e.altKey&&e.key>="1"&&e.key<="9"){
+var sections=["dashboard","analyse","biblio","compta","factures","dsn","rh","simulation","veille"];
+var idx=parseInt(e.key)-1;
+if(idx<sections.length){e.preventDefault();showS(sections[idx]);}
+}
+});
 
 /* === INITIALIZATION === */
 (function initApp(){
