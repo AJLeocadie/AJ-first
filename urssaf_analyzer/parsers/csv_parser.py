@@ -291,6 +291,7 @@ class CSVParser(BaseParser):
         return metadata
 
     def parser(self, chemin: Path, document: Document) -> list[Declaration]:
+        self._verifier_taille_fichier(chemin)
         parse_log = ParseLog("CSVParser", str(chemin))
 
         # Detection d'encodage robuste (couvre SAGE/CIEL/EBP/ADP/etc.)

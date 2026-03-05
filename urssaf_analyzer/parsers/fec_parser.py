@@ -189,6 +189,7 @@ class FECParser(BaseParser):
         return metadata
 
     def parser(self, chemin: Path, document: Document) -> list[Declaration]:
+        self._verifier_taille_fichier(chemin)
         parse_log = ParseLog("FECParser", str(chemin))
         contenu = self._lire_fichier(chemin)
         lignes = contenu.split("\n")

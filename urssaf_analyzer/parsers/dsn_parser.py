@@ -214,6 +214,7 @@ class DSNParser(BaseParser):
         return metadata
 
     def parser(self, chemin: Path, document: Document) -> list[Declaration]:
+        self._verifier_taille_fichier(chemin)
         contenu = self._lire_fichier(chemin)
 
         if contenu.strip().startswith("<?xml") or contenu.strip().startswith("<"):
