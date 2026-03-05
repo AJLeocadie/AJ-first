@@ -1,4 +1,4 @@
-"""NormaCheck v3.8.1 - Plateforme professionnelle de conformite sociale et fiscale.
+"""NormaCheck v3.9.0 - Plateforme professionnelle de conformite sociale et fiscale.
 
 Point d'entree web : import/analyse de documents, gestion entreprise,
 comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
@@ -89,7 +89,7 @@ logger = logging.getLogger("normacheck")
 app = FastAPI(
     title="NormaCheck",
     description="Plateforme professionnelle de conformite sociale et fiscale",
-    version="3.8.1",
+    version="3.9.0",
 )
 
 _CORS_ORIGINS = os.getenv("NORMACHECK_CORS_ORIGINS", "*").split(",")
@@ -453,7 +453,7 @@ def log_action(profil_email: str, action: str, details: str = "", user_override:
 @app.get("/api/health")
 async def health_check():
     """Endpoint de sante pour Docker HEALTHCHECK et monitoring OVH."""
-    checks = {"status": "ok", "version": "3.8.1", "env": "ovhcloud" if _IS_OVH else "vercel"}
+    checks = {"status": "ok", "version": "3.9.0", "env": "ovhcloud" if _IS_OVH else "vercel"}
     try:
         db = get_db()
         checks["database"] = "ok"
@@ -4509,17 +4509,17 @@ async def sim_risques(
 
     # Subventions possibles
     subventions = []
-    if lettre in ("C", "F"):
+    if lettre in ("C", "F") and effectif < 50:
         subventions.append({"nom": "Subvention prevention CARSAT", "montant_max": 25000,
-            "condition": "Investissement prevention risques pro"})
+            "condition": "TPE 1-49 sal., investissement prevention risques pro"})
     if effectif < 250:
         subventions.append({"nom": "Aide TPE-PME (FACT)", "montant_max": 50000,
             "condition": "Amelioration conditions de travail"})
     subventions.append({"nom": "FNE-Formation", "montant_max": round(effectif * 1500, 2),
-        "condition": "Formation salaries en activite partielle ou mutation"})
+        "condition": "Formation salaries en transition ecologique/numerique"})
     if lettre in ("J", "M"):
-        subventions.append({"nom": "CIR - Credit Impot Recherche", "montant_max": round(masse_salariale * 0.30, 2),
-            "condition": "30% des depenses R&D (salaires chercheurs inclus)"})
+        subventions.append({"nom": "CIR - Credit Impot Recherche", "montant_max": round(masse_salariale * 0.10 * 0.30, 2),
+            "condition": "30% des depenses R&D (estimation ~10% masse salariale en R&D)"})
 
     return {
         "code_naf": code_naf, "secteur": secteur["nom"], "effectif": effectif,
@@ -4804,11 +4804,11 @@ async def rechercher_subventions(
         "type_aide": "credit_impot",
         "description": "Credit d impot de 30% sur les depenses de R&D (jusqu a 100 MEUR), 5% au-dela. Inclut salaires chercheurs, amortissements, brevets, sous-traitance publique.",
         "montant_max": "30% des depenses R&D",
-        "montant_estime": round(masse_salariale * 0.30, 2) if masse_salariale else None,
+        "montant_estime": round(masse_salariale * 0.10 * 0.30, 2) if masse_salariale and innovation else None,
         "conditions": ["Activites de R&D au sens du Manuel de Frascati", "Depenses eligibles documentees", "Declaration annuelle 2069-A"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
-        "eligible": innovation or lettre_naf in ("C", "J", "M", "G"),
+        "eligible": innovation or lettre_naf in ("C", "J", "M"),
         "url_info": "https://www.enseignementsup-recherche.gouv.fr/fr/le-credit-d-impot-recherche-cir-49416",
         "priorite": 1,
     })
@@ -4819,7 +4819,7 @@ async def rechercher_subventions(
         "type_aide": "credit_impot",
         "description": "Credit d impot de 30% sur les depenses d innovation (prototypes, installations pilotes) pour les PME. Plafond 400 000 EUR de depenses.",
         "montant_max": "120 000 EUR (30% de 400 000 EUR)",
-        "montant_estime": min(120000, round(masse_salariale * 0.30, 2)) if masse_salariale else 120000,
+        "montant_estime": min(120000, round(masse_salariale * 0.10 * 0.30, 2)) if masse_salariale and innovation else None,
         "conditions": ["PME au sens communautaire (< 250 sal, CA < 50 MEUR)", "Depenses de conception de prototypes ou installations pilotes de nouveaux produits"],
         "tailles": ["tpe", "pme"],
         "secteurs": [],
@@ -4834,7 +4834,7 @@ async def rechercher_subventions(
         "type_aide": "exoneration",
         "description": "Exoneration de cotisations patronales sur les salaires des personnels de R&D (chercheurs, techniciens, gestionnaires de projets). Exoneration d IS partielle. Entreprise de moins de 8 ans, depenses R&D >= 15% des charges.",
         "montant_max": "Exoneration totale cotisations patronales R&D + IS partiel",
-        "montant_estime": round(masse_salariale * 0.25, 2) if masse_salariale else None,
+        "montant_estime": round(masse_salariale * 0.10 * 0.25, 2) if masse_salariale and innovation else None,
         "conditions": ["Moins de 8 ans d existence", "Depenses R&D >= 15% des charges deductibles", "PME independante", "Activite reellement nouvelle"],
         "tailles": ["tpe", "pme"],
         "secteurs": [],
@@ -4879,7 +4879,7 @@ async def rechercher_subventions(
         "type_aide": "subvention",
         "description": "Subvention pour les startups innovantes en phase d amorcage. Finance la maturation du projet et la validation du modele economique.",
         "montant_max": "30 000 EUR",
-        "montant_estime": 30000,
+        "montant_estime": 30000 if is_tpe and age_entreprise <= 1 and innovation else None,
         "conditions": ["Entreprise innovante de moins de 1 an", "Projet technologique ou de rupture", "Entrepreneur a temps plein"],
         "tailles": ["tpe"],
         "secteurs": [],
@@ -4925,7 +4925,7 @@ async def rechercher_subventions(
         "type_aide": "exoneration",
         "description": "Exoneration partielle de cotisations sociales pendant la 1ere annee d activite. 50% d exoneration des cotisations maladie, maternite, invalidite, deces, vieillesse, allocations familiales.",
         "montant_max": "50% des cotisations pendant 12 mois",
-        "montant_estime": round(masse_salariale * 0.15, 2) if masse_salariale and is_startup else None,
+        "montant_estime": round(masse_salariale * 0.45 * 0.50, 2) if masse_salariale and (creation_reprise or is_startup) else None,
         "conditions": ["Creation ou reprise d entreprise", "Ne pas avoir beneficie de l ACRE dans les 3 ans precedents", "Avoir le controle effectif de l entreprise"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
@@ -4940,11 +4940,11 @@ async def rechercher_subventions(
         "type_aide": "subvention",
         "description": "Aide de 6 000 EUR pour l embauche d un apprenti. Applicable pour les contrats d apprentissage visant un diplome jusqu au master (bac+5).",
         "montant_max": "6 000 EUR par apprenti",
-        "montant_estime": 6000 * min(effectif, 5) if formation else None,
+        "montant_estime": 6000 * max(1, round(effectif * 0.1)) if formation else None,
         "conditions": ["Contrat d apprentissage", "Apprenti preparant un diplome jusqu au bac+5", "Entreprise de toute taille"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
-        "eligible": formation or True,
+        "eligible": formation,
         "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F23556",
         "priorite": 1,
     })
@@ -4955,7 +4955,7 @@ async def rechercher_subventions(
         "type_aide": "subvention",
         "description": "Aide financiere pour l embauche en contrat de professionnalisation de demandeurs d emploi de 26 ans et plus ou de jeunes de moins de 30 ans.",
         "montant_max": "2 000 EUR",
-        "montant_estime": 2000,
+        "montant_estime": 2000 if formation else None,
         "conditions": ["Contrat de professionnalisation", "Salarie de 26 ans et plus ou demandeur d emploi"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
@@ -4970,7 +4970,7 @@ async def rechercher_subventions(
         "type_aide": "exoneration",
         "description": "Reduction degressive des cotisations patronales pour les salaires inferieurs a 1.6 SMIC. Applicable automatiquement. Reduction maximale au SMIC, nulle a 1.6 SMIC.",
         "montant_max": "Jusqu a 32% du brut au niveau du SMIC",
-        "montant_estime": round(effectif * 350 * 12, 2) if effectif and masse_salariale else None,
+        "montant_estime": round(effectif * 150 * 12, 2) if effectif and masse_salariale else None,
         "conditions": ["Salaries dont la remuneration < 1.6 SMIC brut", "Applicable a toutes les entreprises", "Calcul annualise obligatoire"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
@@ -4989,7 +4989,7 @@ async def rechercher_subventions(
         "conditions": ["Resident d un QPV", "CDI ou CDD >= 6 mois", "Inscrit comme demandeur d emploi"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
-        "eligible": zone == "qpv" or True,
+        "eligible": zone == "qpv",
         "url_info": "https://www.service-public.fr/professionnels-entreprises/vosdroits/F34917",
         "priorite": 2,
     })
@@ -5000,7 +5000,7 @@ async def rechercher_subventions(
         "type_aide": "subvention",
         "description": "Prise en charge des couts pedagogiques pour la formation des salaries. Cible les transitions ecologiques, alimentaires, numeriques. Taux de prise en charge : 40 a 100% selon taille.",
         "montant_max": "100% des couts pedagogiques (TPE/PME)",
-        "montant_estime": round(effectif * 1500, 2) if effectif else None,
+        "montant_estime": round(effectif * 1500, 2) if effectif and formation else None,
         "conditions": ["Salaries en activite", "Formation liee aux transitions (ecologique, numerique, alimentaire)", "Pas de formation obligatoire"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
@@ -5015,11 +5015,11 @@ async def rechercher_subventions(
         "type_aide": "subvention",
         "description": "Aides financieres pour l integration ou le maintien dans l emploi de personnes en situation de handicap : amenagement de poste, tutorat, formation.",
         "montant_max": "Jusqu a 5 000 EUR (amenagement) + 3 000 EUR (accueil)",
-        "montant_estime": 5000,
+        "montant_estime": None,
         "conditions": ["Recrutement ou maintien d un travailleur handicape (RQTH)", "Entreprise du secteur prive"],
         "tailles": ["tpe", "pme", "eti", "ge"],
         "secteurs": [],
-        "eligible": True,
+        "eligible": effectif >= 20,
         "url_info": "https://www.agefiph.fr/aides-handicap",
         "priorite": 2,
     })
@@ -5050,7 +5050,7 @@ async def rechercher_subventions(
         "conditions": ["PME (< 250 salaries)", "Projet de transition ecologique identifie", "Devis ou cahier des charges"],
         "tailles": ["tpe", "pme"],
         "secteurs": [],
-        "eligible": is_pme and (environnement or True),
+        "eligible": is_pme and environnement,
         "url_info": "https://agirpourlatransition.ademe.fr/entreprises/aides-financieres/2024/tremplin-transition-ecologique-pme",
         "priorite": 1,
     })
@@ -5229,7 +5229,7 @@ async def rechercher_subventions(
         "type_aide": "accompagnement",
         "description": "Accompagnement gratuit en 3 phases : aide au montage du projet, structuration financiere, demarrage de l activite. Pret a taux zero de 1 000 a 10 000 EUR.",
         "montant_max": "10 000 EUR (pret a taux zero) + accompagnement",
-        "montant_estime": 10000 if creation_reprise else None,
+        "montant_estime": 10000 if creation_reprise and is_tpe else None,
         "conditions": ["Createur ou repreneur d entreprise", "Demandeur d emploi, jeune < 26 ans, beneficiaire RSA/ASS, ou zone urbaine sensible"],
         "tailles": ["tpe"],
         "secteurs": [],
@@ -5428,7 +5428,7 @@ async def rechercher_subventions(
         "type_aide": "subvention",
         "description": "Subventions pour les TPE (1-49 salaries) pour des investissements en prevention des risques professionnels : TMS Pro, Risque chimique, Equip Mobile, Filmeuse +.",
         "montant_max": "25 000 EUR",
-        "montant_estime": 25000 if effectif < 50 else None,
+        "montant_estime": None,
         "conditions": ["TPE de 1 a 49 salaries", "Investissement en equipement de prevention", "DUERP a jour"],
         "tailles": ["tpe", "pme"],
         "secteurs": [],
@@ -5447,7 +5447,7 @@ async def rechercher_subventions(
         "conditions": ["Entreprise de toute taille", "Projet d amelioration des conditions de travail structure", "Implication des representants du personnel"],
         "tailles": ["tpe", "pme", "eti"],
         "secteurs": [],
-        "eligible": True,
+        "eligible": effectif >= 1,
         "url_info": "https://www.anact.fr/le-fonds-pour-lamelioration-des-conditions-de-travail-fact",
         "priorite": 3,
     })
@@ -5610,11 +5610,11 @@ async def rechercher_subventions(
             "type_aide": "subvention",
             "description": "Aide de 2 000 a 10 000 EUR pour les TPE et PME d Occitanie. Investissement, conseil, communication, numerisation.",
             "montant_max": "10 000 EUR",
-            "montant_estime": 10000 if is_pme else None,
+            "montant_estime": 10000 if is_pme and effectif < 50 else None,
             "conditions": ["TPE/PME d Occitanie", "Moins de 50 salaries", "Projet de developpement"],
             "tailles": ["tpe", "pme"],
             "secteurs": [],
-            "eligible": True,
+            "eligible": is_pme and effectif < 50,
             "url_info": "https://www.laregion.fr/Pass-Occitanie",
             "priorite": 1,
         })
@@ -5844,7 +5844,7 @@ async def rechercher_subventions(
             "type_aide": "subvention",
             "description": "Subvention annuelle de 14 000 EUR pendant 3 ans pour l embauche d un doctorant en these au sein de l entreprise. Eligible au CIR en complementarite.",
             "montant_max": "42 000 EUR (14 000/an x 3 ans)",
-            "montant_estime": 42000,
+            "montant_estime": 42000 if innovation else None,
             "conditions": ["Embauche d un doctorant en CDI ou CDD 3 ans", "Partenariat avec un laboratoire de recherche", "Sujet de these valide par l ANRT"],
             "tailles": ["tpe", "pme", "eti", "ge"],
             "secteurs": ["C", "J", "M"],
@@ -5861,10 +5861,12 @@ async def rechercher_subventions(
 
     # Statistiques
     montant_total = 0
+    nb_aides_chiffrees = 0
     for a in aides_eligibles:
         est = a.get("montant_estime")
         if est and isinstance(est, (int, float)):
             montant_total += est
+            nb_aides_chiffrees += 1
 
     niveaux = {}
     categories = {}
@@ -5876,7 +5878,8 @@ async def rechercher_subventions(
 
     return {
         "total": len(aides_eligibles),
-        "montant_potentiel_estime": montant_total,
+        "montant_potentiel_estime": round(montant_total, 2),
+        "nb_aides_chiffrees": nb_aides_chiffrees,
         "par_niveau": niveaux,
         "par_categorie": categories,
         "par_type": types,
@@ -6390,7 +6393,7 @@ td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
         for r in recommandations:
             html += f'<li>{r.get("description", r.get("titre", ""))}</li>'
         html += "</ol>"
-    html += f'<div class="footer">Document genere par NormaCheck v3.8.1 le {date_str} - Non opposable aux administrations (art. L.243-6-3 CSS)</div>'
+    html += f'<div class="footer">Document genere par NormaCheck v3.9.0 le {date_str} - Non opposable aux administrations (art. L.243-6-3 CSS)</div>'
     html += "</body></html>"
     return HTMLResponse(content=html, headers={
         "Content-Disposition": f'attachment; filename="normacheck_rapport_{datetime.now().strftime("%Y%m%d")}.html"',
@@ -8332,7 +8335,7 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 <div class="sig-block"><p><strong>L employeur</strong></p><p style="font-size:.85em;color:#64748b">Nom, qualite, signature</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 <div class="sig-block"><p><strong>Le(la) salarie(e)</strong></p><p style="font-size:.85em;color:#64748b">{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</p><div class="sig-line"></div><p style="font-size:.8em">Lu et approuve</p></div>
 </div>
-<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.8 - Ce document doit etre signe en deux exemplaires originaux</p>
+<p style="text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8">Document genere par NormaCheck v3.9.0 - Ce document doit etre signe en deux exemplaires originaux</p>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -13287,7 +13290,7 @@ APP_HTML += """
 
 <div class="g4" id="sub-stats" style="margin-bottom:18px">
 <div class="sc blue"><div class="val" id="sub-total">0</div><div class="lab">Aides identifiees</div></div>
-<div class="sc green"><div class="val" id="sub-montant">0 EUR</div><div class="lab">Montant potentiel max</div></div>
+<div class="sc green"><div class="val" id="sub-montant">0 EUR</div><div class="lab">Estimation potentielle</div></div>
 <div class="sc amber"><div class="val" id="sub-nationales">0</div><div class="lab">Nationales</div></div>
 <div class="sc purple"><div class="val" id="sub-europeennes">0</div><div class="lab">Europeennes</div></div>
 </div>
@@ -14634,7 +14637,7 @@ fetch("/api/subventions/recherche?"+p).then(safeJson).then(function(r){
 _subData=r;
 document.getElementById("sub-results").style.display="block";
 document.getElementById("sub-total").textContent=r.total;
-document.getElementById("sub-montant").textContent=fmt(r.montant_potentiel_estime||0);
+document.getElementById("sub-montant").textContent=fmt(r.montant_potentiel_estime||0)+(r.nb_aides_chiffrees?" ("+r.nb_aides_chiffrees+" aides estimees)":"");
 document.getElementById("sub-nationales").textContent=r.par_niveau.national||0;
 document.getElementById("sub-europeennes").textContent=r.par_niveau.europeen||0;
 afficherSubventions(r.aides);
