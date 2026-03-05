@@ -69,9 +69,9 @@ _MAX_FILE_MB = int(os.getenv("NORMACHECK_MAX_FILE_MB", "50"))  # Limite par fich
 # --- Tarification (source unique de verite pour les prix) ---
 # Les prix sont MENSUELS HT. Modifier ici met a jour partout automatiquement.
 _PRICING = {
-    "solo":    {"prix_mensuel": 5.00,    "profils": 1,  "label": "Solo"},
-    "equipe":  {"prix_mensuel": 8.33,    "profils": 3,  "label": "Equipe"},
-    "cabinet": {"prix_mensuel": 15.00,   "profils": 10, "label": "Cabinet"},
+    "solo":    {"prix_mensuel": 59.99,   "profils": 1,  "label": "Solo"},
+    "equipe":  {"prix_mensuel": 119.99,  "profils": 3,  "label": "Equipe"},
+    "cabinet": {"prix_mensuel": 249.99,  "profils": 10, "label": "Cabinet"},
 }
 
 # --- Persistence (OVHcloud: fichiers JSON / Vercel: in-memory) ---
