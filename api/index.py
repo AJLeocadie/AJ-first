@@ -369,30 +369,28 @@ def get_moteur() -> MoteurEcritures:
 def log_action(profil_email: str, action: str, details: str = ""):
     """Enregistre une action dans le journal d'audit avec tracabilite multi-utilisateur.
 
-    Si profil_email est generique ('utilisateur'), tente de resoudre
-    automatiquement l'identite via le contexte de requete (JWT cookie).
+    Resout automatiquement l'identite et le tenant_id via le contexte de requete (JWT cookie).
     """
     resolved_email = profil_email
     tenant_id = ""
-    if resolved_email == "utilisateur":
-        req = _current_request.get(None)
-        if req is not None:
-            try:
-                u = get_optional_user(req)
-                if u:
+    req = _current_request.get(None)
+    if req is not None:
+        try:
+            u = get_optional_user(req)
+            if u:
+                if resolved_email == "utilisateur":
                     resolved_email = u.get("email", profil_email)
-                    tenant_id = u.get("tenant_id", "")
-            except Exception:
-                pass
+                tenant_id = u.get("tenant_id", "")
+        except Exception:
+            pass
     entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
         "profil": resolved_email,
         "action": action,
         "details": details,
+        "tenant_id": tenant_id,
     }
-    if tenant_id:
-        entry["tenant_id"] = tenant_id
     _audit_log.append(entry)
     if _persist:
         audit_log_store.append(entry)
@@ -7454,10 +7452,19 @@ async def finaliser_invitation(
 
 
 @app.get("/api/collaboration/equipe")
-async def equipe():
+async def equipe(request: Request):
+    user = get_current_user(request)
+    tenant_id = user.get("tenant_id", "")
+    if user.get("role") == "admin" and not tenant_id:
+        # Super-admin sans tenant voit tout
+        inv_filtered = _invitations
+        log_filtered = _audit_log[-50:]
+    else:
+        inv_filtered = [i for i in _invitations if i.get("tenant_id") == tenant_id]
+        log_filtered = [e for e in _audit_log if e.get("tenant_id") == tenant_id][-50:]
     return {
-        "invitations": _invitations,
-        "audit_log": _audit_log[-50:],
+        "invitations": inv_filtered,
+        "audit_log": log_filtered,
     }
 
 
@@ -7466,8 +7473,15 @@ async def equipe():
 # ==============================
 
 @app.get("/api/audit-log")
-async def get_audit_log(limit: int = Query(100, ge=1, le=500)):
-    return _audit_log[-limit:]
+async def get_audit_log(request: Request, limit: int = Query(100, ge=1, le=500)):
+    user = get_current_user(request)
+    tenant_id = user.get("tenant_id", "")
+    if user.get("role") == "admin" and not tenant_id:
+        # Super-admin sans tenant voit tout
+        filtered = _audit_log
+    else:
+        filtered = [e for e in _audit_log if e.get("tenant_id") == tenant_id]
+    return filtered[-limit:]
 
 
 # ==============================
