@@ -29,6 +29,27 @@ try:
 except ImportError:
     HAS_PDFPLUMBER = False
 
+try:
+    from urssaf_analyzer.ocr.image_reader import LecteurMultiFormat
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
+
+
+# Keywords for detecting plaquette/brochure documents (marketing, commercial, non-analysable)
+_KW_PLAQUETTE = [
+    "plaquette", "brochure", "catalogue", "presentation",
+    "présentation", "nos services", "notre offre",
+    "qui sommes-nous", "notre equipe", "notre équipe",
+    "contactez-nous", "contact@", "www.",
+    "a propos", "à propos", "notre expertise",
+    "nos valeurs", "nos references", "nos références",
+    "temoignages", "témoignages", "chiffres cles", "chiffres clés",
+    "nous contacter", "decouvrez", "découvrez",
+    "notre savoir-faire", "nos engagements",
+    "suivez-nous", "rejoignez-nous",
+]
+
 
 # ============================================================
 # DOCUMENT TYPE CLASSIFICATION KEYWORDS
@@ -853,11 +874,30 @@ class PDFParser(BaseParser):
         except Exception as e:
             raise ParseError(f"Impossible de lire le PDF {chemin}: {e}") from e
 
+        # Si le PDF ne contient pas de texte extractible, tenter l'OCR
         if not texte_complet.strip():
-            return []
+            if HAS_OCR:
+                try:
+                    lecteur = LecteurMultiFormat()
+                    resultat_ocr = lecteur.lire_fichier(chemin)
+                    if resultat_ocr.texte and resultat_ocr.texte.strip():
+                        texte_complet = resultat_ocr.texte
+                        logger.info("PDF sans texte extractible - OCR utilise pour %s", chemin.name)
+                    else:
+                        logger.warning("PDF sans texte extractible et OCR sans resultat: %s", chemin.name)
+                        return self._declaration_pdf_non_exploitable(document, "scan_sans_texte")
+                except Exception as e:
+                    logger.warning("Echec OCR sur PDF %s: %s", chemin.name, e)
+                    return self._declaration_pdf_non_exploitable(document, "scan_sans_texte")
+            else:
+                return self._declaration_pdf_non_exploitable(document, "scan_sans_texte")
 
         # Detect document type from content
         doc_type = self._detecter_type_document(texte_complet, chemin.name)
+
+        # Si c'est une plaquette/brochure, retourner une declaration specifique
+        if doc_type == "plaquette":
+            return self._declaration_pdf_non_exploitable(document, "plaquette")
 
         if doc_type == "bulletin":
             return self._parser_bulletin(texte_complet, tableaux, document)
@@ -964,6 +1004,7 @@ class PDFParser(BaseParser):
             "bon_commande": _KW_BON_COMMANDE,
             "cerfa": _KW_CERFA,
             "lettre_mission": _KW_LETTRE_MISSION,
+            "plaquette": _KW_PLAQUETTE,
         }
 
         scores = {k: _count_keywords(texte_lower, v) for k, v in _ALL_KW.items()}
@@ -1025,6 +1066,7 @@ class PDFParser(BaseParser):
             "bon_commande": ["bon_commande", "commande", "bc_"],
             "cerfa": ["cerfa"],
             "lettre_mission": ["lettre_mission", "mission_"],
+            "plaquette": ["plaquette", "brochure", "catalogue", "presentation", "commercial"],
         }
         for doc_type, hints in fname_hints.items():
             if any(h in fname_lower for h in hints):
@@ -1469,6 +1511,34 @@ class PDFParser(BaseParser):
     # ============================================================
     # GENERIQUE (FALLBACK)
     # ============================================================
+
+    def _declaration_pdf_non_exploitable(self, document: Document, sous_type: str = "plaquette") -> list[Declaration]:
+        """Retourne une declaration specifique pour les PDFs non exploitables (plaquettes, scans sans texte)."""
+        doc_id = document.id
+        messages = {
+            "plaquette": "Ce document est une plaquette ou brochure commerciale. "
+                         "Il ne contient pas de donnees sociales ou fiscales exploitables par le moteur d'analyse.",
+            "scan_sans_texte": "Ce PDF est un scan ou une image sans texte extractible. "
+                               "L'OCR n'a pas permis d'extraire de contenu analysable. "
+                               "Essayez un PDF avec du texte selectionnable.",
+        }
+        decl = Declaration(
+            type_declaration="PDF",
+            reference=document.nom_fichier,
+            periode=None,
+            employeur=Employeur(id=f"emp-{doc_id}", siret="", raison_sociale=""),
+            employes=[],
+            cotisations=[],
+            masse_salariale_brute=Decimal("0"),
+            effectif_declare=0,
+            source_document_id=doc_id,
+            metadata={
+                "type_document": sous_type,
+                "message": messages.get(sous_type, "Document non exploitable."),
+                "exploitable": False,
+            },
+        )
+        return [decl]
 
     def _parser_generique(self, texte: str, tableaux: list, document: Document) -> list[Declaration]:
         """Parsing generique quand le type de document n'est pas determine."""

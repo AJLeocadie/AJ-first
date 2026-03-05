@@ -52,6 +52,8 @@ from auth import (
     get_current_user, get_optional_user, require_role,
     save_dashboard, load_dashboard, list_users_by_tenant, set_user_tenant,
     jwt_decode, revoke_token, bootstrap_admin,
+    generate_verification_code, verify_email_code,
+    VALID_OFFERS, VALID_ROLES,
 )
 
 # --- Detection environnement ---
@@ -179,7 +181,7 @@ async def rate_limit_middleware(request: Request, call_next):
     path = request.url.path
 
     # Limite stricte sur les endpoints d'authentification
-    if path in ("/api/auth/login", "/api/auth/register"):
+    if path in ("/api/auth/login", "/api/auth/register", "/api/auth/verify-email", "/api/auth/resend-verification"):
         if not _check_rate_limit(f"auth:{client_ip}", _RATE_LIMIT_AUTH_MAX):
             return JSONResponse(
                 {"detail": "Trop de tentatives. Reessayez dans une minute."},
@@ -198,6 +200,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 # --- Middleware authentification (protege /api/* sauf whitelist) ---
 _AUTH_WHITELIST = {"/api/auth/login", "/api/auth/register", "/api/auth/logout",
+                   "/api/auth/verify-email", "/api/auth/resend-verification",
                    "/api/health", "/api/version", "/api/collaboration/valider",
                    "/api/collaboration/finaliser"}
 
@@ -488,17 +491,59 @@ async def auth_login(request: Request, email: str = Form(""), mot_de_passe: str 
 @app.post("/api/auth/register")
 async def auth_register(
     nom: str = Form(...), prenom: str = Form(...),
-    email: str = Form(...), mot_de_passe: str = Form(...)
+    email: str = Form(...), mot_de_passe: str = Form(...),
+    offre: str = Form("solo"), role: str = Form("collaborateur"),
+    entreprise: str = Form(""), telephone: str = Form(""),
 ):
     try:
-        user = create_user(email, mot_de_passe, nom, prenom, role="collaborateur")
+        user = create_user(
+            email, mot_de_passe, nom, prenom,
+            role=role, offre=offre,
+            entreprise=entreprise, telephone=telephone,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # Generer et envoyer un code de verification par email
+    code = generate_verification_code(email)
+    logger.info("Code de verification pour %s: %s", email, code)
+    # En production, envoyer le code par email via un service SMTP
+    # Pour l'instant, le code est logue et retourne dans la reponse dev
     token = generate_token(user)
-    log_action(user["email"], "inscription", f"{prenom} {nom}", user_override=user)
-    response = JSONResponse({"status": "ok", "email": user["email"], "role": user["role"]})
+    log_action(user["email"], "inscription", f"{prenom} {nom} - offre:{offre} role:{role}", user_override=user)
+    response_data = {
+        "status": "ok", "email": user["email"], "role": user["role"],
+        "offre": user.get("offre", "solo"),
+        "email_verifie": False,
+        "verification_requise": True,
+    }
+    # En mode dev, inclure le code pour faciliter les tests
+    if not _IS_OVH:
+        response_data["_dev_verification_code"] = code
+    response = JSONResponse(response_data)
     set_auth_cookie(response, token)
     return response
+
+
+@app.post("/api/auth/verify-email")
+async def auth_verify_email(
+    email: str = Form(...), code: str = Form(...)
+):
+    if verify_email_code(email, code):
+        return {"status": "ok", "message": "Email verifie avec succes."}
+    raise HTTPException(400, "Code de verification invalide ou expire. Veuillez reessayer.")
+
+
+@app.post("/api/auth/resend-verification")
+async def auth_resend_verification(request: Request):
+    user = get_current_user(request)
+    if user.get("email_verifie"):
+        return {"status": "ok", "message": "Email deja verifie."}
+    code = generate_verification_code(user["email"])
+    logger.info("Code de verification renvoye pour %s: %s", user["email"], code)
+    response_data = {"status": "ok", "message": "Code de verification renvoye."}
+    if not _IS_OVH:
+        response_data["_dev_verification_code"] = code
+    return response_data
 
 
 @app.post("/api/auth/logout")
@@ -2265,8 +2310,15 @@ async def analyser_documents(
                     "devis": "Devis", "avoir": "Avoir", "bon_commande": "Bon de commande",
                     "releve_bancaire": "Releve bancaire", "cerfa": "CERFA",
                     "image_non_ocr": "Image (OCR indisponible)",
+                    "plaquette": "Plaquette / Brochure",
+                    "scan_sans_texte": "PDF scan (sans texte)",
                 }
-                if doc_type == "inconnu" or not doc_type:
+                is_non_exploitable = d_meta_lib.get("exploitable") is False
+                if is_non_exploitable:
+                    finfo["statut"] = "non_exploitable"
+                    finfo["type_document"] = nature_labels.get(doc_type, "Document non exploitable")
+                    finfo["message"] = d_meta_lib.get("message", "Ce document ne contient pas de donnees exploitables par le moteur d analyse.")
+                elif doc_type == "inconnu" or not doc_type:
                     finfo["statut"] = "non_reconnu"
                     finfo["type_document"] = "Document non reconnu"
                     finfo["message"] = "Le type de ce document n a pas pu etre identifie. Les informations detectees ont ete extraites en mode generique."
@@ -2290,8 +2342,9 @@ async def analyser_documents(
                 finfo["message"] = "L analyse de ce fichier a echoue."
             fichiers_info.append(finfo)
 
-        # Count unrecognized files
+        # Count unrecognized and non-exploitable files
         nb_non_reconnus = sum(1 for fi in fichiers_info if fi.get("statut") == "non_reconnu")
+        nb_non_exploitables = sum(1 for fi in fichiers_info if fi.get("statut") == "non_exploitable")
         nb_erreurs = sum(1 for fi in fichiers_info if fi.get("statut") in ("format_non_supporte", "erreur_analyse"))
 
         response_data = {
@@ -2304,6 +2357,7 @@ async def analyser_documents(
                 "score_risque_global": result.score_risque_global,
                 "nb_fichiers": len(result.documents_analyses),
                 "nb_fichiers_non_reconnus": nb_non_reconnus,
+                "nb_fichiers_non_exploitables": nb_non_exploitables,
                 "nb_fichiers_erreur": nb_erreurs,
             },
             "constats": constats,
@@ -11587,6 +11641,13 @@ body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;backgroun
 .auth-form input:focus{border-color:var(--blue);outline:none;background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.08)}
 .submit-btn{width:100%;padding:13px;background:linear-gradient(135deg,var(--blue),var(--blue-dark));color:#fff;border:none;border-radius:8px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s;font-family:inherit;box-shadow:0 2px 8px rgba(37,99,235,.2)}
 .submit-btn:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(37,99,235,.3)}
+.offer-selector{display:flex;gap:8px;margin-bottom:14px}
+.offer-opt{flex:1;padding:10px 8px;border:1.5px solid var(--slate-200);border-radius:8px;text-align:center;cursor:pointer;transition:all .25s;background:var(--slate-50);font-size:.82em}
+.offer-opt strong{display:block;color:var(--slate-700);font-size:1em;margin-bottom:2px}
+.offer-opt span{color:var(--slate-400);font-size:.85em}
+.offer-opt.selected{border-color:var(--blue);background:#eff6ff;box-shadow:0 0 0 2px rgba(37,99,235,.1)}
+.offer-opt.selected strong{color:var(--blue)}
+.offer-opt:hover{border-color:var(--blue-light);transform:translateY(-1px)}
 .submit-btn:focus-visible{outline:2px solid var(--green);outline-offset:2px}
 .submit-btn:active{transform:translateY(0)}
 .msg{padding:11px 15px;border-radius:8px;margin:10px 0;font-size:.88em;display:none;animation:fadeInUp .3s ease-out}
@@ -11700,7 +11761,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <li>Veille juridique 2020-2026</li>
 <li>Export CSV</li>
 </ul>
-<button class="plan-btn" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Choisir Solo</button>
+<button class="plan-btn" onclick="selectOffer('solo')">Choisir Solo</button>
 </div>
 <div class="plan pop">
 <h3>Equipe</h3>
@@ -11715,7 +11776,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <li>Audit trail complet</li>
 <li>Support prioritaire</li>
 </ul>
-<button class="plan-btn" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Choisir Equipe</button>
+<button class="plan-btn" onclick="selectOffer('equipe')">Choisir Equipe</button>
 </div>
 <div class="plan">
 <h3>Cabinet</h3>
@@ -11730,7 +11791,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <li>Accompagnement demarrage</li>
 <li>Support dedie</li>
 </ul>
-<button class="plan-btn" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Choisir Cabinet</button>
+<button class="plan-btn" onclick="selectOffer('cabinet')">Choisir Cabinet</button>
 </div>
 </div>
 </div>
@@ -11772,14 +11833,45 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <button class="submit-btn" onclick="doLogin()">Se connecter</button>
 </div>
 <div class="auth-form" id="form-register">
+<div id="reg-step-1">
+<label for="r-offre">Offre choisie</label>
+<div class="offer-selector" id="offer-selector">
+<label class="offer-opt selected" data-offer="solo"><input type="radio" name="offre" value="solo" checked style="display:none"><strong>Solo</strong><span>1 profil - 60 EUR/an</span></label>
+<label class="offer-opt" data-offer="equipe"><input type="radio" name="offre" value="equipe" style="display:none"><strong>Equipe</strong><span>3 profils - 100 EUR/an</span></label>
+<label class="offer-opt" data-offer="cabinet"><input type="radio" name="offre" value="cabinet" style="display:none"><strong>Cabinet</strong><span>10 profils - 180 EUR/an</span></label>
+</div>
+<label for="r-role">Votre role</label>
+<select id="r-role" style="width:100%;padding:11px 14px;border:1.5px solid var(--slate-200);border-radius:8px;font-size:.93em;margin-bottom:12px;background:var(--slate-50);font-family:inherit">
+<option value="">-- Selectionnez votre role --</option>
+<option value="expert_comptable">Expert-comptable</option>
+<option value="comptable">Comptable</option>
+<option value="gestionnaire_paie">Gestionnaire de paie</option>
+<option value="dirigeant">Dirigeant / Gerant</option>
+<option value="collaborateur">Collaborateur</option>
+<option value="inspecteur">Inspecteur / Controleur</option>
+</select>
 <label for="rn">Nom</label><input id="rn" placeholder="Dupont" autocomplete="family-name">
 <label for="rp2">Prenom</label><input id="rp2" placeholder="Jean" autocomplete="given-name">
-<label for="re">Email</label><input type="email" id="re" placeholder="jean@exemple.fr" autocomplete="email">
-<label for="rpw">Mot de passe</label><input type="password" id="rpw" placeholder="Min. 6 caracteres" autocomplete="new-password">
-<label for="rpw2">Confirmer</label><input type="password" id="rpw2" placeholder="Confirmez" autocomplete="new-password">
+<label for="r-entreprise">Entreprise / Cabinet</label><input id="r-entreprise" placeholder="Nom de votre structure (facultatif)">
+<label for="r-tel">Telephone</label><input type="tel" id="r-tel" placeholder="06 12 34 56 78" autocomplete="tel">
+<label for="re">Email professionnel</label><input type="email" id="re" placeholder="jean@cabinet-dupont.fr" autocomplete="email">
+<label for="rpw">Mot de passe</label><input type="password" id="rpw" placeholder="Min. 12 caracteres, majuscules et minuscules" autocomplete="new-password">
+<label for="rpw2">Confirmer</label><input type="password" id="rpw2" placeholder="Confirmez votre mot de passe" autocomplete="new-password">
 <div style="margin:14px 0;padding:14px;background:var(--slate-50);border-radius:10px;font-size:.82em;color:var(--slate-500)">
 <label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:0;cursor:pointer"><input type="checkbox" id="cgv" style="width:auto;margin:0"> J'accepte les <a href="/legal/cgu" target="_blank" style="color:var(--blue)">CGU</a> et <a href="/legal/cgv" target="_blank" style="color:var(--blue)">CGV</a>.</label></div>
 <button class="submit-btn" onclick="doReg()">Creer mon compte</button>
+</div>
+<div id="reg-step-verify" style="display:none">
+<div style="text-align:center;padding:10px 0 20px">
+<div style="font-size:2em;margin-bottom:10px">&#9993;</div>
+<p style="font-size:.95em;color:var(--slate-600)">Un code de verification a 6 chiffres a ete envoye a votre adresse email.</p>
+<p style="font-size:.82em;color:var(--slate-400);margin-top:6px">Saisissez-le ci-dessous pour activer votre compte.</p>
+</div>
+<label for="r-verif-code">Code de verification</label>
+<input id="r-verif-code" placeholder="000000" maxlength="6" style="text-align:center;font-size:1.4em;letter-spacing:.3em;font-weight:700" autocomplete="one-time-code">
+<button class="submit-btn" onclick="doVerify()" style="margin-top:12px">Verifier mon email</button>
+<button onclick="doResendCode()" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:.82em;margin-top:10px;width:100%;text-align:center;font-family:inherit">Renvoyer le code</button>
+</div>
 <div class="rgpd">Vos donnees sont traitees conformement au RGPD (Reglement UE 2016/679). Vous disposez d'un droit d'acces, de rectification et de suppression de vos donnees. Contact : dpo@normacheck-app.fr</div>
 </div></div></div>
 
@@ -11811,7 +11903,12 @@ e.preventDefault();e.target.click();
 }
 });
 function doLogin(){var email=document.getElementById("le").value.trim();var pwd=document.getElementById("lp").value;if(!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Veuillez saisir votre identifiant.";return;}var btn=document.querySelector("#form-login .submit-btn");btn.disabled=true;btn.textContent="Connexion...";var fd=new FormData();fd.append("email",email);fd.append("mot_de_passe",pwd);fetch("/api/auth/login",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Identifiants incorrects")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Connexion reussie. Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Se connecter";});}
-function doReg(){var nom=document.getElementById("rn").value.trim();var prenom=document.getElementById("rp2").value.trim();var email=document.getElementById("re").value.trim();var pwd=document.getElementById("rpw").value;if(!nom||!prenom||!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Tous les champs sont obligatoires.";return;}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Adresse email invalide.";return;}if(pwd.length<6){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir au moins 6 caracteres.";return;}if(pwd!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Les mots de passe ne correspondent pas.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var btn=document.querySelector("#form-register .submit-btn");btn.disabled=true;btn.textContent="Creation...";var fd=new FormData();fd.append("nom",nom);fd.append("prenom",prenom);fd.append("email",email);fd.append("mot_de_passe",pwd);fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur lors de l inscription")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree avec succes ! Redirection...";setTimeout(function(){window.location.href="/app"},600);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Creer mon compte";});}
+var _regEmail="";
+function selectOffer(o){document.querySelectorAll(".offer-opt").forEach(function(el){el.classList.toggle("selected",el.dataset.offer===o);if(el.dataset.offer===o)el.querySelector("input").checked=true;});showAT("register");}
+document.querySelectorAll(".offer-opt").forEach(function(el){el.addEventListener("click",function(){selectOffer(el.dataset.offer);});});
+function doReg(){var nom=document.getElementById("rn").value.trim();var prenom=document.getElementById("rp2").value.trim();var email=document.getElementById("re").value.trim();var pwd=document.getElementById("rpw").value;var role=document.getElementById("r-role").value;var offre=document.querySelector('input[name="offre"]:checked').value;var entreprise=document.getElementById("r-entreprise").value.trim();var tel=document.getElementById("r-tel").value.trim();if(!nom||!prenom||!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Nom, prenom et email sont obligatoires.";return;}if(!role){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Veuillez selectionner votre role.";return;}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Adresse email invalide.";return;}if(pwd.length<12){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir au moins 12 caracteres.";return;}if(pwd===pwd.toLowerCase()||pwd===pwd.toUpperCase()){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir des majuscules et des minuscules.";return;}if(pwd!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Les mots de passe ne correspondent pas.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var btn=document.querySelector("#reg-step-1 .submit-btn");btn.disabled=true;btn.textContent="Creation...";var fd=new FormData();fd.append("nom",nom);fd.append("prenom",prenom);fd.append("email",email);fd.append("mot_de_passe",pwd);fd.append("offre",offre);fd.append("role",role);fd.append("entreprise",entreprise);fd.append("telephone",tel);_regEmail=email;fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur lors de l inscription")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));document.getElementById("reg-step-1").style.display="none";document.getElementById("reg-step-verify").style.display="block";var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Verifiez votre email.";}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Creer mon compte";});}
+function doVerify(){var code=document.getElementById("r-verif-code").value.trim();if(!code||code.length!==6){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Saisissez le code a 6 chiffres.";return;}var fd=new FormData();fd.append("email",_regEmail);fd.append("code",code);fetch("/api/auth/verify-email",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Code invalide")});return r.json();}).then(function(){var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Email verifie ! Redirection...";setTimeout(function(){window.location.href="/app"},800);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
+function doResendCode(){fetch("/api/auth/resend-verification",{method:"POST",credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Nouveau code envoye a votre adresse email.";}).catch(function(){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Erreur lors du renvoi du code.";});}
 </script>
 </body>
 </html>"""
