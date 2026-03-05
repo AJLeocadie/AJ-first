@@ -12300,7 +12300,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div class="auth-tabs"><div class="auth-tab active" onclick="showAT('login')" tabindex="0" role="tab" aria-selected="true">Connexion</div><div class="auth-tab" onclick="showAT('register')" tabindex="0" role="tab" aria-selected="false">Inscription</div></div>
 <div id="amsg" class="msg"></div>
 <div class="auth-form active" id="form-login">
-<label for="le">Identifiant / Email</label><input type="text" id="le" placeholder="admin" autocomplete="username">
+<label for="le">Adresse email</label><input type="email" id="le" placeholder="votre@email.fr" autocomplete="username">
 <label for="lp">Mot de passe</label><input type="password" id="lp" placeholder="Votre mot de passe" autocomplete="current-password">
 <button class="submit-btn" onclick="doLogin()">Se connecter</button>
 </div>
@@ -12943,20 +12943,22 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <nav class="sidebar" id="sidebar" aria-label="Menu principal">
 <div class="logo"><svg class="logo-shield" viewBox="0 0 28 28" fill="none"><defs><linearGradient id="slg" x1="0" y1="0" x2="28" y2="28"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#34d399"/></linearGradient></defs><rect width="28" height="28" rx="7" fill="url(#slg)"/><path d="M9 8c0 3.5 1.5 6 4 8" stroke="rgba(255,255,255,.85)" stroke-width="2" stroke-linecap="round" fill="none"/><path d="M15 8c0 3.5 1.5 6 4 8" stroke="rgba(255,255,255,.4)" stroke-width="2" stroke-linecap="round" fill="none"/><path d="M8 18l3.5 3.5 7-7" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><em>NormaCheck</em> <span>v3.9.0</span></div>
 <div class="sidebar-nav">
-<div class="nav-group">Analyse</div>
+<div class="nav-group">Tableau de bord</div>
 <div class="nl active" tabindex="0" onclick="showS('dashboard',this)"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/></svg></span><span>Dashboard</span></div>
 <div class="nl" tabindex="0" onclick="showS('analyse',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M9 2v6a2 2 0 002 2h6"/><path d="M4 5.5V19a2 2 0 002 2h12a2 2 0 002-2V8l-6-6H6a2 2 0 00-2 2z"/><path d="M9 15l2 2 4-4"/></svg></span><span>Import / Analyse</span></div>
 <div class="nl" tabindex="0" onclick="showS('biblio',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></span><span>Bibliotheque</span></div>
-<div class="nav-group">Gestion</div>
+<div class="nav-group">Comptabilite & Fiscal</div>
 <div class="nl" tabindex="0" onclick="showS('compta',this)"><span class="ico"><svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><line x1="12" y1="10" x2="12" y2="19"/></svg></span><span>Comptabilite</span></div>
 <div class="nl" tabindex="0" onclick="showS('factures',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/></svg></span><span>Factures</span></div>
-<div class="nl" tabindex="0" onclick="showS('dsn',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span><span>Creation DSN</span></div>
+<div class="nl" tabindex="0" onclick="showS('dsn',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span><span>DSN</span></div>
+<div class="nav-group">Social & RH</div>
 <div class="nl" tabindex="0" onclick="showS('rh',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span><span>Ressources humaines</span></div>
 <div class="nl" tabindex="0" onclick="showS('simulation',this)"><span class="ico"><svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg></span><span>Simulation</span></div>
-<div class="nav-group">Outils</div>
-<div class="nl" tabindex="0" onclick="showS('subventions',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="18"/><path d="M15 9.5c-.8-1-2-1.5-3-1.5s-3 .5-3 2.5c0 3.5 6 2 6 5.5 0 2-1.5 2.5-3 2.5s-2.2-.5-3-1.5"/></svg></span><span>Subventions</span></div>
+<div class="nl" tabindex="0" onclick="showS('subventions',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="18"/><path d="M15 9.5c-.8-1-2-1.5-3-1.5s-3 .5-3 2.5c0 3.5 6 2 6 5.5 0 2-1.5 2.5-3 2.5s-2.2-.5-3-1.5"/></svg></span><span>Aides & Subventions</span></div>
+<div class="nav-group">Veille & Outils</div>
 <div class="nl" tabindex="0" onclick="showS('veille',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><span>Veille juridique</span></div>
 <div class="nl" tabindex="0" onclick="showS('portefeuille',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21 12V7H5a2 2 0 010-4h14v4"/><path d="M3 5v14a2 2 0 002 2h16v-5"/><path d="M18 12a2 2 0 100 4 2 2 0 000-4z"/></svg></span><span>Portefeuille</span></div>
+<div class="nav-group">Administration</div>
 <div class="nl" tabindex="0" onclick="showS('equipe',this)"><span class="ico"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg></span><span>Equipe</span></div>
 <div class="nl" tabindex="0" onclick="showS('config',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></span><span>Configuration</span></div>
 <div class="nl" tabindex="0" onclick="showS('ensavoirplus',this)"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span><span>En savoir plus</span></div>
@@ -12989,7 +12991,7 @@ _refreshingToken=true;
 _refreshPromise=fetch("/api/auth/refresh",{method:"POST"}).then(function(r){_refreshingToken=false;return r.ok;}).catch(function(){_refreshingToken=false;return false;});
 return _refreshPromise;
 }
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Aides & Subventions","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
 function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
 function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
 function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
@@ -13046,7 +13048,14 @@ function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").for
 APP_HTML += """
 <!-- ===== DASHBOARD ===== -->
 <div class="sec active" id="s-dashboard">
-<div class="al info" style="margin-bottom:16px"><span class="ai">&#128161;</span><span><strong>Limites d'analyse :</strong> 50 fichiers max, 2 Go max par analyse. Formats : PDF, Excel, CSV, DSN, XML, Images (JPEG, PNG, TIFF).</span></div>
+<div id="dash-welcome" style="margin-bottom:16px;padding:20px 24px;background:linear-gradient(135deg,#eff6ff,#ecfdf5);border:1.5px solid #bfdbfe;border-radius:14px">
+<h3 style="margin:0 0 8px;color:#1e40af;font-size:1.05em">Bienvenue sur NormaCheck</h3>
+<p style="margin:0 0 12px;color:#475569;font-size:.88em;line-height:1.5">Pour commencer, importez vos documents dans <strong>Import / Analyse</strong>. NormaCheck detectera automatiquement le type de chaque fichier (bulletins, DSN, factures, contrats...) et generera votre tableau de bord de conformite.</p>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn btn-blue btn-sm" onclick="showS('analyse')" style="font-size:.82em">Importer des documents</button>
+<span style="color:#94a3b8;font-size:.8em;align-self:center">Formats : PDF, Excel, CSV, DSN, XML, Images</span>
+</div>
+</div>
 <div class="g4" id="dash-stats">
 <div class="sc blue"><div class="val" id="dash-anomalies">0</div><div class="lab">Anomalies</div></div>
 <div class="sc amber"><div class="val" id="dash-impact">0 EUR</div><div class="lab">Impact cotisations</div></div>
@@ -13257,13 +13266,13 @@ APP_HTML += """
 <div class="sec" id="s-compta">
 <div class="tabs" id="compta-tabs">
 <div class="tab active" onclick="showCT('journal',this)">Journal</div>
-<div class="tab" onclick="showCT('balance',this)">Balance</div>
+<div class="tab" onclick="showCT('ecritures',this)">Saisie</div>
 <div class="tab" onclick="showCT('grandlivre',this)">Grand Livre</div>
+<div class="tab" onclick="showCT('balance',this)">Balance</div>
 <div class="tab" onclick="showCT('resultat',this)">Resultat</div>
 <div class="tab" onclick="showCT('bilan',this)">Bilan</div>
 <div class="tab" onclick="showCT('tva',this)">TVA</div>
 <div class="tab" onclick="showCT('social',this)">Charges sociales</div>
-<div class="tab" onclick="showCT('ecritures',this)">Ecritures</div>
 <div class="tab" onclick="showCT('plan',this)">Plan comptable</div>
 </div>
 <div class="card">
@@ -13653,16 +13662,16 @@ APP_HTML += """
 <div class="tabs" id="rh-tabs">
 <div class="tab active" onclick="showRHTab('salaries',this)">Salaries</div>
 <div class="tab" onclick="showRHTab('contrats',this)">Contrats</div>
+<div class="tab" onclick="showRHTab('bulletins',this)">Bulletins</div>
 <div class="tab" onclick="showRHTab('conges',this)">Conges</div>
+<div class="tab" onclick="showRHTab('planning',this)">Planning</div>
 <div class="tab" onclick="showRHTab('arrets',this)">Arrets</div>
-<div class="tab" onclick="showRHTab('sanctions',this)">Sanctions</div>
 <div class="tab" onclick="showRHTab('entretiens',this)">Entretiens</div>
 <div class="tab" onclick="showRHTab('visites',this)">Visites med.</div>
 <div class="tab" onclick="showRHTab('attestations',this)">Attestations</div>
-<div class="tab" onclick="showRHTab('planning',this)">Planning</div>
 <div class="tab" onclick="showRHTab('echanges',this)">Echanges</div>
+<div class="tab" onclick="showRHTab('sanctions',this)">Sanctions</div>
 <div class="tab" onclick="showRHTab('alertes',this)">Alertes</div>
-<div class="tab" onclick="showRHTab('bulletins',this)">Bulletins</div>
 </div>
 <div class="card">
 <div class="tc active" id="rh-salaries">
@@ -14069,12 +14078,6 @@ APP_HTML += """
 <button class="btn btn-blue" onclick="loadAuditLog()" style="margin-bottom:10px">Charger le journal</button>
 <div id="cfg-audit-log"></div>
 </div>
-<div class="card">
-<h2>&#128295; Diagnostic de navigation</h2>
-<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Lancez un audit exhaustif de la navigation, des boutons et des onglets. Les resultats sont affiches ci-dessous et dans la console du navigateur (F12).</p>
-<button class="btn btn-blue" onclick="runNavAuditUI()" style="margin-bottom:10px">&#128269; Lancer l audit de navigation</button>
-<div id="cfg-nav-audit"></div>
-</div>
 </div>
 
 <!-- ===== DETAILS DES SCORES DE CONFORMITE ===== -->
@@ -14348,6 +14351,8 @@ if(!analysisData){loadDashServer();}
 function loadDash(){
 try{
 if(!analysisData){loadDashServer();return;}
+/* Masquer le message de bienvenue quand une analyse existe */
+var welcomeEl=document.getElementById("dash-welcome");if(welcomeEl)welcomeEl.style.display="none";
 var d=analysisData,s=d.synthese||{};
 var impact=s.impact_financier_total||0;
 var constats=d.constats||[];
@@ -16263,22 +16268,7 @@ else{toast("Audit navigation : tout est OK ("+report.ok.length+" verifications).
 return report;
 }
 
-function runNavAuditUI(){
-var r=auditNavigation();
-var el=document.getElementById("cfg-nav-audit");if(!el)return;
-var h="<div style='margin-top:10px'>";
-h+="<div class='g3'><div class='sc green'><div class='val'>"+r.ok.length+"</div><div class='lab'>OK</div></div>";
-h+="<div class='sc amber'><div class='val'>"+r.warn.length+"</div><div class='lab'>Avertissements</div></div>";
-h+="<div class='sc "+(r.err.length?"red":"green")+"'><div class='val'>"+r.err.length+"</div><div class='lab'>Erreurs</div></div></div>";
-if(r.err.length){h+="<h3 style='color:var(--r);margin-top:14px'>Erreurs</h3>";for(var i=0;i<r.err.length;i++){h+="<div class='al err' style='margin:4px 0'><span class='ai'>&#9888;</span><span>"+_esc(r.err[i])+"</span></div>";}}
-if(r.warn.length){h+="<h3 style='color:var(--o);margin-top:14px'>Avertissements</h3>";for(var i=0;i<r.warn.length;i++){h+="<div class='al warn' style='margin:4px 0'><span class='ai'>&#128161;</span><span>"+_esc(r.warn[i])+"</span></div>";}}
-h+="<details style='margin-top:14px'><summary style='cursor:pointer;font-weight:600;color:var(--p2)'>Voir les "+r.ok.length+" verifications reussies</summary><div style='margin-top:8px'>";
-for(var i=0;i<r.ok.length;i++){h+="<div style='font-size:.82em;color:var(--g);padding:2px 0'>&#10004; "+_esc(r.ok[i])+"</div>";}
-h+="</div></details></div>";
-el.innerHTML=h;
-}
-
-/* Run audit automatically on load (results in console) */
+/* Run audit automatically on load (results in console only - dev tool) */
 function _autoAuditNav(){
 try{
 var r=auditNavigation();
