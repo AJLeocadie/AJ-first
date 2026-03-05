@@ -100,13 +100,18 @@ app.add_middleware(
 )
 
 # --- Middleware tracabilite : stocke la requete dans le contexte pour log_action ---
-from starlette.middleware.base import BaseHTTPMiddleware
+# NOTE: On utilise un middleware ASGI pur au lieu de BaseHTTPMiddleware
+# car BaseHTTPMiddleware est connu pour corrompre les grandes reponses dans Starlette.
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        _current_request.set(request)
-        response = await call_next(request)
-        return response
+class RequestContextMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            from starlette.requests import Request as _Req
+            _current_request.set(_Req(scope, receive, send))
+        await self.app(scope, receive, send)
 
 app.add_middleware(RequestContextMiddleware)
 
@@ -124,9 +129,9 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "img-src 'self' data:; "
-        "font-src 'self'; "
+        "font-src 'self' https://fonts.gstatic.com; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self'"
