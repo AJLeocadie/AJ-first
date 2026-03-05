@@ -366,23 +366,30 @@ def get_moteur() -> MoteurEcritures:
     return _moteur
 
 
-def log_action(profil_email: str, action: str, details: str = ""):
+def log_action(profil_email: str, action: str, details: str = "", user_override: dict = None):
     """Enregistre une action dans le journal d'audit avec tracabilite multi-utilisateur.
 
     Resout automatiquement l'identite et le tenant_id via le contexte de requete (JWT cookie).
+    Si user_override est fourni (ex: lors du login/register avant que le cookie soit pose),
+    utilise directement ces informations.
     """
     resolved_email = profil_email
     tenant_id = ""
-    req = _current_request.get(None)
-    if req is not None:
-        try:
-            u = get_optional_user(req)
-            if u:
-                if resolved_email == "utilisateur":
-                    resolved_email = u.get("email", profil_email)
-                tenant_id = u.get("tenant_id", "")
-        except Exception:
-            pass
+    if user_override:
+        if resolved_email == "utilisateur":
+            resolved_email = user_override.get("email", profil_email)
+        tenant_id = user_override.get("tenant_id", "")
+    else:
+        req = _current_request.get(None)
+        if req is not None:
+            try:
+                u = get_optional_user(req)
+                if u:
+                    if resolved_email == "utilisateur":
+                        resolved_email = u.get("email", profil_email)
+                    tenant_id = u.get("tenant_id", "")
+            except Exception:
+                pass
     entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
@@ -465,7 +472,7 @@ async def auth_login(request: Request, email: str = Form(""), mot_de_passe: str 
     if not user:
         raise HTTPException(401, "Email ou mot de passe incorrect")
     token = generate_token(user)
-    log_action(user["email"], "connexion")
+    log_action(user["email"], "connexion", user_override=user)
     response = JSONResponse({
         "status": "ok",
         "email": user["email"],
@@ -488,7 +495,7 @@ async def auth_register(
     except ValueError as e:
         raise HTTPException(400, str(e))
     token = generate_token(user)
-    log_action(user["email"], "inscription", f"{prenom} {nom}")
+    log_action(user["email"], "inscription", f"{prenom} {nom}", user_override=user)
     response = JSONResponse({"status": "ok", "email": user["email"], "role": user["role"]})
     set_auth_cookie(response, token)
     return response
@@ -7455,13 +7462,20 @@ async def finaliser_invitation(
 async def equipe(request: Request):
     user = get_current_user(request)
     tenant_id = user.get("tenant_id", "")
-    if user.get("role") == "admin" and not tenant_id:
+    user_email = user.get("email", "")
+    user_role = user.get("role", "collaborateur")
+    if user_role == "admin" and not tenant_id:
         # Super-admin sans tenant voit tout
         inv_filtered = _invitations
         log_filtered = _audit_log[-50:]
-    else:
+    elif user_role in ("admin", "decisionnaire"):
+        # Admin/decisionnaire d'un tenant : voit les activites du tenant
         inv_filtered = [i for i in _invitations if i.get("tenant_id") == tenant_id]
         log_filtered = [e for e in _audit_log if e.get("tenant_id") == tenant_id][-50:]
+    else:
+        # Utilisateur standard : voit uniquement ses propres activites
+        inv_filtered = [i for i in _invitations if i.get("tenant_id") == tenant_id]
+        log_filtered = [e for e in _audit_log if e.get("profil") == user_email][-50:]
     return {
         "invitations": inv_filtered,
         "audit_log": log_filtered,
@@ -7476,11 +7490,17 @@ async def equipe(request: Request):
 async def get_audit_log(request: Request, limit: int = Query(100, ge=1, le=500)):
     user = get_current_user(request)
     tenant_id = user.get("tenant_id", "")
-    if user.get("role") == "admin" and not tenant_id:
+    user_email = user.get("email", "")
+    user_role = user.get("role", "collaborateur")
+    if user_role == "admin" and not tenant_id:
         # Super-admin sans tenant voit tout
         filtered = _audit_log
-    else:
+    elif user_role in ("admin", "decisionnaire"):
+        # Admin/decisionnaire d'un tenant : voit les activites du tenant
         filtered = [e for e in _audit_log if e.get("tenant_id") == tenant_id]
+    else:
+        # Utilisateur standard : voit uniquement ses propres activites
+        filtered = [e for e in _audit_log if e.get("profil") == user_email]
     return filtered[-limit:]
 
 
