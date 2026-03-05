@@ -11123,7 +11123,7 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div class="layout">
 <div class="sidebar" id="sidebar">
-<div class="logo"><em>NormaCheck</em> <span>v3.8</span></div>
+<div class="logo"><em>NormaCheck</em> <span>v3.8.1</span></div>
 <div class="nav-group">Analyse</div>
 <div class="nl active" onclick="showS('dashboard',this)"><span class="ico">&#9632;</span><span>Dashboard</span></div>
 <div class="nl" onclick="showS('analyse',this)"><span class="ico">&#128269;</span><span>Import / Analyse</span></div>
@@ -12791,8 +12791,8 @@ afficherSubventions(filtered);
 }
 function exportSubventions(){
 if(!_subData||!_subData.aides)return;
-var csv="Nom;Organisme;Niveau;Categorie;Type;Montant max;Conditions\n";
-for(var i=0;i<_subData.aides.length;i++){var a=_subData.aides[i];csv+='"'+a.nom+'";"'+a.organisme+'";"'+a.niveau+'";"'+a.categorie+'";"'+a.type_aide+'";"'+a.montant_max+'";"'+((a.conditions||[]).join(", "))+'"\n';}
+var csv="Nom;Organisme;Niveau;Categorie;Type;Montant max;Conditions\\n";
+for(var i=0;i<_subData.aides.length;i++){var a=_subData.aides[i];csv+='"'+a.nom+'";"'+a.organisme+'";"'+a.niveau+'";"'+a.categorie+'";"'+a.type_aide+'";"'+a.montant_max+'";"'+((a.conditions||[]).join(", "))+'"\\n';}
 var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="subventions_eligibles.csv";l.click();URL.revokeObjectURL(u);
 }
 function imprimerSubventions(){window.print();}
@@ -13705,7 +13705,7 @@ el.innerHTML=h;});}
 function marquerAlerteTraitee(id){var fd=new FormData();fd.append("statut","traitee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte marquee comme traitee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
 function archiverAlerteLibre(id){var fd=new FormData();fd.append("statut","archivee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte archivee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
 function supprimerAlerteLibre(id){if(!confirm("Supprimer cette alerte ?"))return;fetch("/api/rh/alertes/libres/"+id,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte supprimee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
-function exportAlertes(){if(!_rhAlertesData||!_rhAlertesData.length)return;var csv="Urgence;Titre;Description;Reference;Action requise;Echeance\n";for(var i=0;i<_rhAlertesData.length;i++){var a=_rhAlertesData[i];csv+='"'+(a.urgence||"")+'";"'+(a.titre||"")+'";"'+((a.description||"").replace(/"/g,"'"))+'";"'+(a.reference||"")+'";"'+(a.action_requise||"")+'";"'+(a.echeance||"")+'"'+"\n";}var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="alertes_rh.csv";l.click();URL.revokeObjectURL(u);}
+function exportAlertes(){if(!_rhAlertesData||!_rhAlertesData.length)return;var csv="Urgence;Titre;Description;Reference;Action requise;Echeance\\n";for(var i=0;i<_rhAlertesData.length;i++){var a=_rhAlertesData[i];csv+='"'+(a.urgence||"")+'";"'+(a.titre||"")+'";"'+((a.description||"").replace(/"/g,"'"))+'";"'+(a.reference||"")+'";"'+(a.action_requise||"")+'";"'+(a.echeance||"")+'"'+"\\n";}var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="alertes_rh.csv";l.click();URL.revokeObjectURL(u);}
 function prefillBulletin(cid){if(!cid)return;rhGet("/api/rh/contrats",function(list){for(var i=0;i<list.length;i++){var c=list[i];if(c.id===cid){document.getElementById("rh-bp-nom").value=c.nom_salarie||c.nom||"";document.getElementById("rh-bp-prenom").value=c.prenom_salarie||c.prenom||"";document.getElementById("rh-bp-brut").value=c.salaire_brut||"";if(c.duree_hebdo)document.getElementById("rh-bp-heures").value=(parseFloat(c.duree_hebdo)/35*151.67).toFixed(2);break;}}});}
 function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
 rhPost("/api/rh/bulletins/generer",fd,function(d){
