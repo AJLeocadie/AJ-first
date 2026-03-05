@@ -12169,6 +12169,56 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="topbar"><button class="mob-menu" id="mob-menu" onclick="toggleSidebar()">&#9776;</button><h1 id="page-title">Dashboard</h1><div class="info">NormaCheck v3.9.0 &bull; <span id="topbar-date"></span> &bull; <a href="/legal/mentions" style="color:var(--tx2);font-size:.9em">Mentions legales</a></div></div>
 <div class="page">
 
+<script>
+/* === CORE NAV (inline before content to guarantee availability) === */
+var _ncUser=null;
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
+function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
+function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
+function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
+function showS(n,el){
+try{
+closeSidebar();
+document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
+document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove("active")});
+var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
+if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
+var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
+if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
+if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();}
+if(typeof loadDash==="function"&&n==="dashboard")loadDash();
+if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
+if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
+if(typeof loadPayStatuses==="function"&&n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
+if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrouillons==="function")loadDSNBrouillons();}
+if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
+if(n==="analyse"){if(typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}else{fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);loadDash();}}).catch(function(){});}}
+if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
+if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
+if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
+if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();}
+if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
+}catch(e){console.error("showS error:",n,e);}
+}
+function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
+function goToRH(){showS('rh');}
+function goToRHContrats(){showS('rh');setTimeout(function(){if(typeof showRHTab==="function")showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
+function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
+function gv(id){var el=document.getElementById(id);return el?el.value:"";}
+function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
+function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
+function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
+if(typeof loadRHSalaries==="function"&&n==="salaries")loadRHSalaries();if(n==="contrats"){if(typeof loadRHContrats==="function")loadRHContrats();if(typeof loadRHAvenants==="function")loadRHAvenants();}if(typeof loadRHConges==="function"&&n==="conges")loadRHConges();if(typeof loadRHArrets==="function"&&n==="arrets")loadRHArrets();if(typeof loadRHSanctions==="function"&&n==="sanctions")loadRHSanctions();if(typeof loadRHEntretiens==="function"&&n==="entretiens")loadRHEntretiens();if(typeof loadRHVisites==="function"&&n==="visites")loadRHVisites();if(typeof loadRHAttestations==="function"&&n==="attestations")loadRHAttestations();if(n==="planning"){if(typeof loadRHPlanning==="function")loadRHPlanning();if(typeof renderCalendar==="function")renderCalendar();}if(typeof loadRHEchanges==="function"&&n==="echanges")loadRHEchanges();if(typeof loadRHAlertes==="function"&&n==="alertes")loadRHAlertes();if(typeof loadRHBulletins==="function"&&n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
+function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
+var panel=document.getElementById("port-"+name);if(panel)panel.style.display="block";
+document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
+if(el)el.classList.add("active");
+if(typeof loadPortVue==="function"&&name==="vue")loadPortVue();if(typeof rechTI==="function"&&name==="ti")rechTI();if(typeof rechEnt==="function"&&name==="employeur")rechEnt();}
+function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(typeof loadPayStatuses==="function"&&n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
+function showCT(n,el){try{document.querySelectorAll("#compta-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-compta .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ct-"+n);if(tc)tc.classList.add("active");var ps=document.getElementById("period-sel");if(ps)ps.style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";if(typeof loadCompta==="function")loadCompta();}catch(e){console.error("showCT error:",n,e);}}
+function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#rh-alertes .al-panel").forEach(function(t){t.style.display="none";t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("al-"+n);if(tc){tc.style.display="block";tc.classList.add("active");}if(typeof loadAlertesLibres==="function"&&n==="libres")loadAlertesLibres();if(typeof loadRHAlertes==="function"&&n==="auto")loadRHAlertes();}
+</script>
+
 """
 
 
@@ -13399,44 +13449,6 @@ La conformite n est pas un etat statique. Les regles changent (SMIC, taux, oblig
 
 APP_HTML += """
 <script>
-/* === CORE NAV (separate script to guarantee availability) === */
-var _ncUser=null;
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
-function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
-function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
-function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
-function showS(n,el){
-try{
-closeSidebar();
-document.querySelectorAll(".sec").forEach(function(s){s.classList.remove("active")});
-document.querySelectorAll(".sidebar .nl").forEach(function(l){l.classList.remove("active")});
-var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
-if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
-var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
-if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
-if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();}
-if(typeof loadDash==="function"&&n==="dashboard")loadDash();
-if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
-if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
-if(typeof loadPayStatuses==="function"&&n==="factures"){resetTabs("#fact-tabs","#s-factures","ft-analyse");loadPayStatuses();}
-if(typeof preFillDSN==="function"&&n==="dsn"){preFillDSN();if(typeof loadDSNBrouillons==="function")loadDSNBrouillons();}
-if(typeof loadRHSalaries==="function"&&n==="rh"){resetTabs("#rh-tabs","#s-rh","rh-salaries");loadRHSalaries();if(typeof loadRHAlertes==="function")loadRHAlertes();}
-if(n==="analyse"){if(typeof analysisData!=="undefined"&&analysisData){var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);}else{fetch("/api/dashboard/load",{credentials:"same-origin"}).then(safeJson).then(function(r){if(r.status==="ok"&&r.data){analysisData=r.data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(r.data));}catch(e){}var ra=document.getElementById("res-analyse");if(ra)ra.style.display="block";if(typeof showJsonResults==="function")showJsonResults(analysisData);loadDash();}}).catch(function(){});}}
-if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
-if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
-if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
-if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();}
-if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
-}catch(e){console.error("showS error:",n,e);}
-}
-function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
-function goToRH(){showS('rh');}
-function goToRHContrats(){showS('rh');setTimeout(function(){if(typeof showRHTab==="function")showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
-function safeJson(r){if(!r.ok){if(r.status===401){window.location.href="/";throw new Error("Session expiree");}throw new Error("Erreur serveur ("+r.status+")");}return r.json();}
-function gv(id){var el=document.getElementById(id);return el?el.value:"";}
-function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\\B(?=(\\d{3})+(?!\\d))/g," ")+" EUR":n;}
-</script>
-<script>
 /* === AUTH CHECK === */
 (function(){fetch("/api/auth/me",{credentials:"same-origin"}).then(function(r){if(!r.ok){window.location.href="/";return null;}return r.json();}).then(function(u){if(!u)return;_ncUser=u;var su=document.getElementById("sidebar-user");if(su)su.textContent=(u.prenom||"")+" "+(u.nom||"")+" ("+u.role+")";}).catch(function(){window.location.href="/";});})();
 
@@ -13689,7 +13701,6 @@ var fd=new FormData();fd.append("champ",champ);fd.append("ancienne_valeur",ancie
 fetch("/api/documents/bibliotheque/"+docId+"/corriger",{method:"POST",body:fd}).then(function(r){if(!r.ok)throw new Error("Erreur");return r.json();}).then(function(){toast("Correction enregistree.","ok");loadBiblio();}).catch(function(e){toast(e.message);});}
 
 /* === FACTURES === */
-function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
 
 var factFile=null;
 var _fiFact=document.getElementById("fi-fact");
@@ -13849,15 +13860,6 @@ h+="<tr><td style='font-size:.8em'>"+d.date_creation.substring(0,10)+"</td><td>"
 h+="</table>";el.innerHTML=h;}).catch(function(){});}
 
 /* === COMPTABILITE === */
-function showCT(n,el){
-try{
-document.querySelectorAll("#compta-tabs .tab").forEach(function(t){t.classList.remove("active")});
-document.querySelectorAll("#s-compta .tc").forEach(function(t){t.classList.remove("active")});
-if(el)el.classList.add("active");var tc=document.getElementById("ct-"+n);if(tc)tc.classList.add("active");
-var ps=document.getElementById("period-sel");if(ps)ps.style.display=(n==="grandlivre"||n==="balance"||n==="bilan")?"block":"none";
-loadCompta();
-}catch(e){console.error("showCT error:",n,e);}}
-
 function loadCompta(){try{
 var dd=document.getElementById("gl-dd").value;var df=document.getElementById("gl-df").value;
 
@@ -13961,7 +13963,6 @@ var cls=d.sans_justificatif?"warn":"ok";var icon=d.sans_justificatif?"&#9888;":"
 document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class='ai'>"+icon+"</span><span>"+(d.alerte||"Ecriture enregistree.")+(d.sans_justificatif?" <em style='color:var(--r)'>(justificatif manquant)</em>":"")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 
 /* === SIMULATION === */
-function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
 function simBulletin(){fetch("/api/simulation/bulletin?brut_mensuel="+document.getElementById("sim-brut").value+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function ccnAutoSearch(){var t=document.getElementById("ccn-search").value;if(t.length<2){document.getElementById("ccn-search-results").innerHTML="";return;}fetch("/api/simulation/recherche-ccn?terme="+encodeURIComponent(t)).then(safeJson).then(function(r){var box=document.getElementById("ccn-search-results");if(!r.resultats||!r.resultats.length){box.innerHTML="";return;}var container=document.createElement("div");container.style.cssText="background:var(--bg2);border-radius:6px;padding:6px";for(var i=0;i<Math.min(r.resultats.length,8);i++){(function(c){var d=document.createElement("div");d.style.cssText="padding:4px 8px;cursor:pointer;border-radius:4px;font-size:.85em";d.innerHTML="<strong>IDCC "+c.idcc+"<\/strong> - "+c.nom;d.onmouseover=function(){d.style.background="var(--bg3)";};d.onmouseout=function(){d.style.background="";};d.onclick=function(){document.getElementById("ccn-search").value=c.idcc;box.innerHTML="";};container.appendChild(d);})(r.resultats[i]);}box.innerHTML="";box.appendChild(container);}).catch(function(){});}
 function simCCN(){var ccn=document.getElementById("ccn-search").value;if(!ccn){toast("Saisissez un IDCC ou un nom de convention collective");return;}var p="ccn="+encodeURIComponent(ccn)+"&brut_mensuel="+gv("ccn-brut")+"&est_cadre="+gv("ccn-cadre")+"&effectif="+gv("ccn-eff");fetch("/api/simulation/ccn?"+p).then(safeJson).then(function(r){var h="";if(r.ccn_identifiee){h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>IDCC "+r.idcc+" - "+r.nom_ccn+"</strong>"+(r.secteur?" ("+r.secteur+")":"")+"</span></div>";}else{h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>Convention non identifiee</strong> — les minimums legaux sont appliques. Essayez un numero IDCC (ex: 1486).</span></div>";}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.bulletin.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut mensuel</div></div><div class='sc green'><div class='val'>"+r.bulletin.net_avant_impot.toFixed(2)+"</div><div class='lab'>Net avant impot</div></div><div class='sc amber'><div class='val'>"+r.bulletin.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+r.prevoyance_ccn.montant_mensuel.toFixed(2)+"</div><div class='lab'>Prevoyance CCN/mois</div></div></div>";h+="<h3 style='margin-top:16px'>&#9878; Obligations conventionnelles vs legales</h3>";if(r.obligations_conventionnelles&&r.obligations_conventionnelles.length>0){h+="<table><thead><tr><th>Obligation</th><th>Disposition conventionnelle</th><th>Minimum legal</th><th>+Favorable?</th></tr></thead><tbody>";for(var i=0;i<r.obligations_conventionnelles.length;i++){var o=r.obligations_conventionnelles[i];var badge=o.plus_favorable===true?"<span style='color:#16a34a'>&#10004; Oui</span>":o.plus_favorable===false?"<span style='color:#dc2626'>&#10008; Non</span>":"<span style='color:#d97706'>&#8212;</span>";h+="<tr><td><strong>"+o.obligation+"</strong></td><td>"+o.conventionnel+"</td><td>"+(o.legal||"-")+"</td><td>"+badge+"</td></tr>";}h+="</tbody></table>";h+="<p style='margin-top:8px;font-size:.85em;color:var(--tx2)'><strong>"+r.nb_obligations_plus_favorables+"</strong> disposition(s) conventionnelle(s) plus favorable(s) que la loi.</p>";}else{h+="<p style='color:var(--tx2);font-style:italic'>Aucune specificite conventionnelle identifiee au-dela du minimum legal.</p>";}h+="<h3 style='margin-top:16px'>&#128214; Rappel obligations legales (Code du travail / ANI)</h3>";if(r.obligations_legales){h+="<table><thead><tr><th>Obligation</th><th>Minimum legal</th></tr></thead><tbody>";for(var j=0;j<r.obligations_legales.length;j++){var ol=r.obligations_legales[j];h+="<tr><td>"+ol.obligation+"</td><td>"+ol.legal+"</td></tr>";}h+="</tbody></table>";}h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";document.getElementById("sim-ccn-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
@@ -14093,12 +14094,6 @@ function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),
 
 /* === PORTEFEUILLE === */
 var _tiStatutLabels={"gerant_majoritaire":"Gerant majoritaire","micro_entrepreneur":"Micro-entrepreneur","profession_liberale":"Profession liberale","entreprise_individuelle_ir":"EI (IR)","entreprise_individuelle_is":"EI (IS)","artisan":"Artisan","commercant":"Commercant"};
-
-function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
-document.getElementById("port-"+name).style.display="block";
-document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
-if(el)el.classList.add("active");
-if(name==="vue")loadPortVue();if(name==="ti")rechTI();if(name==="employeur")rechEnt();}
 
 function ajouterEnt(){var fd=new FormData();fd.append("siret",document.getElementById("ent-siret").value);fd.append("raison_sociale",document.getElementById("ent-raison").value);fd.append("forme_juridique",document.getElementById("ent-forme").value);fd.append("code_naf",document.getElementById("ent-naf").value);fd.append("effectif",document.getElementById("ent-eff").value||"0");fd.append("ville",document.getElementById("ent-ville").value);
 fetch("/api/entreprises",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(){toast("Entreprise ajoutee !","ok");rechEnt();document.getElementById("ent-siret").value="";document.getElementById("ent-raison").value="";}).catch(function(e){toast(e.message);});}
@@ -14732,9 +14727,6 @@ w.document.write(html);w.document.close();setTimeout(function(){w.print();},600)
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
 /* === RH MODULE === */
-function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(n==="salaries")loadRHSalaries();if(n==="contrats"){loadRHContrats();loadRHAvenants();}if(n==="conges")loadRHConges();if(n==="arrets")loadRHArrets();if(n==="sanctions")loadRHSanctions();if(n==="entretiens")loadRHEntretiens();if(n==="visites")loadRHVisites();if(n==="attestations")loadRHAttestations();if(n==="planning"){loadRHPlanning();renderCalendar();}if(n==="echanges")loadRHEchanges();if(n==="alertes")loadRHAlertes();if(n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
-
 function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(safeJson).then(function(d){return (d&&d.items&&typeof d.total==="number")?d.items:d;}).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
@@ -15104,7 +15096,6 @@ if(a.message_personnalise)h+="<p style='margin:4px 0;color:var(--p2)'>["+a.messa
 if(a.est_libre)h+="<div style='margin-top:8px'><button class='btn btn-sm' style='background:var(--ol);color:#92400e' data-action='traiterAlerte' data-id='"+a.id+"'>Marquer traitee</button> <button class='btn btn-sm btn-red' data-action='suppAlerte' data-id='"+a.id+"'>Supprimer</button></div>";
 h+="</div></div>";}
 el.innerHTML=h;}
-function showAlTab(n,el){document.querySelectorAll("#rh-alertes .tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#rh-alertes .al-panel").forEach(function(t){t.style.display="none";t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("al-"+n);if(tc){tc.style.display="block";tc.classList.add("active");}if(n==="libres")loadAlertesLibres();if(n==="auto")loadRHAlertes();}
 function creerAlerteLibre(){var titre=document.getElementById("al-titre").value;if(!titre){toast("Le titre est obligatoire.");return;}
 var fd=new FormData();fd.append("titre",titre);fd.append("description",document.getElementById("al-desc").value);fd.append("categorie",document.getElementById("al-categorie").value);fd.append("urgence",document.getElementById("al-urgence").value);fd.append("date_echeance",document.getElementById("al-echeance").value);fd.append("recurrence",document.getElementById("al-recurrence").value);fd.append("action_requise",document.getElementById("al-action").value);fd.append("destinataire",document.getElementById("al-destinataire").value);fd.append("reference_legale",document.getElementById("al-ref").value);fd.append("delai_rappel_jours",document.getElementById("al-delai").value);fd.append("notes",document.getElementById("al-notes").value);
 rhPost("/api/rh/alertes/libres",fd,function(d){document.getElementById("al-creer-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Alerte <strong>"+d.titre+"</strong> creee avec succes.</span></div>";document.getElementById("al-titre").value="";document.getElementById("al-desc").value="";document.getElementById("al-action").value="";document.getElementById("al-destinataire").value="";document.getElementById("al-ref").value="";document.getElementById("al-notes").value="";document.getElementById("al-echeance").value="";toast("Alerte personnalisee creee.","ok");});}
