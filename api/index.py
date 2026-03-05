@@ -11839,8 +11839,8 @@ body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;backgroun
 .g2,.g3{grid-template-columns:1fr}
 .g4{grid-template-columns:repeat(2,1fr);gap:8px}
 .card{padding:16px;margin-bottom:12px;border-radius:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.tabs{gap:0;padding:3px;margin-bottom:10px}
-.tab{padding:10px 14px;font-size:.85em}
+.tabs{gap:3px;padding:4px;margin-bottom:10px}
+.tab{padding:8px 12px;font-size:.8em;min-height:36px}
 table{font-size:.85em;min-width:480px}
 th{padding:8px 10px}td{padding:7px 10px}
 .sc .val{font-size:1.2em}
@@ -11883,7 +11883,7 @@ input,select,textarea{font-size:16px;padding:12px 14px}
 .card{background:var(--card-bg);border-radius:16px;padding:24px;border:1px solid var(--brd);margin-bottom:18px;transition:all .25s ease;box-shadow:0 1px 3px rgba(15,23,42,.06)}
 .card:hover{box-shadow:0 6px 24px rgba(15,23,42,.08);border-color:rgba(37,99,235,.25)}
 .card h2{color:var(--p);margin-bottom:14px;font-size:1.05em;font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:-.02em;padding-bottom:12px;border-bottom:1px solid var(--brd)}
-.card h2 .ct{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;padding:2px 10px;border-radius:20px;font-size:.72em;font-weight:600}
+.card h2 .ct{background:#eff6ff;color:#1d4ed8;padding:2px 10px;border-radius:20px;font-size:.72em;font-weight:700;border:1px solid #bfdbfe}
 /* Grids */
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
@@ -11892,12 +11892,12 @@ input,select,textarea{font-size:16px;padding:12px 14px}
 .sc{border-radius:14px;padding:18px 16px;text-align:center;border:none;background:var(--card-bg);transition:all .25s ease;position:relative;overflow:hidden}
 .sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;opacity:1;transition:.25s}
 .sc:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(15,23,42,.1)}.sc .val{font-size:1.5em;font-weight:800;letter-spacing:-.03em}.sc .lab{font-size:.74em;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-.sc.blue{background:linear-gradient(135deg,#1e3a5f,#1e40af);color:#fff}.sc.blue .val,.sc.blue .lab{color:#fff}.sc.blue::before{background:#3b82f6}
-.sc.green{background:linear-gradient(135deg,#064e3b,#047857);color:#fff}.sc.green .val,.sc.green .lab{color:#fff}.sc.green::before{background:#10b981}
-.sc.red{background:linear-gradient(135deg,#7f1d1d,#b91c1c);color:#fff}.sc.red .val,.sc.red .lab{color:#fff}.sc.red::before{background:#ef4444}
-.sc.amber{background:linear-gradient(135deg,#78350f,#b45309);color:#fff}.sc.amber .val,.sc.amber .lab{color:#fff}.sc.amber::before{background:#f59e0b}
-.sc.purple{background:linear-gradient(135deg,#3b0764,#6d28d9);color:#fff}.sc.purple .val,.sc.purple .lab{color:#fff}.sc.purple::before{background:#8b5cf6}
-.sc.teal{background:linear-gradient(135deg,#134e4a,#0d7377);color:#fff}.sc.teal .val,.sc.teal .lab{color:#fff}.sc.teal::before{background:#14b8a6}
+.sc.blue{background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd}.sc.blue .val{color:#1e40af}.sc.blue .lab{color:#2563eb}.sc.blue::before{background:#2563eb}
+.sc.green{background:linear-gradient(135deg,#ecfdf5,#d1fae5);border:1px solid #6ee7b7}.sc.green .val{color:#065f46}.sc.green .lab{color:#059669}.sc.green::before{background:#059669}
+.sc.red{background:linear-gradient(135deg,#fef2f2,#fee2e2);border:1px solid #fca5a5}.sc.red .val{color:#991b1b}.sc.red .lab{color:#dc2626}.sc.red::before{background:#dc2626}
+.sc.amber{background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fcd34d}.sc.amber .val{color:#92400e}.sc.amber .lab{color:#d97706}.sc.amber::before{background:#d97706}
+.sc.purple{background:linear-gradient(135deg,#f5f3ff,#ede9fe);border:1px solid #c4b5fd}.sc.purple .val{color:#5b21b6}.sc.purple .lab{color:#7c3aed}.sc.purple::before{background:#7c3aed}
+.sc.teal{background:linear-gradient(135deg,#f0fdfa,#ccfbf1);border:1px solid #5eead4}.sc.teal .val{color:#134e4a}.sc.teal .lab{color:#0d9488}.sc.teal::before{background:#0d9488}
 /* Upload zone */
 .uz{border:2px dashed var(--brd);border-radius:16px;padding:32px;text-align:center;cursor:pointer;transition:all .3s ease;background:var(--card-bg);position:relative}
 .uz:hover{border-color:var(--p3);background:var(--pl);box-shadow:0 0 0 4px rgba(37,99,235,.06)}
@@ -11933,9 +11933,8 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .badge-paye{background:var(--gl);color:#16a34a}.badge-impaye{background:var(--rl);color:var(--r)}
 .sug-box{position:relative;z-index:50}.sug-box .sug-list{position:absolute;left:0;right:0;background:var(--card-bg);border:1px solid var(--brd);border-radius:6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}.sug-box .sug-list.show{display:block}.sug-item{padding:8px 10px;cursor:pointer;font-size:.84em;border-bottom:1px solid #f1f5f9;min-height:44px;display:flex;align-items:center}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
 /* Tabs */
-.tabs{display:flex;gap:2px;background:#e2e8f0;border-radius:12px;padding:4px;margin-bottom:16px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.tabs::-webkit-scrollbar{display:none}
-.tab{padding:10px 16px;cursor:pointer;border-radius:10px;color:var(--tx2);font-weight:600;font-size:.83em;transition:all .2s ease;white-space:nowrap;-webkit-tap-highlight-color:transparent;min-height:42px;display:inline-flex;align-items:center}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;background:#e2e8f0;border-radius:12px;padding:5px;margin-bottom:16px}
+.tab{padding:8px 14px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.82em;transition:all .2s ease;white-space:nowrap;-webkit-tap-highlight-color:transparent;min-height:38px;display:inline-flex;align-items:center}
 .tab:hover{color:var(--tx);background:rgba(255,255,255,.5)}.tab.active{color:var(--p);background:var(--card-bg);box-shadow:0 2px 8px rgba(15,23,42,.08)}
 .tc{display:none}.tc.active{display:block}
 /* Anomalies */
@@ -11988,12 +11987,12 @@ body{color-scheme:dark}
 th{background:#334155;color:#e2e8f0}
 tr:hover{background:rgba(59,130,246,.08)}
 .tabs{background:#334155}
-.sc.blue{background:linear-gradient(135deg,#1e3a5f,#1e40af)}
-.sc.green{background:linear-gradient(135deg,#064e3b,#047857)}
-.sc.red{background:linear-gradient(135deg,#7f1d1d,#b91c1c)}
-.sc.amber{background:linear-gradient(135deg,#78350f,#b45309)}
-.sc.purple{background:linear-gradient(135deg,#3b0764,#6d28d9)}
-.sc.teal{background:linear-gradient(135deg,#134e4a,#0d7377)}
+.sc.blue{background:linear-gradient(135deg,rgba(37,99,235,.15),rgba(59,130,246,.1));border-color:#1e40af}.sc.blue .val{color:#93c5fd}.sc.blue .lab{color:#60a5fa}
+.sc.green{background:linear-gradient(135deg,rgba(5,150,105,.15),rgba(16,185,129,.1));border-color:#065f46}.sc.green .val{color:#6ee7b7}.sc.green .lab{color:#34d399}
+.sc.red{background:linear-gradient(135deg,rgba(220,38,38,.12),rgba(248,113,113,.08));border-color:#991b1b}.sc.red .val{color:#fca5a5}.sc.red .lab{color:#f87171}
+.sc.amber{background:linear-gradient(135deg,rgba(217,119,6,.12),rgba(251,191,36,.08));border-color:#92400e}.sc.amber .val{color:#fcd34d}.sc.amber .lab{color:#fbbf24}
+.sc.purple{background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(167,139,250,.1));border-color:#5b21b6}.sc.purple .val{color:#c4b5fd}.sc.purple .lab{color:#a78bfa}
+.sc.teal{background:linear-gradient(135deg,rgba(13,148,136,.12),rgba(45,212,191,.08));border-color:#0d9488}.sc.teal .val{color:#5eead4}.sc.teal .lab{color:#2dd4bf}
 .badge-blue{background:rgba(59,130,246,.15);color:#93c5fd}
 .badge-green{background:rgba(74,222,128,.12);color:#4ade80}
 .badge-red{background:rgba(248,113,113,.12);color:#f87171}
@@ -12330,7 +12329,7 @@ APP_HTML += """
 
 <!-- ===== SIMULATION ===== -->
 <div class="sec" id="s-simulation">
-<div class="tabs" style="flex-wrap:wrap">
+<div class="tabs">
 <div class="tab active" onclick="showSimTab('bulletin',this)">Bulletin</div>
 <div class="tab" onclick="showSimTab('cout',this)">Cout employeur</div>
 <div class="tab" onclick="showSimTab('exo',this)">Exonerations</div>
