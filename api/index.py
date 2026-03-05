@@ -11787,7 +11787,7 @@ APP_HTML = """<!DOCTYPE html>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2'><path d='M12 2l7 4v5c0 5.25-3.5 9.74-7 11-3.5-1.26-7-5.75-7-11V6l7-4z'/><path d='M9 12l2 2 4-4' stroke='%2322c55e' stroke-width='2.5'/></svg>">
 <title>NormaCheck - Conformite</title>
 <style>
-:root{--p:#0c1829;--p2:#1a3a6b;--p3:#2563eb;--pl:#eef4ff;--g:#059669;--gl:#ecfdf5;--r:#dc2626;--rl:#fef2f2;--o:#d97706;--ol:#fffbeb;--pu:#7c3aed;--pul:#f5f3ff;--tl:#0d7377;--bg:#f1f5f9;--tx:#0f172a;--tx2:#475569;--brd:#cbd5e1;--sh:0 1px 4px rgba(15,23,42,.08);--sidebar-w:256px;--card-bg:#fff;--accent:#1d4ed8;--accent-light:#dbeafe}
+:root{--p:#0c1829;--p2:#1a3a6b;--p3:#2563eb;--pl:#eef4ff;--g:#059669;--gl:#ecfdf5;--r:#dc2626;--rl:#fef2f2;--o:#d97706;--ol:#fffbeb;--pu:#7c3aed;--pul:#f5f3ff;--tl:#0d7377;--bg:#f1f5f9;--bg2:#f8fafc;--tx:#0f172a;--tx2:#475569;--brd:#cbd5e1;--sh:0 1px 4px rgba(15,23,42,.08);--sidebar-w:256px;--card-bg:#fff;--accent:#1d4ed8;--accent-light:#dbeafe}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden;-webkit-text-size-adjust:100%;letter-spacing:-.01em}
 .layout{display:flex;min-height:100vh;min-height:100dvh}
@@ -11980,7 +11980,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
 /* ===== Dark Mode ===== */
 @media(prefers-color-scheme:dark){
-:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2);--accent:#60a5fa;--accent-light:rgba(96,165,250,.15)}
+:root{--p:#e2e8f0;--p2:#93c5fd;--p3:#60a5fa;--pl:rgba(59,130,246,.12);--g:#4ade80;--gl:rgba(74,222,128,.1);--r:#f87171;--rl:rgba(248,113,113,.1);--o:#fbbf24;--ol:rgba(251,191,36,.1);--pu:#c084fc;--pul:rgba(192,132,252,.1);--tl:#2dd4bf;--bg:#0f172a;--bg2:#1a2332;--tx:#e2e8f0;--tx2:#94a3b8;--brd:#334155;--card-bg:#1e293b;--sh:0 1px 3px rgba(0,0,0,.2);--accent:#60a5fa;--accent-light:rgba(96,165,250,.15)}
 body{color-scheme:dark}
 .sidebar{background:#020617}
 .topbar{background:rgba(30,41,59,.92);backdrop-filter:blur(12px)}
@@ -13375,34 +13375,64 @@ setGauge("gauge-cdc","gauge-cdc-val","grade-cdc",ts.cdc);
 
 function renderAnomalies(id,constats){
 var el=document.getElementById(id);if(!constats.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune anomalie detectee.</p>";return;}
-var h="<div style='margin-bottom:8px;font-size:.86em;color:var(--tx2)'>"+constats.length+" anomalie(s) detectee(s). Cliquez sur chaque ligne pour voir le detail.</div>";
-constats.forEach(function(c){
+/* Trier : haute d'abord, puis moyenne, puis faible */
+var sevOrder={"haute":0,"moyenne":1,"faible":2};
+constats.sort(function(a,b){return (sevOrder[a.severite]||2)-(sevOrder[b.severite]||2);});
+var nbH=constats.filter(function(c){return c.severite==="haute"}).length;
+var nbM=constats.filter(function(c){return c.severite==="moyenne"}).length;
+var nbL=constats.length-nbH-nbM;
+var h="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;align-items:center'>";
+h+="<span style='font-weight:700;font-size:.95em'>"+constats.length+" anomalie(s) detectee(s)</span>";
+if(nbH)h+="<span class='badge badge-red'>"+nbH+" critique"+(nbH>1?"s":"")+"</span>";
+if(nbM)h+="<span class='badge badge-amber'>"+nbM+" moyenne"+(nbM>1?"s":"")+"</span>";
+if(nbL)h+="<span class='badge badge-green'>"+nbL+" mineure"+(nbL>1?"s":"")+"</span>";
+h+="</div>";
+constats.forEach(function(c,idx){
 var impact=c.montant_impact||0;var neg=impact>0;
 var sevCls=c.severite==="haute"?"high":(c.severite==="moyenne"?"med":"low");
 var dest=categToDest(c.categorie||"");
 var destCls={"URSSAF":"badge-blue","Fiscal":"badge-purple","France Travail":"badge-amber","GUSO":"badge-teal"}[dest]||"badge-blue";
 var sevBadge=c.severite==="haute"?"badge-red":(c.severite==="moyenne"?"badge-amber":"badge-green");
-h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'><div class='head'><div><span class='title'>"+(c.titre||"Ecart")+"</span> ";
-h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+c.severite+"</span>";
+var sevLabel=c.severite==="haute"?"Critique":(c.severite==="moyenne"?"Moyenne":"Mineure");
+h+="<div class='anomalie sev-"+sevCls+"' data-toggle='1'>";
+/* --- Ligne resume cliquable --- */
+h+="<div class='head'><div style='flex:1'>";
+h+="<span style='font-weight:700;font-size:.76em;color:var(--tx2);margin-right:6px'>#"+(idx+1)+"</span>";
+h+="<span class='title'>"+(c.titre||"Ecart")+"</span> ";
+h+="<span class='dest "+destCls+"'>"+dest+"</span> <span class='badge "+sevBadge+"'>"+sevLabel+"</span>";
 if(c.periode)h+=" <span class='badge' style='background:#e0e7ff;color:#3730a3'>"+c.periode+"</span>";
 h+="</div>";
 if(neg)h+="<div class='montant neg'>+"+Math.abs(impact).toFixed(2)+" EUR</div>";
 h+="</div>";
+/* --- Comparaison rapide (toujours visible) --- */
+if(c.valeur_constatee||c.valeur_attendue){
+h+="<div style='display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:.85em'>";
+if(c.valeur_constatee)h+="<div style='background:var(--rl);padding:4px 10px;border-radius:6px;border:1px solid #fecaca'><strong style='color:var(--r)'>Constate :</strong> <span style='font-weight:600'>"+c.valeur_constatee+"</span></div>";
+if(c.valeur_attendue)h+="<div style='background:var(--gl);padding:4px 10px;border-radius:6px;border:1px solid #bbf7d0'><strong style='color:var(--g)'>Attendu :</strong> <span style='font-weight:600'>"+c.valeur_attendue+"</span></div>";
+if(neg)h+="<div style='background:var(--ol);padding:4px 10px;border-radius:6px;border:1px solid #fde68a'><strong style='color:var(--o)'>Impact :</strong> <span style='font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
+h+="</div>";}
+/* --- Detail (deploye au clic) --- */
 h+="<div class='detail'>";
-h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:10px;font-size:.9em'>";
-h+="<div><strong>Categorie :</strong> "+(c.categorie||"-")+"</div>";
-h+="<div><strong>Periode :</strong> "+(c.periode||"Non precisee")+"</div>";
-h+="<div><strong>Document(s) source :</strong> "+(c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"Non precise"))+"</div>";
-h+="<div><strong>Rubrique :</strong> "+(c.rubrique||"Generale")+"</div>";
-if(c.valeur_constatee)h+="<div><strong>Valeur constatee :</strong> <span style='color:var(--r);font-weight:600'>"+c.valeur_constatee+"</span></div>";
-if(c.valeur_attendue)h+="<div><strong>Valeur attendue :</strong> <span style='color:var(--g);font-weight:600'>"+c.valeur_attendue+"</span></div>";
-if(neg)h+="<div><strong>Impact financier :</strong> <span style='color:var(--r);font-weight:600'>"+Math.abs(impact).toFixed(2)+" EUR</span></div>";
-h+="<div><strong>Detecte par :</strong> "+(c.detecte_par||"-")+"</div>";
+/* Localisation */
+var docSrc=c.document_source||(c.documents_concernes&&c.documents_concernes.length?c.documents_concernes.join(", "):"");
+h+="<div style='background:var(--pl);border:1px solid #bfdbfe;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.88em'>";
+h+="<strong style='color:var(--p2)'>&#128204; Localisation de l'erreur</strong><br>";
+if(docSrc)h+="<span>Document : <strong>"+docSrc+"</strong></span><br>";
+h+="<span>Categorie : "+(c.categorie||"-")+"</span>";
+if(c.rubrique&&c.rubrique!=="Generale")h+=" &bull; <span>Rubrique : "+c.rubrique+"</span>";
+if(c.periode)h+=" &bull; <span>Periode : "+c.periode+"</span>";
 h+="</div>";
+/* Explication claire */
 var desc=(c.description||"").replace(/\\n/g,"<br>");
-h+="<div style='background:var(--bg2);border-radius:8px;padding:10px;margin:8px 0'><strong>Explication :</strong> "+desc+"</div>";
-if(c.recommandation)h+="<div class='al info' style='margin-top:8px'><span class='ai'>&#128161;</span><span><strong>Action recommandee :</strong> "+c.recommandation+"</span></div>";
-if(c.reference_legale)h+="<div style='margin-top:6px;font-size:.85em;color:var(--tx2)'><em>Base legale : "+c.reference_legale+"</em></div>";
+h+="<div style='border-radius:8px;padding:12px;margin-bottom:10px;font-size:.88em;line-height:1.6;background:var(--card-bg);border:1px solid var(--brd)'>"+desc+"</div>";
+/* Action recommandee */
+if(c.recommandation){
+h+="<div style='background:var(--gl);border:1px solid #a7f3d0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:.88em'>";
+h+="<strong style='color:#065f46'>&#9989; Action a realiser :</strong> "+c.recommandation+"</div>";}
+/* Base legale */
+if(c.reference_legale){
+h+="<div style='font-size:.82em;color:var(--tx2);padding:6px 10px;background:var(--bg);border-radius:6px;border:1px solid var(--brd)'>";
+h+="<strong>&#9878; Base legale :</strong> "+c.reference_legale+"</div>";}
 h+="</div></div>";});el.innerHTML=h;}
 
 function categToDest(cat){var c=cat.toLowerCase();if(c.indexOf("fiscal")>=0||c.indexOf("impot")>=0)return"Fiscal";if(c.indexOf("france travail")>=0||c.indexOf("chomage")>=0)return"France Travail";if(c.indexOf("guso")>=0||c.indexOf("spectacle")>=0)return"GUSO";return"URSSAF";}
@@ -13554,7 +13584,8 @@ fetch("/api/documents/bibliotheque/"+docId+"/corriger",{method:"POST",body:fd}).
 function showFT(n,el){try{document.querySelectorAll("#fact-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-factures .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("ft-"+n);if(tc)tc.classList.add("active");if(n==="suivi")loadPayStatuses();}catch(e){console.error("showFT error:",n,e);}}
 
 var factFile=null;
-document.getElementById("fi-fact").addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});
+var _fiFact=document.getElementById("fi-fact");
+if(_fiFact){_fiFact.addEventListener("change",function(e){factFile=e.target.files[0];if(factFile){document.getElementById("fact-fn").innerHTML="<div class='fi'><span class='nm'>"+factFile.name+"</span></div>";document.getElementById("btn-fact").disabled=false;}});}
 
 function analyserFacture(){
 if(!factFile)return;var fd=new FormData();fd.append("fichier",factFile);
@@ -14093,9 +14124,10 @@ var csv="";for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll(
 var blob=new Blob([csv],{type:"text/csv;charset=utf-8"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_"+name+".csv";a.click();toast("Export telecharge.","ok");}
 
 /* === MODE ANALYSE === */
-document.getElementById("mode-analyse").addEventListener("change",function(){
+var _modeAzSel=document.getElementById("mode-analyse");
+if(_modeAzSel){_modeAzSel.addEventListener("change",function(){
 var m=this.value;var msgs={"simple":"Analyse simple : detection des ecarts de taux et montants.","social":"Audit social : verification complete des cotisations, DSN, conges, conventions collectives.","fiscal":"Audit fiscal : coherence TVA, charges deductibles, IS/IR, declarations fiscales.","complet":"Audit complet : verification de toutes les coherences sociales, fiscales, DSN et rapprochements."};
-document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});
+document.getElementById("mode-info").innerHTML="<span class='ai'>&#128161;</span><span>"+msgs[m]+"</span>";});}
 
 /* === FILE INTERPRETATION + AUDIT === */
 function showFileInterpretation(data){

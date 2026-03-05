@@ -324,7 +324,23 @@ class AnomalyDetector(BaseAnalyzer):
                                     reference_legale="Decret n°82-103 du 22/01/1982 - Format NIR",
                                 ))
                         except (ValueError, IndexError):
-                            pass
+                            findings.append(Finding(
+                                categorie=FindingCategory.ANOMALIE,
+                                severite=Severity.MOYENNE,
+                                titre=f"NIR non verifiable ({emp.prenom} {emp.nom})",
+                                description=(
+                                    f"Le NIR de {emp.prenom} {emp.nom} contient des "
+                                    f"caracteres non numeriques (hors Corse 2A/2B) et la "
+                                    f"cle de controle n'a pas pu etre verifiee.\\n\\n"
+                                    f"Que faire ?\\n"
+                                    f"Verifier le NIR aupres du salarie (carte vitale)."
+                                ),
+                                score_risque=50,
+                                recommandation="Verifier le NIR aupres du salarie.",
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id or decl.id],
+                                reference_legale="Art. R.114-7 CSS - NIR",
+                            ))
 
         # Verification net > brut (anomalie logique)
         for emp in decl.employes:
@@ -637,41 +653,112 @@ class AnomalyDetector(BaseAnalyzer):
                             reference_legale="CSS art. L242-1, arrete du 10/12/2002 - Evaluation AN ; CGI art. 82",
                         ))
 
-        # --- Prevoyance non-cadre CCN manquante ---
-        # URSSAF : obligation de prevoyance conventionnelle (verifier si CCN l'impose)
+        # --- Mutuelle obligatoire manquante (ANI 2013) ---
+        # Depuis le 01/01/2016, TOUS les salaries doivent beneficier d'une
+        # complementaire sante obligatoire financee a 50% minimum par l'employeur.
         for emp in decl.employes:
             emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
-            statut = (emp.statut or "").lower()
-            if emp_cots and "cadre" not in statut and not _est_apprenti(emp):
+            if emp_cots and not _est_apprenti(emp):
+                mutuelle_cots = [c for c in emp_cots if c.type_cotisation in (
+                    ContributionType.MUTUELLE_OBLIGATOIRE,
+                )]
                 prev_cots = [c for c in emp_cots if c.type_cotisation in (
                     ContributionType.PREVOYANCE_NON_CADRE,
                     ContributionType.PREVOYANCE_CADRE,
-                    ContributionType.MUTUELLE_OBLIGATOIRE,
                 )]
-                if not prev_cots:
+                if not mutuelle_cots and not prev_cots:
                     findings.append(Finding(
                         categorie=FindingCategory.DONNEE_MANQUANTE,
-                        severite=Severity.FAIBLE,
-                        titre=f"Mutuelle/prevoyance non detectee ({emp.prenom} {emp.nom})",
+                        severite=Severity.HAUTE,
+                        titre=f"Mutuelle obligatoire absente ({emp.prenom} {emp.nom})",
                         description=(
-                            f"Aucune cotisation de mutuelle obligatoire ou de prevoyance "
+                            f"Aucune cotisation de complementaire sante obligatoire "
                             f"n'est detectee pour {emp.prenom} {emp.nom}.\\n\\n"
-                            f"Depuis l'ANI du 11/01/2013, tout employeur doit proposer "
-                            f"une complementaire sante avec prise en charge minimale de 50%. "
-                            f"De plus, de nombreuses conventions collectives imposent une "
-                            f"prevoyance supplementaire (incapacite, invalidite, deces).\\n\\n"
+                            f"Ou se trouve l'erreur ?\\n"
+                            f"Sur le bulletin de paie de {emp.prenom} {emp.nom}, la ligne "
+                            f"\"Mutuelle\" ou \"Complementaire sante\" est absente.\\n\\n"
+                            f"Pourquoi c'est un probleme ?\\n"
+                            f"Depuis le 1er janvier 2016 (loi ANI du 14/06/2013), TOUT "
+                            f"employeur du secteur prive doit proposer une complementaire "
+                            f"sante a ses salaries et financer au minimum 50% de la cotisation. "
+                            f"L'absence de mutuelle expose l'employeur a :\\n"
+                            f"- Un redressement URSSAF des avantages sociaux\\n"
+                            f"- La prise en charge des frais de sante du salarie\\n"
+                            f"- Des sanctions au titre du non-respect de la CCN\\n\\n"
                             f"Note : cette cotisation peut etre regroupee sous un autre libelle "
-                            f"ou prelevee hors paie."
+                            f"ou prelevee hors bulletin de paie (organisme externe)."
                         ),
-                        score_risque=30,
+                        score_risque=70,
                         recommandation=(
-                            "Verifier la presence de la mutuelle obligatoire (ANI 2013) et "
-                            "de la prevoyance conventionnelle. Si prelevee hors paie, "
-                            "ce constat n'est pas significatif."
+                            "Verifier que la mutuelle obligatoire est bien souscrite et "
+                            "apparait sur le bulletin. Si prelevee hors paie par un organisme "
+                            "tiers, ce constat n'est pas significatif."
                         ),
                         detecte_par=self.nom,
                         documents_concernes=[decl.source_document_id or decl.id],
-                        reference_legale="CSS art. L911-7 (ANI 2013 mutuelle obligatoire), CCN applicable",
+                        reference_legale="CSS art. L911-7 (ANI 2013), L911-7-1 (panier de soins minimum)",
+                    ))
+                # Verifier la part patronale >= 50%
+                for mc in mutuelle_cots:
+                    if mc.montant_patronal > 0 and mc.montant_salarial > 0:
+                        total_mut = mc.montant_patronal + mc.montant_salarial
+                        part_patronale = mc.montant_patronal / total_mut
+                        if part_patronale < Decimal("0.49"):  # Tolerance 1%
+                            findings.append(Finding(
+                                categorie=FindingCategory.ANOMALIE,
+                                severite=Severity.HAUTE,
+                                titre=f"Mutuelle : part employeur < 50% ({emp.prenom} {emp.nom})",
+                                description=(
+                                    f"Ou se trouve l'erreur ?\\n"
+                                    f"Sur le bulletin de {emp.prenom} {emp.nom}, la part "
+                                    f"employeur de la mutuelle est de {mc.montant_patronal:.2f} EUR "
+                                    f"sur un total de {total_mut:.2f} EUR, soit "
+                                    f"{float(part_patronale)*100:.0f}%.\\n\\n"
+                                    f"Pourquoi c'est un probleme ?\\n"
+                                    f"La loi impose a l'employeur de financer au minimum 50% "
+                                    f"de la cotisation de complementaire sante.\\n\\n"
+                                    f"Que faire ?\\n"
+                                    f"Augmenter la part employeur a minimum 50% du total."
+                                ),
+                                valeur_constatee=f"{float(part_patronale)*100:.0f}% patronal",
+                                valeur_attendue=">= 50% patronal",
+                                score_risque=75,
+                                recommandation="Augmenter la part patronale de la mutuelle a minimum 50%.",
+                                detecte_par=self.nom,
+                                documents_concernes=[decl.source_document_id or decl.id],
+                                reference_legale="CSS art. L911-7 al.2 - Prise en charge employeur >= 50%",
+                            ))
+
+        # --- Prevoyance cadre obligatoire (CCN 1947) ---
+        for emp in decl.employes:
+            emp_cots = [c for c in decl.cotisations if c.employe_id == emp.id]
+            statut = (emp.statut or "").lower()
+            if emp_cots and "cadre" in statut:
+                prev_cadre = [c for c in emp_cots if c.type_cotisation == ContributionType.PREVOYANCE_CADRE]
+                if not prev_cadre:
+                    findings.append(Finding(
+                        categorie=FindingCategory.DONNEE_MANQUANTE,
+                        severite=Severity.HAUTE,
+                        titre=f"Prevoyance cadre obligatoire absente ({emp.prenom} {emp.nom})",
+                        description=(
+                            f"Ou se trouve l'erreur ?\\n"
+                            f"Sur le bulletin de {emp.prenom} {emp.nom} (statut cadre), "
+                            f"aucune cotisation de prevoyance cadre n'est detectee.\\n\\n"
+                            f"Pourquoi c'est un probleme ?\\n"
+                            f"La CCN des cadres de 1947 (art. 7) et l'ANI de 2017 imposent "
+                            f"une cotisation prevoyance deces d'au moins 1.50% de la tranche 1 "
+                            f"(fraction du salaire <= PASS), entierement a la charge de "
+                            f"l'employeur.\\n\\n"
+                            f"Que faire ?\\n"
+                            f"1. Verifier le contrat de prevoyance cadre de l'entreprise\\n"
+                            f"2. Ajouter la cotisation prevoyance cadre (min 1.50% T1 patronal)\\n"
+                            f"3. Regulariser les periodes anterieures si necessaire"
+                        ),
+                        score_risque=80,
+                        recommandation="Souscrire un contrat de prevoyance cadre avec cotisation min 1.50% T1.",
+                        detecte_par=self.nom,
+                        documents_concernes=[decl.source_document_id or decl.id],
+                        reference_legale="CCN Cadres 1947 art. 7, ANI 2017 - Prevoyance deces cadres min 1.50% T1",
                     ))
 
         # --- Retraite complementaire T2 ---
@@ -1077,7 +1164,45 @@ class AnomalyDetector(BaseAnalyzer):
                     reference_legale="Art. L6243-2 Code du travail - Exoneration apprentis",
                 ))
 
-        # 3. Verification du calcul base * taux = montant
+        # 2b. Verification du taux salarial
+        if c.taux_salarial > 0 and not est_apprenti:
+            conforme, taux_attendu = self.rules.verifier_taux(
+                c.type_cotisation, c.taux_salarial, c.base_brute, est_patronal=False
+            )
+            if not conforme and taux_attendu is not None:
+                ecart_montant = Decimal("0")
+                if c.assiette > 0:
+                    ecart_montant = abs(
+                        (c.assiette * c.taux_salarial) - (c.assiette * taux_attendu)
+                    ).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                ct_label = c.type_cotisation.value.replace("_", " ")
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.HAUTE if ecart_montant > Decimal("50") else Severity.MOYENNE,
+                    titre=f"Taux salarial incorrect - {ct_label} ({nom_employe})",
+                    description=(
+                        f"Ou se trouve l'erreur ?\\n"
+                        f"Sur le bulletin de {nom_employe}, ligne \"{ct_label}\" (part salariale).\\n\\n"
+                        f"Quel est le probleme ?\\n"
+                        f"Le taux salarial applique est de {float(c.taux_salarial)*100:.2f}%, "
+                        f"alors que le taux legal 2026 est de {float(taux_attendu)*100:.2f}%.\\n\\n"
+                        f"Impact sur le salarie : ecart de {ecart_montant} EUR sur ce bulletin. "
+                        f"Un taux trop eleve reduit le net a payer ; un taux trop bas entraine "
+                        f"un redressement URSSAF avec rappel de cotisations.\\n\\n"
+                        f"Que faire ?\\n"
+                        f"Corriger le taux dans le logiciel de paie et recalculer les bulletins."
+                    ),
+                    valeur_constatee=f"{float(c.taux_salarial)*100:.2f}%",
+                    valeur_attendue=f"{float(taux_attendu)*100:.2f}%",
+                    montant_impact=ecart_montant,
+                    score_risque=70,
+                    recommandation=f"Corriger le taux salarial de {ct_label} a {float(taux_attendu)*100:.2f}%.",
+                    detecte_par=self.nom,
+                    documents_concernes=[c.source_document_id],
+                    reference_legale="Bareme URSSAF 2026 - Art. L241-6 et D242-1 CSS",
+                ))
+
+        # 3. Verification du calcul base * taux = montant (patronal)
         if c.taux_patronal > 0 and c.assiette > 0 and c.montant_patronal > 0:
             montant_calcule = (c.assiette * c.taux_patronal).quantize(
                 Decimal("0.01"), ROUND_HALF_UP
@@ -1111,6 +1236,40 @@ class AnomalyDetector(BaseAnalyzer):
                         "Verifier le calcul de cette ligne. Un ecart peut "
                         "provenir d'un arrondi ou d'une proratisation."
                     ),
+                    detecte_par=self.nom,
+                    documents_concernes=[c.source_document_id],
+                ))
+
+        # 3b. Verification du calcul base * taux = montant (salarial)
+        if c.taux_salarial > 0 and c.assiette > 0 and c.montant_salarial > 0:
+            montant_calcule = (c.assiette * c.taux_salarial).quantize(
+                Decimal("0.01"), ROUND_HALF_UP
+            )
+            ecart = abs(c.montant_salarial - montant_calcule)
+            if ecart > TOLERANCE_MONTANT:
+                ct_label = c.type_cotisation.value.replace("_", " ")
+                findings.append(Finding(
+                    categorie=FindingCategory.ANOMALIE,
+                    severite=Severity.MOYENNE,
+                    titre=f"Erreur de calcul salarial - {ct_label} ({nom_employe})",
+                    description=(
+                        f"Ou se trouve l'erreur ?\\n"
+                        f"Sur le bulletin de {nom_employe}, ligne \"{ct_label}\" (part salariale).\\n\\n"
+                        f"Quel est le probleme ?\\n"
+                        f"Le montant salarial inscrit ({c.montant_salarial} EUR) ne correspond pas "
+                        f"au calcul : {c.assiette} EUR x {float(c.taux_salarial)*100:.2f}% = "
+                        f"{montant_calcule} EUR.\\n"
+                        f"Ecart : {ecart} EUR.\\n\\n"
+                        f"Consequence pour le salarie : son net a payer est impacte de {ecart} EUR.\\n\\n"
+                        f"Que faire ?\\n"
+                        f"Verifier si un prorata ou une regularisation explique l'ecart. "
+                        f"Sinon, corriger dans le logiciel de paie."
+                    ),
+                    valeur_constatee=str(c.montant_salarial),
+                    valeur_attendue=str(montant_calcule),
+                    montant_impact=ecart,
+                    score_risque=60,
+                    recommandation="Verifier le calcul salarial de cette ligne de cotisation.",
                     detecte_par=self.nom,
                     documents_concernes=[c.source_document_id],
                 ))
