@@ -302,11 +302,12 @@ def set_auth_cookie(response: Response, token: str):
         samesite="lax",
         max_age=TOKEN_EXPIRY_HOURS * 3600,
         secure=_use_secure,
+        path="/",  # Envoyer le cookie sur toutes les routes
     )
 
 
 def clear_auth_cookie(response: Response):
-    response.delete_cookie(key="nc_token")
+    response.delete_cookie(key="nc_token", path="/")
 
 
 # =========================================

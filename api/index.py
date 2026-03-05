@@ -66,6 +66,14 @@ _MAX_FILES = int(os.getenv("NORMACHECK_MAX_FILES", "50" if _IS_OVH else "20"))
 _MAX_UPLOAD_MB = int(os.getenv("NORMACHECK_MAX_UPLOAD_MB", "2000" if _IS_OVH else "500"))
 _MAX_FILE_MB = int(os.getenv("NORMACHECK_MAX_FILE_MB", "50"))  # Limite par fichier
 
+# --- Tarification (source unique de verite pour les prix) ---
+# Les prix sont MENSUELS HT. Modifier ici met a jour partout automatiquement.
+_PRICING = {
+    "solo":    {"prix_mensuel": 5.00,    "profils": 1,  "label": "Solo"},
+    "equipe":  {"prix_mensuel": 8.33,    "profils": 3,  "label": "Equipe"},
+    "cabinet": {"prix_mensuel": 15.00,   "profils": 10, "label": "Cabinet"},
+}
+
 # --- Persistence (OVHcloud: fichiers JSON / Vercel: in-memory) ---
 _persist = None
 if _IS_OVH:
@@ -249,8 +257,8 @@ async def rate_limit_middleware(request: Request, call_next):
 # --- Middleware authentification (protege /api/* sauf whitelist) ---
 _AUTH_WHITELIST = {"/api/auth/login", "/api/auth/register", "/api/auth/logout",
                    "/api/auth/verify-email", "/api/auth/resend-verification",
-                   "/api/health", "/api/version", "/api/collaboration/valider",
-                   "/api/collaboration/finaliser"}
+                   "/api/health", "/api/version", "/api/pricing",
+                   "/api/collaboration/valider", "/api/collaboration/finaliser"}
 
 
 @app.middleware("http")
@@ -482,6 +490,25 @@ async def health_check():
     return checks
 
 
+@app.get("/api/pricing")
+async def get_pricing():
+    """Retourne la grille tarifaire officielle (source unique de verite).
+
+    Tous les prix sont mensuels HT. L'equivalent annuel est calcule automatiquement.
+    """
+    plans = []
+    for key, plan in _PRICING.items():
+        plans.append({
+            "id": key,
+            "label": plan["label"],
+            "prix_mensuel_ht": plan["prix_mensuel"],
+            "prix_annuel_ht": round(plan["prix_mensuel"] * 12, 2),
+            "profils_max": plan["profils"],
+            "periodicite": "mensuel",
+        })
+    return {"plans": plans, "devise": "EUR", "tva": "applicable en sus"}
+
+
 # ==============================
 # PAGES
 # ==============================
@@ -615,6 +642,26 @@ async def auth_me(request: Request):
     if not user:
         raise HTTPException(401, "Non authentifie")
     return user
+
+
+@app.post("/api/auth/refresh")
+async def auth_refresh(request: Request):
+    """Renouvelle le token JWT si la session est encore valide.
+
+    Appele automatiquement par le frontend toutes les 20 minutes
+    pour eviter les deconnexions inattendues pendant l'utilisation.
+    """
+    user = get_optional_user(request)
+    if not user:
+        raise HTTPException(401, "Session expiree")
+    # get_optional_user retourne un user sans password_hash, compatible avec generate_token
+    full_user = get_user(user["email"])
+    if not full_user:
+        full_user = user
+    token = generate_token(full_user)
+    response = JSONResponse({"status": "ok", "refreshed": True})
+    set_auth_cookie(response, token)
+    return response
 
 
 @app.post("/api/dashboard/save")
@@ -1771,7 +1818,13 @@ async def analyser_documents(
             safe_name = Path(raw_name).name if raw_name else ""
             if not safe_name or safe_name.startswith("."):
                 safe_name = f"upload_{len(chemins)}"
+            # Eviter les collisions si deux fichiers ont le meme nom
             chemin = Path(td) / safe_name
+            if chemin.exists():
+                stem = Path(safe_name).stem
+                suffix = Path(safe_name).suffix
+                safe_name = f"{stem}_{len(chemins)}{suffix}"
+                chemin = Path(td) / safe_name
             chemin.write_bytes(data)
             chemins.append(chemin)
 
@@ -12169,7 +12222,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div class="plans">
 <div class="plan">
 <h3>Solo</h3>
-<div class="price">60 EUR <em>HT / an</em></div>
+<div class="price">5 EUR <em>HT / mois</em></div>
 <div class="profiles">1 profil utilisateur</div>
 <ul>
 <li>Analyses illimitees</li>
@@ -12184,7 +12237,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 </div>
 <div class="plan pop">
 <h3>Equipe</h3>
-<div class="price">100 EUR <em>HT / an</em></div>
+<div class="price">8.33 EUR <em>HT / mois</em></div>
 <div class="profiles">Jusqu'a 3 profils</div>
 <ul>
 <li>Tout Solo +</li>
@@ -12199,7 +12252,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 </div>
 <div class="plan">
 <h3>Cabinet</h3>
-<div class="price">180 EUR <em>HT / an</em></div>
+<div class="price">15 EUR <em>HT / mois</em></div>
 <div class="profiles">Jusqu'a 10 profils</div>
 <ul>
 <li>Tout Equipe +</li>
@@ -12255,9 +12308,9 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div id="reg-step-1">
 <label for="r-offre">Offre choisie</label>
 <div class="offer-selector" id="offer-selector">
-<label class="offer-opt selected" data-offer="solo"><input type="radio" name="offre" value="solo" checked style="display:none"><strong>Solo</strong><span>1 profil - 60 EUR/an</span></label>
-<label class="offer-opt" data-offer="equipe"><input type="radio" name="offre" value="equipe" style="display:none"><strong>Equipe</strong><span>3 profils - 100 EUR/an</span></label>
-<label class="offer-opt" data-offer="cabinet"><input type="radio" name="offre" value="cabinet" style="display:none"><strong>Cabinet</strong><span>10 profils - 180 EUR/an</span></label>
+<label class="offer-opt selected" data-offer="solo"><input type="radio" name="offre" value="solo" checked style="display:none"><strong>Solo</strong><span>1 profil - 5 EUR/mois</span></label>
+<label class="offer-opt" data-offer="equipe"><input type="radio" name="offre" value="equipe" style="display:none"><strong>Equipe</strong><span>3 profils - 8.33 EUR/mois</span></label>
+<label class="offer-opt" data-offer="cabinet"><input type="radio" name="offre" value="cabinet" style="display:none"><strong>Cabinet</strong><span>10 profils - 15 EUR/mois</span></label>
 </div>
 <label for="r-role">Votre role</label>
 <select id="r-role" style="width:100%;padding:11px 14px;border:1.5px solid var(--slate-200);border-radius:8px;font-size:.93em;margin-bottom:12px;background:var(--slate-50);font-family:inherit">
@@ -12327,7 +12380,7 @@ function selectOffer(o){document.querySelectorAll(".offer-opt").forEach(function
 document.querySelectorAll(".offer-opt").forEach(function(el){el.addEventListener("click",function(){selectOffer(el.dataset.offer);});});
 function doReg(){var nom=document.getElementById("rn").value.trim();var prenom=document.getElementById("rp2").value.trim();var email=document.getElementById("re").value.trim();var pwd=document.getElementById("rpw").value;var role=document.getElementById("r-role").value;var offre=document.querySelector('input[name="offre"]:checked').value;var entreprise=document.getElementById("r-entreprise").value.trim();var tel=document.getElementById("r-tel").value.trim();if(!nom||!prenom||!email){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Nom, prenom et email sont obligatoires.";return;}if(!role){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Veuillez selectionner votre role.";return;}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Adresse email invalide.";return;}if(pwd.length<12){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir au moins 12 caracteres.";return;}if(pwd===pwd.toLowerCase()||pwd===pwd.toUpperCase()){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Le mot de passe doit contenir des majuscules et des minuscules.";return;}if(pwd!==document.getElementById("rpw2").value){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Les mots de passe ne correspondent pas.";return;}if(!document.getElementById("cgv").checked){var m2=document.getElementById("amsg");m2.className="msg err";m2.textContent="Veuillez accepter les CGU et CGV.";return;}var btn=document.querySelector("#reg-step-1 .submit-btn");btn.disabled=true;btn.textContent="Creation...";var fd=new FormData();fd.append("nom",nom);fd.append("prenom",prenom);fd.append("email",email);fd.append("mot_de_passe",pwd);fd.append("offre",offre);fd.append("role",role);fd.append("entreprise",entreprise);fd.append("telephone",tel);_regEmail=email;fetch("/api/auth/register",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur lors de l inscription")});return r.json();}).then(function(d){sessionStorage.setItem("nc_user",JSON.stringify(d));document.getElementById("reg-step-1").style.display="none";document.getElementById("reg-step-verify").style.display="block";var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Compte cree ! Verifiez votre email.";}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;btn.disabled=false;btn.textContent="Creer mon compte";});}
 function doVerify(){var code=document.getElementById("r-verif-code").value.trim();if(!code||code.length!==6){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Saisissez le code a 6 chiffres.";return;}var fd=new FormData();fd.append("email",_regEmail);fd.append("code",code);fetch("/api/auth/verify-email",{method:"POST",body:fd,credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Code invalide")});return r.json();}).then(function(){var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Email verifie ! Redirection...";setTimeout(function(){window.location.href="/app"},800);}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message;});}
-function doResendCode(){fetch("/api/auth/resend-verification",{method:"POST",credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Nouveau code envoye a votre adresse email.";}).catch(function(){var m=document.getElementById("amsg");m.className="msg err";m.textContent="Erreur lors du renvoi du code.";});}
+function doResendCode(){fetch("/api/auth/resend-verification",{method:"POST",credentials:"same-origin"}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){var m=document.getElementById("amsg");m.className="msg ok";m.textContent="Nouveau code envoye a votre adresse email.";}).catch(function(e){var m=document.getElementById("amsg");m.className="msg err";m.textContent=e.message||"Erreur lors du renvoi du code.";});}
 </script>
 </body>
 </html>"""
@@ -12509,9 +12562,9 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 1 - Offres et tarifs</h2>
 <p>NormaCheck propose une tarification adaptative basee sur le nombre de profils utilisateurs :</p>
 <ul>
-<li><strong>Solo (60 EUR HT/an) :</strong> 1 profil utilisateur - Analyses illimitees, comptabilite, generation DSN, gestion factures, simulations, veille juridique 2020-2026, export CSV</li>
-<li><strong>Equipe (100 EUR HT/an) :</strong> Jusqu'a 3 profils - Tout Solo + collaboration multi-profils, profil decisionnaire, tracabilite, bibliotheque partagee, audit trail, support prioritaire</li>
-<li><strong>Cabinet (180 EUR HT/an) :</strong> Jusqu'a 10 profils - Tout Equipe + multi-dossiers (portefeuille), DSN multi-etablissements, veille personnalisee, accompagnement demarrage, support dedie</li>
+<li><strong>Solo (5 EUR HT/mois, soit 60 EUR HT/an) :</strong> 1 profil utilisateur - Analyses illimitees, comptabilite, generation DSN, gestion factures, simulations, veille juridique 2020-2026, export CSV</li>
+<li><strong>Equipe (8,33 EUR HT/mois, soit 100 EUR HT/an) :</strong> Jusqu'a 3 profils - Tout Solo + collaboration multi-profils, profil decisionnaire, tracabilite, bibliotheque partagee, audit trail, support prioritaire</li>
+<li><strong>Cabinet (15 EUR HT/mois, soit 180 EUR HT/an) :</strong> Jusqu'a 10 profils - Tout Equipe + multi-dossiers (portefeuille), DSN multi-etablissements, veille personnalisee, accompagnement demarrage, support dedie</li>
 </ul>
 <p>Les prix sont indiques hors taxes. TVA applicable en sus au taux en vigueur. L'editeur se reserve le droit de modifier ses tarifs, les modifications ne s'appliquant pas aux licences en cours.</p>
 
@@ -12918,8 +12971,24 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <script>
 /* === CORE NAV (inline before content to guarantee availability) === */
 var _ncUser=null;
+var _refreshingToken=false;
+var _refreshPromise=null;
 /* Global fetch wrapper: auto-include credentials for API calls */
 (function(){var _origFetch=window.fetch;window.fetch=function(url,opts){opts=opts||{};if(typeof url==="string"&&url.indexOf("/api/")>=0){if(!opts.credentials)opts.credentials="same-origin";}return _origFetch.call(this,url,opts);};})();
+/* Token auto-refresh: renouvelle le cookie JWT toutes les 20 min pour eviter les deconnexions */
+var _tokenRefreshInterval=setInterval(function(){
+if(!_ncUser)return;
+fetch("/api/auth/refresh",{method:"POST"}).then(function(r){
+if(!r.ok&&r.status===401){clearInterval(_tokenRefreshInterval);toast("Session expiree. Reconnexion dans 5 secondes...");setTimeout(function(){window.location.href="/";},5000);}
+}).catch(function(){});
+},20*60*1000);
+/* Fonction de refresh token utilisable par safeJson */
+function _tryRefreshToken(){
+if(_refreshingToken)return _refreshPromise;
+_refreshingToken=true;
+_refreshPromise=fetch("/api/auth/refresh",{method:"POST"}).then(function(r){_refreshingToken=false;return r.ok;}).catch(function(){_refreshingToken=false;return false;});
+return _refreshPromise;
+}
 var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
 function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
 function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
@@ -12951,7 +13020,7 @@ if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetai
 function doLogout(){fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"}).then(function(){sessionStorage.removeItem("nc_user");sessionStorage.removeItem("nc_analysis");window.location.href="/";}).catch(function(){window.location.href="/";});}
 function goToRH(){showS('rh');}
 function goToRHContrats(){showS('rh');setTimeout(function(){if(typeof showRHTab==="function")showRHTab('contrats',document.querySelector('#rh-tabs .tab:nth-child(2)'));},200);}
-function safeJson(r){if(!r.ok){if(r.status===401){toast("Session expiree. Reconnexion dans 3 secondes...");setTimeout(function(){window.location.href="/";},3000);throw new Error("Session expiree - reconnectez-vous");}return r.json().then(function(e){throw new Error(e.detail||"Erreur serveur ("+r.status+")")}).catch(function(parseErr){if(parseErr.message&&parseErr.message!=="Erreur serveur ("+r.status+")")throw parseErr;throw new Error("Erreur serveur ("+r.status+")");});}return r.json();}
+function safeJson(r){if(!r.ok){if(r.status===401){return _tryRefreshToken().then(function(refreshed){if(refreshed){toast("Session renouvelee. Veuillez reessayer.","ok");throw new Error("Session renouvelee - reessayez");}else{toast("Session expiree. Reconnexion dans 5 secondes...");setTimeout(function(){window.location.href="/";},5000);throw new Error("Session expiree - reconnectez-vous");}});}return r.json().then(function(e){throw new Error(e.detail||"Erreur serveur ("+r.status+")")}).catch(function(parseErr){if(parseErr.message&&parseErr.message!=="Erreur serveur ("+r.status+")")throw parseErr;throw new Error("Erreur serveur ("+r.status+")");});}return r.json();}
 function gv(id){var el=document.getElementById(id);return el?el.value:"";}
 function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g," ")+" EUR":n;}
 function fmtN(n){return typeof n==="number"?n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g," "):String(n);}
@@ -14257,7 +14326,12 @@ La conformite n est pas un etat statique. Les regles changent (SMIC, taux, oblig
 APP_HTML += """
 <script>
 /* === AUTH CHECK === */
-(function(){fetch("/api/auth/me",{credentials:"same-origin"}).then(function(r){if(!r.ok){window.location.href="/";return null;}return r.json();}).then(function(u){if(!u)return;_ncUser=u;var su=document.getElementById("sidebar-user");if(su)su.textContent=(u.prenom||"")+" "+(u.nom||"")+" ("+u.role+")";}).catch(function(){window.location.href="/";});})();
+(function(){fetch("/api/auth/me").then(function(r){if(!r.ok){
+/* Tenter un refresh du token avant de rediriger */
+return _tryRefreshToken().then(function(refreshed){
+if(refreshed){return fetch("/api/auth/me").then(function(r2){return r2.ok?r2.json():null;});}
+toast("Session expiree. Reconnexion dans 5 secondes...");setTimeout(function(){window.location.href="/";},5000);return null;
+});}return r.json();}).then(function(u){if(!u)return;_ncUser=u;var su=document.getElementById("sidebar-user");if(su)su.textContent=(u.prenom||"")+" "+(u.nom||"")+" ("+u.role+")";}).catch(function(e){console.error("Auth check failed:",e);toast("Erreur de connexion. Verifiez votre reseau.");});})();
 
 /* === INIT === */
 try{var _td=document.getElementById("topbar-date");if(_td)_td.textContent=new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"long",year:"numeric"});}catch(e){}
@@ -14386,7 +14460,7 @@ var integ=document.getElementById("chk-integrer").checked;
 var modeAz=document.getElementById("mode-analyse").value;
 fetch("/api/analyze?format_rapport=json&integrer="+integ+"&mode_analyse="+modeAz,{method:"POST",body:fd}).then(function(resp){
 clearInterval(iv);fill.style.width="100%";txt.textContent="Termine !";
-if(!resp.ok)return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});
+if(!resp.ok){if(resp.status===401){return _tryRefreshToken().then(function(ok){if(ok){toast("Session renouvelee. Relancez l analyse.","ok");}else{toast("Session expiree. Reconnexion...");setTimeout(function(){window.location.href="/";},5000);}throw new Error("Session expiree");});}return resp.json().then(function(e){throw new Error(e.detail||"Erreur")});}
 return resp.json().then(function(data){analysisData=data;try{sessionStorage.setItem("nc_analysis",JSON.stringify(data));}catch(e){}saveDashServer(data);showJsonResults(data);});
 }).then(function(){setTimeout(function(){prg.style.display="none";},800);document.getElementById("res-analyse").style.display="block";}).catch(function(e){clearInterval(iv);prg.style.display="none";toast(e.message);btn.disabled=false;});
 }
@@ -14746,14 +14820,14 @@ var _sugTimer=null;
 function suggestCompte(inputId,sugId,counterpartId){
 clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
 var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
-fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)+"&description="+encodeURIComponent(v),{headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(d){
+fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)+"&description="+encodeURIComponent(v)).then(safeJson).then(function(d){
 var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
 var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";var expl=items[i].explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:8px 10px' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><div><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>"+(expl?"<div style='font-size:.78em;color:var(--tx2);margin-top:2px;line-height:1.3'>"+expl+"</div>":"")+"</div>";}
 h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(e){console.error("Suggestion error:",e);});},250);}
 var _sugSearchTimer=null;
 function suggestByDescription(){clearTimeout(_sugSearchTimer);_sugSearchTimer=setTimeout(function(){
 var v=document.getElementById("em-search").value;if(v.length<2){closeSugs("em-search-sug");return;}
-fetch("/api/comptabilite/suggestions?description="+encodeURIComponent(v),{headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(d){
+fetch("/api/comptabilite/suggestions?description="+encodeURIComponent(v)).then(safeJson).then(function(d){
 var box=document.getElementById("em-search-sug");var items=d.suggestions||[];if(!items.length){closeSugs("em-search-sug");return;}
 var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<10;i++){var item=items[i];var expl=item.explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:10px 12px;cursor:pointer' data-num='"+item.numero+"'><div style='display:flex;align-items:center;gap:8px'><span class='sug-num' style='font-size:.95em'>"+item.numero+"</span><span class='sug-lbl' style='font-weight:600;color:var(--tx)'>"+item.libelle+"</span></div>"+(expl?"<div style='font-size:.82em;color:var(--tx2);margin-top:3px;line-height:1.4'>&#128161; "+expl+"</div>":"")+"</div>";}
 h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){var num=el.getAttribute("data-num");document.getElementById("em-deb").value=num;closeSugs("em-search-sug");suggestCompte("em-deb","em-deb-sug","em-cre");});});}).catch(function(){});},300);}
@@ -15398,7 +15472,7 @@ try{var sid=data.session_id||"";
 fetch("/api/proof/seal-score",{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify({session_id:sid,scores:{urssaf:ts.urssaf,fiscal:ts.fiscal,cdc:ts.cdc,global:ts.global},
 constats:data.constats||[],nb_documents:(data.declarations||[]).length}),
-credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+credentials:"same-origin"}).then(safeJson).then(function(d){
 if(d.status==="ok")console.info("Score scelle dans la chaine de preuve: seq="+d.seq+", hash="+d.hash);
 }).catch(function(e){console.warn("Erreur scellement preuve:",e);});}catch(e){}}
 function renderScoreDetails(){
@@ -15463,7 +15537,7 @@ var ts=calculateTripleScore(analysisData);
 var justif=prompt("Justification de la demande de validation (facultatif pour validation simple) :");
 fetch("/api/scores/validation-humaine",{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify({session_id:sid,action:"valider",score_original:ts.global,justification:justif||"Validation demandee par l operateur"}),
-credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+credentials:"same-origin"}).then(safeJson).then(function(d){
 if(d.status==="ok"){toast("Score valide par intervention humaine. Ref: seq="+d.validation.proof_seq+", hash="+d.validation.proof_hash.substring(0,12)+"...","ok");
 /* Mettre a jour l indicateur visuel */
 var banner=document.querySelector("#score-detail-global > div:first-child");
@@ -15480,7 +15554,7 @@ var constatsStr=prompt("Titre(s) des constats contestes (separes par des virgule
 var constatsContestes=constatsStr?constatsStr.split(",").map(function(s){return s.trim();}):[];
 fetch("/api/scores/contestation",{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify({session_id:sid,constats_contestes:constatsContestes,motif:motif}),
-credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+credentials:"same-origin"}).then(safeJson).then(function(d){
 if(d.status==="ok"){toast("Contestation enregistree (ref: seq="+d.contestation.proof_seq+"). Reexamen humain sous 30 jours.","ok");
 var banner=document.querySelector("#score-detail-global > div:first-child");
 if(banner){banner.style.borderColor="#dc2626";banner.style.background="#fef2f2";
@@ -15909,7 +15983,7 @@ function renderCalendar(){renderPlanningView();}
 document.addEventListener("click",function(ev){
 var target=ev.target.closest("[data-pl-action]");if(!target)return;
 var action=target.getAttribute("data-pl-action");var pid=target.getAttribute("data-pl-id");var sid=target.getAttribute("data-pl-sid");
-if(action==="delete"){if(!confirm("Supprimer ce creneau ?"))return;fetch("/api/rh/planning/"+pid,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Creneau supprime.","ok");renderPlanningView();}).catch(function(e){toast(e.message);});}
+if(action==="delete"){if(!confirm("Supprimer ce creneau ?"))return;fetch("/api/rh/planning/"+pid,{method:"DELETE"}).then(safeJson).then(function(){toast("Creneau supprime.","ok");renderPlanningView();}).catch(function(e){toast(e.message);});}
 if(action==="edit-statut"){var newSt=target.getAttribute("data-pl-statut");var fd=new FormData();fd.append("salarie_id",sid);fd.append("date",target.getAttribute("data-pl-date"));fd.append("statut",newSt);rhPost("/api/rh/planning",fd,function(){toast("Statut modifie.","ok");renderPlanningView();});}
 });
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
@@ -15980,9 +16054,9 @@ if(a.statut!=="archivee")h+="<button class='btn btn-sm btn-s' data-action='archi
 h+="<button class='btn btn-sm btn-red' data-action='suppAlerte' data-id='"+a.id+"'>Supprimer</button>";
 h+="</div></div>";}
 el.innerHTML=h;});}
-function marquerAlerteTraitee(id){var fd=new FormData();fd.append("statut","traitee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte marquee comme traitee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
-function archiverAlerteLibre(id){var fd=new FormData();fd.append("statut","archivee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd,headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte archivee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
-function supprimerAlerteLibre(id){if(!confirm("Supprimer cette alerte ?"))return;fetch("/api/rh/alertes/libres/"+id,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte supprimee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function marquerAlerteTraitee(id){var fd=new FormData();fd.append("statut","traitee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd}).then(safeJson).then(function(){toast("Alerte marquee comme traitee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function archiverAlerteLibre(id){var fd=new FormData();fd.append("statut","archivee");fetch("/api/rh/alertes/libres/"+id,{method:"PUT",body:fd}).then(safeJson).then(function(){toast("Alerte archivee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
+function supprimerAlerteLibre(id){if(!confirm("Supprimer cette alerte ?"))return;fetch("/api/rh/alertes/libres/"+id,{method:"DELETE"}).then(safeJson).then(function(){toast("Alerte supprimee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
 function exportAlertes(){if(!_rhAlertesData||!_rhAlertesData.length)return;var csv="Urgence;Titre;Description;Reference;Action requise;Echeance\\n";for(var i=0;i<_rhAlertesData.length;i++){var a=_rhAlertesData[i];csv+='"'+(a.urgence||"")+'";"'+(a.titre||"")+'";"'+((a.description||"").replace(/"/g,"'"))+'";"'+(a.reference||"")+'";"'+(a.action_requise||"")+'";"'+(a.echeance||"")+'"'+"\\n";}var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="alertes_rh.csv";l.click();URL.revokeObjectURL(u);}
 function prefillBulletin(cid){if(!cid)return;rhGet("/api/rh/contrats",function(list){for(var i=0;i<list.length;i++){var c=list[i];if(c.id===cid){document.getElementById("rh-bp-nom").value=c.nom_salarie||c.nom||"";document.getElementById("rh-bp-prenom").value=c.prenom_salarie||c.prenom||"";document.getElementById("rh-bp-brut").value=c.salaire_brut||"";if(c.duree_hebdo)document.getElementById("rh-bp-heures").value=(parseFloat(c.duree_hebdo)/35*151.67).toFixed(2);break;}}});}
 function genererBulletin(){var nom=document.getElementById("rh-bp-nom").value;var brut=document.getElementById("rh-bp-brut").value;if(!nom){toast("Veuillez saisir le nom du salarie.");return;}if(!brut||parseFloat(brut)<=0){toast("Veuillez saisir un salaire brut valide.");return;}var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
