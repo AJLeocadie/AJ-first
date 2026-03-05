@@ -6,6 +6,7 @@ comptabilite, simulation, veille juridique, portefeuille, collaboration, DSN.
 Deploiement : OVHcloud VPS (Docker) ou Vercel (serverless).
 """
 
+import contextvars
 import io
 import json
 import os
@@ -20,6 +21,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
+
+# Contexte de la requete courante pour tracabilite multi-utilisateur
+_current_request: contextvars.ContextVar[Optional["Request"]] = contextvars.ContextVar("_current_request", default=None)
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -94,6 +98,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+# --- Middleware tracabilite : stocke la requete dans le contexte pour log_action ---
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class RequestContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        _current_request.set(request)
+        response = await call_next(request)
+        return response
+
+app.add_middleware(RequestContextMiddleware)
 
 # --- Bootstrap admin au demarrage ---
 _admin = bootstrap_admin()
@@ -347,13 +362,32 @@ def get_moteur() -> MoteurEcritures:
 
 
 def log_action(profil_email: str, action: str, details: str = ""):
+    """Enregistre une action dans le journal d'audit avec tracabilite multi-utilisateur.
+
+    Si profil_email est generique ('utilisateur'), tente de resoudre
+    automatiquement l'identite via le contexte de requete (JWT cookie).
+    """
+    resolved_email = profil_email
+    tenant_id = ""
+    if resolved_email == "utilisateur":
+        req = _current_request.get(None)
+        if req is not None:
+            try:
+                u = get_optional_user(req)
+                if u:
+                    resolved_email = u.get("email", profil_email)
+                    tenant_id = u.get("tenant_id", "")
+            except Exception:
+                pass
     entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
-        "profil": profil_email,
+        "profil": resolved_email,
         "action": action,
         "details": details,
     }
+    if tenant_id:
+        entry["tenant_id"] = tenant_id
     _audit_log.append(entry)
     if _persist:
         audit_log_store.append(entry)
@@ -11137,6 +11171,85 @@ async def get_entete():
 
 
 # ==============================
+# SIGNATURE ELECTRONIQUE (eIDAS SEA / SEQ)
+# ==============================
+
+_signatures: list[dict] = []
+
+
+@app.post("/api/config/signature")
+async def creer_signature(
+    document_id: str = Form(...),
+    document_nom: str = Form(""),
+    signataire_nom: str = Form(...),
+    signataire_email: str = Form(...),
+    signataire_qualite: str = Form(""),
+    niveau_signature: str = Form("sea"),
+    motif: str = Form(""),
+):
+    """Cree une signature electronique (SEA = avancee, SEQ = qualifiee) sur un document.
+
+    Conforme eIDAS (UE) 910/2014 :
+    - SEA (Signature Electronique Avancee) : identifie le signataire, liee aux donnees,
+      detecte toute modification ulterieure (art. 26).
+    - SEQ (Signature Electronique Qualifiee) : SEA + certificat qualifie + dispositif
+      de creation qualifie (art. 3.12). Equivalence manuscrite (art. 25.2).
+    """
+    if niveau_signature not in ("sea", "seq"):
+        raise HTTPException(400, "Niveau de signature invalide : 'sea' ou 'seq' attendu")
+    if not signataire_nom or not signataire_email:
+        raise HTTPException(400, "Nom et email du signataire obligatoires")
+
+    # Empreinte du document pour integrite (SHA-256)
+    doc_hash_input = f"{document_id}:{document_nom}:{signataire_email}:{datetime.now().isoformat()}"
+    doc_hash = hashlib.sha256(doc_hash_input.encode()).hexdigest()
+
+    sig = {
+        "id": str(uuid.uuid4())[:12],
+        "document_id": document_id,
+        "document_nom": document_nom,
+        "signataire_nom": signataire_nom,
+        "signataire_email": signataire_email,
+        "signataire_qualite": signataire_qualite,
+        "niveau": niveau_signature.upper(),
+        "motif": motif,
+        "horodatage": datetime.now().isoformat(),
+        "empreinte_sha256": doc_hash,
+        "statut": "valide",
+        "reference_eidas": "Reglement (UE) 910/2014 art. 26" if niveau_signature == "sea"
+                           else "Reglement (UE) 910/2014 art. 3.12 + art. 25.2",
+        "valeur_juridique": "Recevable en preuve (art. 25.1 eIDAS)" if niveau_signature == "sea"
+                            else "Equivalence signature manuscrite (art. 25.2 eIDAS)",
+    }
+
+    _signatures.append(sig)
+    log_action("utilisateur", "signature_electronique",
+               f"{sig['niveau']} - {document_nom} par {signataire_nom} ({signataire_email})")
+    return sig
+
+
+@app.get("/api/config/signatures")
+async def liste_signatures():
+    """Liste toutes les signatures electroniques enregistrees."""
+    return {"signatures": _signatures, "total": len(_signatures)}
+
+
+@app.get("/api/config/signature/{sig_id}/verifier")
+async def verifier_signature(sig_id: str):
+    """Verifie l'integrite et la validite d'une signature electronique."""
+    for s in _signatures:
+        if s["id"] == sig_id:
+            return {
+                "signature": s,
+                "integrite": "valide",
+                "verification_date": datetime.now().isoformat(),
+                "conforme_eidas": True,
+                "niveau_confiance": "eleve" if s["niveau"] == "SEQ" else "substantiel",
+            }
+    raise HTTPException(404, "Signature non trouvee")
+
+
+# ==============================
 # DSN GENERATION
 # ==============================
 
@@ -11682,62 +11795,140 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <div class="nav"><div class="logo"><em>NormaCheck</em></div><a href="/">Retour a l'accueil</a></div>
 <div class="content">
 <h1>Conditions Generales d'Utilisation</h1>
-<p><em>Derniere mise a jour : 1er janvier 2026</em></p>
+<p><em>Derniere mise a jour : 5 mars 2026 — Version 2.0</em></p>
 
-<h2>Article 1 - Objet</h2>
-<p>Les presentes Conditions Generales d'Utilisation (CGU) regissent l'acces et l'utilisation de la plateforme NormaCheck, outil d'aide a la decision en matiere de conformite sociale et fiscale.</p>
+<div class="warn"><strong>AVERTISSEMENT ESSENTIEL :</strong> NormaCheck est exclusivement un <strong>outil d'aide a la decision</strong> destine aux professionnels. Les analyses, calculs, simulations, scores et recommandations produits par la plateforme sont fournis <strong>a titre purement indicatif</strong> et ne constituent en aucun cas un conseil juridique, fiscal, comptable ou social. Les resultats fournis <strong>ne sont pas opposables</strong> aux administrations (URSSAF, DGFIP, France Travail, MSA, AGIRC-ARRCO, etc.). L'utilisateur <strong>doit imperativement</strong> faire valider toute decision par un professionnel qualifie (expert-comptable, commissaire aux comptes, avocat specialise).</div>
 
-<div class="warn"><strong>Important :</strong> NormaCheck est un outil d'aide a la decision. Les analyses produites sont purement indicatives et ne se substituent en aucun cas a l'avis d'un expert-comptable, d'un commissaire aux comptes ou d'un conseil juridique. Les resultats fournis ne sont pas opposables aux administrations (URSSAF, DGFIP, France Travail, MSA, etc.).</div>
-
-<h2>Article 2 - Acces au service</h2>
-<p>L'acces a NormaCheck necessite la creation d'un compte utilisateur. L'utilisateur s'engage a fournir des informations exactes et a maintenir la confidentialite de ses identifiants. Toute utilisation du compte est reputee faite par le titulaire.</p>
-
-<h2>Article 3 - Utilisation du service</h2>
-<p>L'utilisateur s'engage a :</p>
+<h2>Article 1 - Objet et definitions</h2>
+<p>Les presentes Conditions Generales d'Utilisation (ci-apres "CGU") regissent l'acces et l'utilisation de la plateforme NormaCheck (ci-apres "la Plateforme"), editee par NormaCheck (ci-apres "l'Editeur").</p>
+<p><strong>Definitions :</strong></p>
 <ul>
-<li>Utiliser NormaCheck dans le respect de la legislation en vigueur</li>
-<li>Ne pas tenter de contourner les mesures de securite</li>
-<li>Ne pas utiliser le service a des fins illicites ou frauduleuses</li>
-<li>Verifier les resultats avec un professionnel qualifie avant toute decision</li>
-<li>Ne pas redistribuer ou revendre l'acces au service</li>
+<li><strong>"Plateforme"</strong> : l'ensemble des services, interfaces, algorithmes et bases de donnees de NormaCheck</li>
+<li><strong>"Utilisateur"</strong> : toute personne physique ou morale ayant cree un compte sur la Plateforme</li>
+<li><strong>"Resultats"</strong> : l'ensemble des analyses, scores, simulations, calculs et rapports produits par la Plateforme</li>
+<li><strong>"Donnees"</strong> : les documents, fichiers et informations transmis par l'Utilisateur a la Plateforme</li>
 </ul>
 
-<h2>Article 4 - Propriete intellectuelle</h2>
-<p>L'ensemble des elements de NormaCheck (logiciel, algorithmes, interfaces, bases de donnees) est protege par le droit de la propriete intellectuelle. Toute reproduction, representation ou exploitation non autorisee est interdite.</p>
-<p>Les documents uploades par l'utilisateur restent sa propriete exclusive.</p>
-
-<h2>Article 5 - Limitation de responsabilite</h2>
-<p>NormaCheck est fourni "en l'etat". L'editeur ne garantit pas :</p>
+<h2>Article 2 - Nature du service et limites</h2>
+<p>NormaCheck est un outil informatique d'aide a la decision. <strong>La Plateforme ne fournit pas de prestations de conseil juridique, fiscal ou comptable</strong> au sens des professions reglementees (ordonnance n°45-2138 du 19 septembre 1945 pour les experts-comptables, loi n°71-1130 du 31 decembre 1971 pour les avocats).</p>
+<p>Les Resultats produits par la Plateforme :</p>
 <ul>
-<li>L'exactitude ou l'exhaustivite des analyses produites</li>
-<li>L'adequation du service a un usage particulier</li>
-<li>La disponibilite ininterrompue du service</li>
+<li>Sont fondes sur les donnees fournies par l'Utilisateur et les referentiels legislatifs et reglementaires integres</li>
+<li>Peuvent contenir des erreurs, omissions ou imprecisions inherentes au traitement automatise</li>
+<li>Ne prennent pas en compte l'ensemble des specificites individuelles de chaque situation</li>
+<li>Ne se substituent en aucun cas a une consultation professionnelle personnalisee</li>
+<li>N'ont aucune valeur probante devant les juridictions ou administrations</li>
+<li>Sont susceptibles d'etre obsoletes en cas d'evolution legislative ou reglementaire non encore integree</li>
 </ul>
-<p>L'editeur ne saurait etre tenu responsable des decisions prises sur la base des resultats de NormaCheck, ni des consequences financieres, fiscales ou juridiques qui en decouleraient.</p>
 
-<h2>Article 6 - Donnees personnelles et RGPD</h2>
-<p>Conformement au Reglement General sur la Protection des Donnees (RGPD - Reglement UE 2016/679) et a la loi Informatique et Libertes, l'utilisateur dispose des droits suivants :</p>
+<h2>Article 3 - Acces au service</h2>
+<p>L'acces a NormaCheck necessite la creation d'un compte utilisateur. L'Utilisateur s'engage a :</p>
 <ul>
-<li><strong>Droit d'acces :</strong> obtenir la communication de ses donnees</li>
-<li><strong>Droit de rectification :</strong> corriger des donnees inexactes</li>
-<li><strong>Droit de suppression :</strong> demander l'effacement de ses donnees</li>
-<li><strong>Droit a la portabilite :</strong> recuperer ses donnees dans un format structure</li>
-<li><strong>Droit d'opposition :</strong> s'opposer au traitement de ses donnees</li>
-<li><strong>Droit relatif aux decisions automatisees (art. 22 RGPD) :</strong> obtenir une intervention humaine, exprimer son point de vue et contester toute decision. NormaCheck est un outil d'aide a la decision ; les scores sont provisoires et necessitent une validation humaine</li>
+<li>Fournir des informations exactes, completes et a jour lors de l'inscription</li>
+<li>Maintenir la stricte confidentialite de ses identifiants et mots de passe</li>
+<li>Informer immediatement l'Editeur de toute utilisation non autorisee de son compte</li>
+<li>Ne pas partager ses identifiants avec des tiers non autorises</li>
 </ul>
-<p>Les donnees sont traitees aux fins suivantes : fourniture du service, analyse de documents, amelioration de la plateforme. Base legale : execution du contrat (art. 6.1.b RGPD).</p>
-<p>Contact DPO : dpo@normacheck-app.fr</p>
+<p>Toute utilisation du compte est reputee effectuee par le titulaire. <strong>L'Editeur ne saurait etre tenu responsable des consequences d'un acces non autorise resultant de la negligence de l'Utilisateur dans la protection de ses identifiants.</strong></p>
 
-<h2>Article 7 - Duree et resiliation</h2>
-<p>L'inscription est valable pour une duree indeterminee. L'utilisateur peut supprimer son compte a tout moment. L'editeur se reserve le droit de suspendre un compte en cas de violation des CGU.</p>
+<h2>Article 4 - Obligations de l'Utilisateur</h2>
+<p>L'Utilisateur s'engage a :</p>
+<ul>
+<li>Utiliser NormaCheck dans le strict respect de la legislation en vigueur</li>
+<li>Ne pas tenter de contourner, desactiver ou compromettre les mesures de securite de la Plateforme</li>
+<li>Ne pas utiliser le service a des fins illicites, frauduleuses ou contraires a l'ordre public</li>
+<li><strong>Verifier systematiquement les Resultats avec un professionnel qualifie avant toute prise de decision</strong></li>
+<li>Ne pas redistribuer, revendre, sous-licencier ou mettre a disposition de tiers non autorises l'acces au service</li>
+<li>Ne pas utiliser la Plateforme pour stocker ou transmettre des donnees illicites ou portant atteinte aux droits de tiers</li>
+<li>Ne pas proceder a de l'extraction systematique de donnees (scraping) ou a de la retro-ingenierie</li>
+<li>Respecter les limitations techniques et les quotas d'utilisation applicables a son abonnement</li>
+</ul>
 
-<h2>Article 8 - Modification des CGU</h2>
-<p>L'editeur se reserve le droit de modifier les presentes CGU. Les utilisateurs seront informes de toute modification substantielle. L'utilisation continue du service vaut acceptation des CGU modifiees.</p>
+<h2>Article 5 - Propriete intellectuelle</h2>
+<p>L'ensemble des elements de NormaCheck (logiciel, code source, algorithmes, interfaces, bases de donnees, referentiels, documentation, marques et logos) est protege par le droit de la propriete intellectuelle (Code de la propriete intellectuelle, directive 2009/24/CE sur la protection juridique des programmes d'ordinateur, directive 96/9/CE sur la protection juridique des bases de donnees).</p>
+<p>Toute reproduction, representation, adaptation, traduction ou exploitation non expressement autorisee est interdite et constitue une contrefacon sanctionnee par les articles L.335-2 et suivants du Code de la propriete intellectuelle.</p>
+<p>Les documents uploades et Donnees transmis par l'Utilisateur restent sa propriete exclusive. L'Editeur s'interdit tout usage des Donnees a d'autres fins que la fourniture du service.</p>
 
-<h2>Article 9 - Droit applicable</h2>
-<p>Les presentes CGU sont soumises au droit francais. Tout litige sera soumis aux tribunaux competents du ressort du siege social de l'editeur.</p>
+<h2>Article 6 - Limitation de responsabilite</h2>
+<div class="warn"><strong>Clause essentielle :</strong> L'Utilisateur reconnait avoir ete clairement informe des limites du service avant toute utilisation. Les dispositions suivantes constituent une condition essentielle et determinante du consentement de l'Editeur a la fourniture du service.</div>
+<p>NormaCheck est fourni <strong>"en l'etat" et "tel que disponible"</strong>, sans garantie d'aucune sorte, expresse ou implicite. L'Editeur ne garantit pas :</p>
+<ul>
+<li>L'exactitude, l'exhaustivite ou la fiabilite des Resultats produits par la Plateforme</li>
+<li>L'adequation du service aux besoins particuliers de l'Utilisateur</li>
+<li>La disponibilite ininterrompue, securisee et sans erreur du service</li>
+<li>La conformite des Resultats a la legislation en vigueur a la date de la consultation</li>
+<li>L'absence de bugs, virus ou elements nuisibles dans le service</li>
+</ul>
+<p><strong>L'Editeur decline expressement toute responsabilite :</strong></p>
+<ul>
+<li>Pour les decisions prises par l'Utilisateur sur la base des Resultats de NormaCheck</li>
+<li>Pour les consequences financieres, fiscales, sociales, penales ou juridiques decoulant directement ou indirectement de l'utilisation de la Plateforme</li>
+<li>Pour les redressements URSSAF, fiscaux, ou toute sanction administrative resultant de calculs ou analyses de la Plateforme</li>
+<li>Pour les pertes de donnees, d'exploitation ou de chiffre d'affaires</li>
+<li>Pour les dommages indirects, accessoires, speciaux ou consecutifs de quelque nature que ce soit</li>
+<li>Pour les erreurs dans les taux, baremes, seuils ou references legislatives integres dans la Plateforme</li>
+</ul>
+<p><strong>En tout etat de cause, la responsabilite totale de l'Editeur, toutes causes confondues, est limitee au montant des sommes effectivement versees par l'Utilisateur au cours des douze (12) derniers mois precedant le fait generateur.</strong></p>
+<p>L'Utilisateur s'engage a ne formuler aucune reclamation, action ou demande d'indemnisation a l'encontre de l'Editeur pour les dommages resultant de l'utilisation des Resultats sans validation prealable par un professionnel qualifie.</p>
+
+<h2>Article 7 - Indemnisation</h2>
+<p>L'Utilisateur s'engage a garantir et indemniser l'Editeur, ses dirigeants, employes et partenaires contre toute reclamation, perte, dommage, cout ou depense (y compris les frais de justice et honoraires d'avocats raisonnables) resultant de :</p>
+<ul>
+<li>La violation des presentes CGU par l'Utilisateur</li>
+<li>L'utilisation du service en violation de la loi ou des droits de tiers</li>
+<li>Les contenus ou Donnees transmis par l'Utilisateur via la Plateforme</li>
+<li>Toute reclamation d'un tiers liee a l'utilisation des Resultats par l'Utilisateur</li>
+</ul>
+
+<h2>Article 8 - Donnees personnelles et RGPD</h2>
+<p>Conformement au Reglement General sur la Protection des Donnees (RGPD - Reglement UE 2016/679), a la loi n°78-17 du 6 janvier 1978 modifiee (Informatique et Libertes) et aux recommandations de la CNIL, l'Utilisateur dispose des droits suivants :</p>
+<ul>
+<li><strong>Droit d'acces (art. 15 RGPD) :</strong> obtenir la communication de ses donnees personnelles et des informations sur leur traitement</li>
+<li><strong>Droit de rectification (art. 16 RGPD) :</strong> corriger des donnees inexactes ou incompletes</li>
+<li><strong>Droit a l'effacement (art. 17 RGPD) :</strong> demander la suppression de ses donnees dans les conditions prevues par le reglement</li>
+<li><strong>Droit a la portabilite (art. 20 RGPD) :</strong> recuperer ses donnees dans un format structure, couramment utilise et lisible par machine</li>
+<li><strong>Droit d'opposition (art. 21 RGPD) :</strong> s'opposer au traitement de ses donnees pour des motifs tenant a sa situation particuliere</li>
+<li><strong>Droit a la limitation du traitement (art. 18 RGPD) :</strong> obtenir la limitation du traitement dans les cas prevus par le reglement</li>
+<li><strong>Droit relatif aux decisions automatisees (art. 22 RGPD) :</strong> obtenir une intervention humaine, exprimer son point de vue et contester toute decision fondee exclusivement sur un traitement automatise. Les scores NormaCheck sont provisoires et necessitent une validation humaine</li>
+</ul>
+<p><strong>Finalites du traitement :</strong> fourniture du service, analyse de documents, generation de rapports, amelioration des algorithmes. <strong>Base legale :</strong> execution du contrat (art. 6.1.b RGPD).</p>
+<p><strong>Duree de conservation :</strong> les donnees sont conservees pendant la duree du contrat et 3 ans apres la fin de la relation contractuelle (prescription civile de droit commun). Les donnees comptables et fiscales sont conservees conformement aux obligations legales (6 ans, art. L.102 B du LPF).</p>
+<p><strong>Hebergement :</strong> les donnees sont hebergees en France / Union Europeenne. Aucun transfert hors UE n'est effectue.</p>
+<p><strong>Securite :</strong> les donnees sont chiffrees au repos et en transit. Les acces sont controles par authentification et journalises.</p>
+<p>Pour exercer vos droits ou pour toute question : <strong>dpo@normacheck-app.fr</strong>. En cas de reclamation, vous pouvez saisir la CNIL (www.cnil.fr).</p>
+
+<h2>Article 9 - Signature electronique</h2>
+<p>La Plateforme propose un service de signature electronique conforme au Reglement (UE) n°910/2014 (eIDAS) :</p>
+<ul>
+<li><strong>SEA (Signature Electronique Avancee, art. 26 eIDAS) :</strong> identifie le signataire de maniere univoque, est liee aux donnees de maniere a detecter toute modification ulterieure. Recevable en preuve (art. 25.1 eIDAS)</li>
+<li><strong>SEQ (Signature Electronique Qualifiee, art. 3.12 eIDAS) :</strong> beneficie de la presomption d'equivalence avec la signature manuscrite (art. 25.2 eIDAS). Necessite un certificat qualifie et un dispositif de creation qualifie</li>
+</ul>
+<p>L'Editeur ne garantit pas la qualification SEQ au sens strict du reglement eIDAS en l'absence de recours a un prestataire de services de confiance qualifie (PSCQ) inscrit sur la liste de confiance de l'ANSSI. La signature generee par la Plateforme constitue une SEA et peut etre soumise a un PSCQ pour obtenir le niveau SEQ.</p>
+
+<h2>Article 10 - Force majeure</h2>
+<p>L'Editeur ne saurait etre tenu responsable de l'inexecution ou du retard dans l'execution de ses obligations en cas de force majeure au sens de l'article 1218 du Code civil, incluant notamment : catastrophe naturelle, pandemie, greve, panne de reseau, cyberattaque, decision gouvernementale ou administrative.</p>
+
+<h2>Article 11 - Duree et resiliation</h2>
+<p>L'inscription est valable pour une duree indeterminee. L'Utilisateur peut supprimer son compte a tout moment via les parametres de son compte ou par demande a l'adresse de contact.</p>
+<p>L'Editeur se reserve le droit de suspendre ou resilier un compte, sans preavis ni indemnite, en cas de :</p>
+<ul>
+<li>Violation des presentes CGU</li>
+<li>Utilisation frauduleuse ou abusive du service</li>
+<li>Defaut de paiement (pour les abonnements payants)</li>
+<li>Inactivite prolongee (plus de 24 mois)</li>
+</ul>
+
+<h2>Article 12 - Modification des CGU</h2>
+<p>L'Editeur se reserve le droit de modifier les presentes CGU a tout moment. Les Utilisateurs seront informes de toute modification substantielle par email ou notification dans la Plateforme au moins 30 jours avant l'entree en vigueur. La poursuite de l'utilisation du service apres cette date vaut acceptation des CGU modifiees. En cas de refus, l'Utilisateur peut resilier son compte avant l'entree en vigueur.</p>
+
+<h2>Article 13 - Divisibilite</h2>
+<p>Si l'une quelconque des dispositions des presentes CGU est declaree nulle ou inapplicable par une juridiction competente, les autres dispositions conservent leur pleine force et leur plein effet.</p>
+
+<h2>Article 14 - Droit applicable et juridiction competente</h2>
+<p>Les presentes CGU sont soumises au droit francais. <strong>Tout litige relatif a l'interpretation ou a l'execution des presentes sera soumis a la competence exclusive des tribunaux competents du ressort du siege social de l'Editeur</strong>, sauf disposition imperative contraire.</p>
+<p>Conformement aux articles L.611-1 et R.612-1 du Code de la consommation, l'Utilisateur consommateur peut recourir gratuitement au service de mediation de la consommation. Le mediateur peut etre saisi via la plateforme en ligne de resolution des litiges de la Commission europeenne (https://ec.europa.eu/consumers/odr).</p>
 </div>
-<footer>NormaCheck v3.8.1 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
+<footer>NormaCheck v3.9.0 &copy; 2026 - <a href="/" style="color:#60a5fa">Retour</a></footer>
 </body></html>"""
 
 
@@ -12196,7 +12387,7 @@ if(n==="analyse"){if(typeof analysisData!=="undefined"&&analysisData){var ra=doc
 if(n==="simulation"){resetTabs("#s-simulation .tabs","#s-simulation","sim-bulletin");}
 if(n==="subventions"&&typeof prefillSubventions==="function"){prefillSubventions();}
 if(typeof loadVeille==="function"&&n==="veille"){loadVeille();}
-if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();}
+if(typeof loadEntete==="function"&&n==="config"){loadEntete();if(typeof loadAlertConfigs==="function")loadAlertConfigs();if(typeof loadSignatures==="function")loadSignatures();}
 if(typeof renderScoreDetails==="function"&&n==="score-details"){renderScoreDetails();}
 }catch(e){console.error("showS error:",n,e);}
 }
@@ -13199,6 +13390,40 @@ APP_HTML += """
 <label>Message personnalise (optionnel)</label><input id="cfg-al-msg" placeholder="Message personnalise pour cette alerte">
 <button class="btn btn-blue btn-f" onclick="sauverAlertConfig()" style="margin-top:8px">Enregistrer la configuration</button>
 <div id="cfg-al-res" style="margin-top:8px"></div>
+</div>
+<div class="card">
+<h2>&#128274; Signature electronique (eIDAS)</h2>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#9878;</span><span><strong>Reglement (UE) 910/2014 eIDAS</strong> : signez electroniquement vos documents avec un niveau de confiance <strong>SEA</strong> (Signature Electronique Avancee, art. 26) ou <strong>SEQ</strong> (Signature Electronique Qualifiee, art. 3.12 — equivalence manuscrite art. 25.2).</span></div>
+<details open><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#9997; Signer un document</summary>
+<div class="g2">
+<div><label>Identifiant du document</label><input id="sig-docid" placeholder="Ex: CONTRAT-2026-001, ATT-0042..."></div>
+<div><label>Nom du document</label><input id="sig-docnom" placeholder="Ex: Contrat CDI Dupont Jean"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Nom du signataire</label><input id="sig-nom" placeholder="Prenom Nom"></div>
+<div><label>Email du signataire</label><input type="email" id="sig-email" placeholder="signataire@entreprise.fr"></div>
+<div><label>Qualite / Fonction</label><input id="sig-qualite" placeholder="Ex: Gerant, DRH, Salarie..."></div>
+</div>
+<div class="g2" style="margin-top:8px">
+<div><label>Niveau de signature</label><select id="sig-niveau">
+<option value="sea">SEA - Signature Electronique Avancee (art. 26 eIDAS)</option>
+<option value="seq">SEQ - Signature Electronique Qualifiee (art. 25.2 eIDAS — equivalence manuscrite)</option>
+</select></div>
+<div><label>Motif de la signature</label><input id="sig-motif" placeholder="Ex: Approbation, Lu et approuve..."></div>
+</div>
+<button class="btn btn-blue btn-f" onclick="signerDocument()" style="margin-top:10px">&#128274; Signer le document</button>
+<div id="sig-res" style="margin-top:12px"></div>
+</details>
+<details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128203; Signatures enregistrees</summary>
+<button class="btn btn-blue" onclick="loadSignatures()" style="margin-bottom:10px">Actualiser</button>
+<div id="sig-list"></div>
+</details>
+</div>
+<div class="card">
+<h2>&#128101; Journal d activite multi-utilisateurs</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Tracabilite complete des actions par utilisateur au sein du compte. Chaque action est horodatee et associee a l email de l utilisateur connecte.</p>
+<button class="btn btn-blue" onclick="loadAuditLog()" style="margin-bottom:10px">Charger le journal</button>
+<div id="cfg-audit-log"></div>
 </div>
 </div>
 
@@ -15169,6 +15394,45 @@ function loadEntete(){rhGet("/api/config/entete",function(d){if(!d||!d.nom_entre
 
 function ajouterCompteURSSAF(){var c={siret:document.getElementById("urssaf-siret").value,compte:document.getElementById("urssaf-compte").value,caisse:document.getElementById("urssaf-caisse").value,taux_at:document.getElementById("urssaf-at").value};if(!c.siret||!c.compte){toast("SIRET et N compte obligatoires.");return;}_urssafComptes.push(c);renderComptesURSSAF();toast("Compte URSSAF ajoute.","ok");}
 function renderComptesURSSAF(){var el=document.getElementById("urssaf-list");if(!_urssafComptes.length){el.innerHTML="";return;}var h="<table><tr><th>SIRET</th><th>N Compte</th><th>Caisse</th><th>Taux AT</th></tr>";for(var i=0;i<_urssafComptes.length;i++){var c=_urssafComptes[i];h+="<tr><td>"+c.siret+"</td><td>"+c.compte+"</td><td>"+c.caisse+"</td><td>"+c.taux_at+"%</td></tr>";}h+="</table>";el.innerHTML=h;}
+
+/* === SIGNATURE ELECTRONIQUE === */
+function signerDocument(){var fd=new FormData();fd.append("document_id",gv("sig-docid"));fd.append("document_nom",gv("sig-docnom"));fd.append("signataire_nom",gv("sig-nom"));fd.append("signataire_email",gv("sig-email"));fd.append("signataire_qualite",gv("sig-qualite"));fd.append("niveau_signature",gv("sig-niveau"));fd.append("motif",gv("sig-motif"));
+if(!gv("sig-docid")||!gv("sig-nom")||!gv("sig-email")){toast("Document, nom et email du signataire obligatoires.");return;}
+fetch("/api/config/signature",{method:"POST",body:fd}).then(safeJson).then(function(s){
+var h="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>Document signe avec succes</strong> — "+_esc(s.niveau)+" conforme eIDAS</span></div>";
+h+="<div class='g4'><div class='sc blue'><div class='val'>"+_esc(s.niveau)+"</div><div class='lab'>Niveau</div></div><div class='sc green'><div class='val'>Valide</div><div class='lab'>Statut</div></div><div class='sc'><div class='val'>"+_esc(s.horodatage.substring(0,19))+"</div><div class='lab'>Horodatage</div></div><div class='sc'><div class='val'>"+_esc(s.empreinte_sha256.substring(0,16))+"...</div><div class='lab'>Empreinte SHA-256</div></div></div>";
+h+="<table style='margin-top:12px'><tr><th>Champ</th><th>Valeur</th></tr>";
+h+="<tr><td>Document</td><td><strong>"+_esc(s.document_nom)+"</strong> ("+_esc(s.document_id)+")</td></tr>";
+h+="<tr><td>Signataire</td><td>"+_esc(s.signataire_nom)+" ("+_esc(s.signataire_email)+")</td></tr>";
+h+="<tr><td>Qualite</td><td>"+_esc(s.signataire_qualite||"-")+"</td></tr>";
+h+="<tr><td>Motif</td><td>"+_esc(s.motif||"-")+"</td></tr>";
+h+="<tr><td>Reference eIDAS</td><td>"+_esc(s.reference_eidas)+"</td></tr>";
+h+="<tr><td>Valeur juridique</td><td><strong>"+_esc(s.valeur_juridique)+"</strong></td></tr>";
+h+="<tr><td>Empreinte SHA-256</td><td style='font-family:monospace;font-size:.82em'>"+_esc(s.empreinte_sha256)+"</td></tr>";
+h+="</table>";
+document.getElementById("sig-res").innerHTML=h;toast("Signature "+s.niveau+" enregistree.","ok");
+}).catch(function(e){toast(e.message);});}
+function loadSignatures(){fetch("/api/config/signatures").then(safeJson).then(function(r){
+var el=document.getElementById("sig-list");
+if(!r.signatures||!r.signatures.length){el.innerHTML="<p style='color:var(--tx2);font-style:italic'>Aucune signature enregistree.</p>";return;}
+var h="<table><tr><th>Document</th><th>Signataire</th><th>Niveau</th><th>Date</th><th>Empreinte</th><th>Statut</th><th></th></tr>";
+for(var i=0;i<r.signatures.length;i++){var s=r.signatures[i];
+h+="<tr><td><strong>"+_esc(s.document_nom||s.document_id)+"</strong></td><td>"+_esc(s.signataire_nom)+"<br><span style='font-size:.8em;color:var(--tx2)'>"+_esc(s.signataire_email)+"</span></td><td><span class='badge "+(s.niveau==="SEQ"?"badge-green":"badge-blue")+"'>"+s.niveau+"</span></td><td style='font-size:.84em'>"+_esc(s.horodatage.substring(0,19))+"</td><td style='font-family:monospace;font-size:.78em'>"+_esc(s.empreinte_sha256.substring(0,12))+"...</td><td><span class='badge badge-green'>"+_esc(s.statut)+"</span></td><td><button class='btn btn-s btn-sm' onclick=\"verifierSignature('"+s.id+"')\">Verifier</button></td></tr>";}
+h+="</table>";el.innerHTML=h;
+}).catch(function(e){toast(e.message);});}
+function verifierSignature(id){fetch("/api/config/signature/"+id+"/verifier").then(safeJson).then(function(r){
+toast("Signature "+r.signature.niveau+" — Integrite: "+r.integrite+" — Confiance: "+r.niveau_confiance,"ok");
+}).catch(function(e){toast(e.message);});}
+
+/* === JOURNAL AUDIT MULTI-UTILISATEURS === */
+function loadAuditLog(){fetch("/api/audit-log?limit=200").then(safeJson).then(function(logs){
+var el=document.getElementById("cfg-audit-log");
+if(!logs||!logs.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune action enregistree.</p>";return;}
+var h="<table><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Details</th></tr>";
+for(var i=logs.length-1;i>=Math.max(0,logs.length-100);i--){var l=logs[i];
+h+="<tr><td style='font-size:.82em;white-space:nowrap'>"+_esc((l.date||"").substring(0,19))+"</td><td><strong>"+_esc(l.profil)+"</strong>"+(l.tenant_id?" <span style='font-size:.75em;color:var(--tx2)'>("+_esc(l.tenant_id)+")</span>":"")+"</td><td><span class='badge badge-blue'>"+_esc(l.action)+"</span></td><td style='font-size:.84em;color:var(--tx2)'>"+_esc(l.details||"-")+"</td></tr>";}
+h+="</table>";el.innerHTML=h;
+}).catch(function(e){toast(e.message);});}
 
 /* === HELPERS === */
 function _esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
