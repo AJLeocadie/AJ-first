@@ -7735,7 +7735,16 @@ async def suggestions_comptes(compte: str = Query(""), description: str = Query(
                 for num, lib in cps:
                     contreparties.append({"numero": num + "000", "libelle": lib})
 
-    return {"suggestions": suggestions[:15], "contreparties": contreparties[:10]}
+    # Convertir en dict {numero_suggestion: numero_contrepartie} pour le JS
+    cp_dict = {}
+    for s in suggestions[:15]:
+        snum = s["numero"]
+        sprefix = snum[:3] if len(snum) >= 3 else snum
+        for cp in contreparties:
+            if cp["numero"][:3] != sprefix:
+                cp_dict[snum] = cp["numero"]
+                break
+    return {"suggestions": suggestions[:15], "contreparties": cp_dict}
 
 
 @app.post("/api/comptabilite/sous-compte")
@@ -11425,6 +11434,7 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <div class="nl" tabindex="0" onclick="showS('portefeuille',this)"><span class="ico">&#128101;</span><span>Portefeuille</span></div>
 <div class="nl" tabindex="0" onclick="showS('equipe',this)"><span class="ico">&#128100;</span><span>Equipe</span></div>
 <div class="nl" tabindex="0" onclick="showS('config',this)"><span class="ico">&#9881;</span><span>Configuration</span></div>
+<div class="nl" tabindex="0" onclick="showS('ensavoirplus',this)"><span class="ico">&#128218;</span><span>En savoir plus</span></div>
 <div class="spacer"></div>
 <div style="padding:10px 18px;font-size:.78em;color:#94a3b8" id="sidebar-user"></div>
 <div class="logout" onclick="doLogout()"><span class="ico">&#10132;</span><span>Deconnexion</span></div>
@@ -11453,7 +11463,7 @@ APP_HTML += """
 </div>
 <div class="card"><h2>Alertes</h2><div id="dash-alertes"><div class="al info"><span class="ai">&#128161;</span><span>Importez des documents pour lancer l'analyse.</span></div></div></div>
 </div>
-<div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button></h2>
+<div class="card"><h2>Scores de conformite par organisme <button class="btn btn-s btn-sm" onclick="showS('score-details')" style="margin-left:8px;font-size:.78em">Voir le detail des formules</button> <button class="btn btn-s btn-sm" onclick="showS('ensavoirplus')" style="margin-left:4px;font-size:.78em">&#128218; En savoir plus</button></h2>
 <div class="g3" id="dash-scores-triple">
 <div style="text-align:center;padding:16px;border:2px solid var(--brd);border-radius:14px;background:var(--card-bg)">
 <div style="font-size:.72em;text-transform:uppercase;letter-spacing:1px;color:var(--tx2);margin-bottom:8px;font-weight:700">URSSAF / CSS</div>
@@ -12110,17 +12120,70 @@ APP_HTML += """
 </div>
 <div class="tc" id="rh-planning">
 <h2>Planning</h2>
-<div class="g3" style="margin-bottom:12px"><div><label>Semaine du</label><input type="date" id="rh-pl-sem" onchange="renderCalendar()"></div>
-<div><label>Filtre salarie</label><input id="rh-pl-filter" placeholder="Tous" oninput="renderCalendar()"></div>
-<div><button class="btn btn-s btn-f" onclick="renderCalendar()" style="margin-top:22px">Actualiser</button></div></div>
+
+<div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+<button class="btn btn-sm" id="pl-v-jour" onclick="setPlanningView('jour')" style="border:2px solid transparent">Jour</button>
+<button class="btn btn-sm" id="pl-v-semaine" onclick="setPlanningView('semaine')" style="border:2px solid var(--p2);background:var(--p2);color:#fff">Semaine</button>
+<button class="btn btn-sm" id="pl-v-mois" onclick="setPlanningView('mois')" style="border:2px solid transparent">Mois</button>
+<button class="btn btn-sm" id="pl-v-annee" onclick="setPlanningView('annee')" style="border:2px solid transparent">Annee</button>
+<span style="flex:1"></span>
+<button class="btn btn-sm btn-green" onclick="integrerSalaries()" title="Reporter automatiquement les salaries detectes dans le planning">&#128101; Integrer salaries</button>
+</div>
+
+<div class="g3" style="margin-bottom:12px">
+<div><label>Date</label><input type="date" id="rh-pl-sem" onchange="renderPlanningView()"></div>
+<div><label>Filtre salarie</label><input id="rh-pl-filter" placeholder="Tous" oninput="renderPlanningView()"></div>
+<div><label>Filtre statut</label><select id="rh-pl-statut-filter" onchange="renderPlanningView()"><option value="">Tous</option><option value="present">Present</option><option value="conge_cp">Conge CP</option><option value="conge_maladie">Arret maladie</option><option value="arret_accident_travail">Accident travail</option><option value="formation">Formation</option><option value="teletravail">Teletravail</option></select></div>
+</div>
+
+<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+<button class="btn btn-sm" onclick="planningNav(-1)">&#9664; Precedent</button>
+<span id="rh-pl-period-label" style="font-weight:600;font-size:.95em;min-width:180px;text-align:center"></span>
+<button class="btn btn-sm" onclick="planningNav(1)">Suivant &#9654;</button>
+<button class="btn btn-sm" onclick="planningGoToday()" style="margin-left:8px">Aujourd hui</button>
+</div>
+
 <div id="rh-pl-calendar" style="overflow-x:auto;margin-bottom:16px;border:1px solid var(--brd);border-radius:8px;min-height:100px"></div>
-<h3>Ajouter un creneau</h3>
+
+<div id="rh-pl-legend" style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;font-size:.8em">
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#3b82f6;display:inline-block"></span>Normal</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#f59e0b;display:inline-block"></span>Astreinte</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#6366f1;display:inline-block"></span>Nuit</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#ef4444;display:inline-block"></span>Dimanche/Ferie</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#22c55e;display:inline-block"></span>Present</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#f97316;display:inline-block"></span>Conge</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#e11d48;display:inline-block"></span>Arret maladie</span>
+<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:14px;height:14px;border-radius:3px;background:#8b5cf6;display:inline-block"></span>Teletravail</span>
+</div>
+
+<div id="rh-pl-stats" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px"></div>
+
+<details style="margin-bottom:12px">
+<summary style="cursor:pointer;font-weight:600;color:var(--p2)">&#10010; Ajouter un creneau manuellement</summary>
+<div style="margin-top:10px">
 <div class="g3"><div><label>Salarie</label><input id="rh-pl-sal" placeholder="Nom"></div>
 <div><label>Date</label><input type="date" id="rh-pl-date"></div>
 <div><label>Type</label><select id="rh-pl-type"><option value="normal">Normal</option><option value="astreinte">Astreinte</option><option value="nuit">Nuit</option><option value="dimanche">Dimanche</option><option value="ferie">Jour ferie</option></select></div></div>
 <div class="g3"><div><label>Heure debut</label><input type="time" id="rh-pl-hd" value="09:00"></div>
 <div><label>Heure fin</label><input type="time" id="rh-pl-hf" value="17:00"></div>
 <div><button class="btn btn-blue btn-f" onclick="ajouterPlanning()" style="margin-top:22px">Ajouter</button></div></div>
+</div>
+</details>
+
+<details id="rh-pl-integrer-section" style="margin-bottom:12px">
+<summary style="cursor:pointer;font-weight:600;color:var(--p2)">&#128101; Integration automatique des salaries</summary>
+<div style="margin-top:10px">
+<div class="al info"><span class="ai">&#128161;</span><span>Cette fonction reporte automatiquement tous les salaries detectes dans vos documents et contrats dans le planning sur la periode choisie.</span></div>
+<div class="g3"><div><label>Date debut</label><input type="date" id="rh-pl-int-debut"></div>
+<div><label>Date fin</label><input type="date" id="rh-pl-int-fin"></div>
+<div><label>Jours</label><select id="rh-pl-int-jours"><option value="1,2,3,4,5">Lun-Ven</option><option value="1,2,3,4,5,6">Lun-Sam</option><option value="1,2,3,4,5,6,7">Tous les jours</option></select></div></div>
+<div class="g3"><div><label>Heure debut</label><input type="time" id="rh-pl-int-hd" value="09:00"></div>
+<div><label>Heure fin</label><input type="time" id="rh-pl-int-hf" value="17:00"></div>
+<div><button class="btn btn-blue btn-f" onclick="integrerSalariesManuel()" style="margin-top:22px">Integrer</button></div></div>
+<div id="rh-pl-int-result" style="margin-top:8px"></div>
+</div>
+</details>
+
 <div id="rh-pl-list" style="margin-top:12px"></div>
 </div>
 <div class="tc" id="rh-echanges">
@@ -12445,6 +12508,114 @@ S<sub>global</sub> = &lfloor; (S<sub>URSSAF</sub> &times; 0.40) + (S<sub>DGFIP</
 </div>
 </div>
 
+<div class="sec" id="s-ensavoirplus">
+
+<div class="card" style="background:linear-gradient(135deg,#f0f9ff 0%,#e0f2fe 100%);border:none">
+<h2 style="font-size:1.5em;color:var(--p2);margin-bottom:4px">&#128218; En savoir plus - NormaCheck v3.8.1</h2>
+<p style="color:var(--tx2);font-size:.92em;margin-top:0">Comprendre le score de conformite, la methodologie et les garanties de NormaCheck.</p>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#127919; A quoi sert le score de conformite ?</h2>
+<p style="font-size:.9em;line-height:1.7;color:var(--tx)">Le score de conformite NormaCheck est un <strong>indicateur synthetique</strong> qui vous permet de mesurer en un coup d oeil le niveau de conformite de votre entreprise face aux obligations sociales, fiscales et comptables.</p>
+<p style="font-size:.9em;line-height:1.7;color:var(--tx)">Concretement, il repond a une question simple : <em>"Si un controleur URSSAF, un inspecteur des impots ou un commissaire aux comptes se presentait demain, quel serait le niveau de risque pour mon entreprise ?"</em></p>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0">
+<div style="background:#f0fdf4;padding:14px;border-radius:10px;border-left:4px solid #22c55e"><strong style="color:#166534">Score A (90-100)</strong><br><span style="font-size:.85em;color:#166534">Excellent. Votre conformite est quasi-parfaite. Risque tres faible en cas de controle.</span></div>
+<div style="background:#ecfdf5;padding:14px;border-radius:10px;border-left:4px solid #10b981"><strong style="color:#065f46">Score B (75-89)</strong><br><span style="font-size:.85em;color:#065f46">Bon. Quelques points d amelioration mineurs, mais pas de risque majeur.</span></div>
+<div style="background:#fefce8;padding:14px;border-radius:10px;border-left:4px solid #eab308"><strong style="color:#854d0e">Score C (60-74)</strong><br><span style="font-size:.85em;color:#854d0e">Moyen. Des ecarts ont ete identifies. Des actions correctives sont recommandees.</span></div>
+<div style="background:#fff7ed;padding:14px;border-radius:10px;border-left:4px solid #f97316"><strong style="color:#9a3412">Score D (45-59)</strong><br><span style="font-size:.85em;color:#9a3412">Insuffisant. Des anomalies significatives necessitent une attention immediate.</span></div>
+<div style="background:#fef2f2;padding:14px;border-radius:10px;border-left:4px solid #ef4444"><strong style="color:#991b1b">Score E/F (&lt;45)</strong><br><span style="font-size:.85em;color:#991b1b">Critique. Risque eleve de redressement en cas de controle. Actions urgentes requises.</span></div>
+</div>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#9878; Comment le score est-il calcule ?</h2>
+<p style="font-size:.9em;line-height:1.7">Notre methodologie repose sur <strong>4 principes fondamentaux</strong> :</p>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:12px 0">
+<div class="card" style="border-top:3px solid var(--p2)"><strong>1. Proportionnalite</strong><br><span style="font-size:.85em;color:var(--tx2)">Le poids de chaque anomalie est proportionnel a la gravite de la sanction prevue par la loi. Une erreur de calcul de cotisations (qui entraine une majoration de 40%) pese plus qu un libelle imprecis (sans sanction directe).</span></div>
+<div class="card" style="border-top:3px solid var(--p2)"><strong>2. Objectivabilite</strong><br><span style="font-size:.85em;color:var(--tx2)">Chaque point de controle est derive d une reference legale explicite (Code de la Securite sociale, Code General des Impots, normes ISA...). Aucun critere subjectif n entre en jeu.</span></div>
+<div class="card" style="border-top:3px solid var(--p2)"><strong>3. Reproductibilite</strong><br><span style="font-size:.85em;color:var(--tx2)">Avec les memes documents, NormaCheck produit toujours le meme score. Il n y a pas de coefficient arbitraire ni d appreciation discretionnaire.</span></div>
+<div class="card" style="border-top:3px solid var(--p2)"><strong>4. Transparence</strong><br><span style="font-size:.85em;color:var(--tx2)">Chaque constat est trace, source et justifie. Vous pouvez voir exactement quels elements ont impacte votre score et pourquoi.</span></div>
+</div>
+
+<h3 style="margin-top:18px">La formule en langage simple</h3>
+<div style="background:var(--bg);border-radius:10px;padding:16px;margin:8px 0;font-size:.9em;line-height:1.8">
+<p><strong>Etape 1 :</strong> NormaCheck analyse vos documents et identifie les <em>constats</em> (ecarts par rapport aux obligations legales).</p>
+<p><strong>Etape 2 :</strong> Chaque constat recoit un <em>poids de gravite</em> base sur la sanction legale associee :<br>
+&bull; <strong>Critique (4 pts)</strong> : manquement delibere, majoration 40%<br>
+&bull; <strong>Haute (3 pts)</strong> : retard ou omission, majoration 10%<br>
+&bull; <strong>Moyenne (2 pts)</strong> : ecart formel, droit a regularisation<br>
+&bull; <strong>Faible (1 pt)</strong> : anomalie mineure, pas de sanction directe</p>
+<p><strong>Etape 3 :</strong> Le score est calcule : plus vous avez de constats graves, plus le score baisse. <em>Aucun constat = score de 100.</em></p>
+<p><strong>Etape 4 :</strong> Un facteur de <em>couverture documentaire</em> ajuste le score : plus vous fournissez de documents, plus l analyse est fiable et complete.</p>
+</div>
+<p style="font-size:.85em;color:var(--tx2)"><button class="btn btn-s btn-sm" onclick="showS('score-details')">Voir les formules mathematiques detaillees &#8594;</button></p>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#128202; Les 3 axes d analyse</h2>
+<p style="font-size:.9em;line-height:1.7">NormaCheck evalue votre conformite sur 3 axes complementaires, correspondant aux 3 principaux risques de controle :</p>
+
+<div style="margin:16px 0">
+<div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--pl);border-radius:10px;margin-bottom:10px">
+<div style="min-width:50px;height:50px;border-radius:50%;background:var(--p2);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.2em">40%</div>
+<div><strong style="color:var(--p2)">URSSAF - Conformite sociale</strong><br><span style="font-size:.85em;color:var(--tx2)">Cotisations sociales, bulletin de paie, DSN, reduction Fillon, plafond SS, FNAL, AT/MP, retraite complementaire... Reference : Code de la Securite sociale (CSS).</span></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--pul);border-radius:10px;margin-bottom:10px">
+<div style="min-width:50px;height:50px;border-radius:50%;background:var(--pu);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.2em">35%</div>
+<div><strong style="color:var(--pu)">DGFIP - Conformite fiscale</strong><br><span style="font-size:.85em;color:var(--tx2)">TVA, declarations fiscales, DAS-2, FEC, facturation, conservation des documents, CFE/CVAE, taxe sur les salaires... Reference : Code General des Impots (CGI).</span></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;padding:14px;background:#f0fdfa;border-radius:10px">
+<div style="min-width:50px;height:50px;border-radius:50%;background:var(--tl);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.2em">25%</div>
+<div><strong style="color:var(--tl)">Cour des comptes - Regularite comptable</strong><br><span style="font-size:.85em;color:var(--tx2)">Regularite et sincerite des comptes, image fidele, continuite d exploitation, separation des exercices, controle interne... Reference : normes NEP / ISA.</span></div>
+</div>
+</div>
+<p style="font-size:.85em;color:var(--tx2)">Les poids de ponderation (40/35/25) refletent l importance relative du risque financier : les cotisations sociales representent le premier poste de charges pour la plupart des entreprises.</p>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#128170; Comment ameliorer votre score ?</h2>
+<div style="font-size:.9em;line-height:1.8">
+<p><strong>1. Fournissez davantage de documents</strong><br>
+Plus vous importez de documents (bulletins de paie, DSN, factures, bilans...), plus l analyse est precise. Le facteur de couverture documentaire ameliore la fiabilite du score.</p>
+<p><strong>2. Corrigez les anomalies critiques en priorite</strong><br>
+Concentrez-vous d abord sur les constats de gravite "critique" et "haute" - ce sont eux qui impactent le plus votre score ET qui presentent le plus grand risque en cas de controle.</p>
+<p><strong>3. Utilisez les recommandations</strong><br>
+Chaque constat est accompagne d une recommandation concrete et de la reference legale. Suivez ces recommandations pour corriger les ecarts identifies.</p>
+<p><strong>4. Verifiez regulierement</strong><br>
+La conformite n est pas un etat statique. Les regles changent (SMIC, taux, obligations declaratives). Effectuez des analyses regulieres pour maintenir votre conformite.</p>
+</div>
+</div>
+
+<div class="card">
+<h2 style="color:var(--p2)">&#128274; Garanties et limites</h2>
+<div style="font-size:.9em;line-height:1.8">
+<p><strong>Ce que NormaCheck fait :</strong></p>
+<ul>
+<li>Detecte automatiquement les ecarts par rapport aux obligations legales connues</li>
+<li>Applique une methodologie reproductible, transparente et non-discretionnaire</li>
+<li>Fournit des recommandations concretes et sourcees juridiquement</li>
+<li>Vous aide a preparer un eventuel controle en identifiant les points de risque</li>
+</ul>
+<p><strong>Ce que NormaCheck ne fait pas :</strong></p>
+<ul>
+<li>NormaCheck <strong>ne remplace pas</strong> un expert-comptable, un commissaire aux comptes ou un avocat specialise</li>
+<li>Les scores ne constituent <strong>pas une certification officielle</strong> et ne sont pas opposables aux administrations</li>
+<li>L analyse est basee sur les documents fournis - elle ne peut pas detecter ce qui n a pas ete importe</li>
+<li>Les regles de droit evoluent - NormaCheck est mis a jour regulierement mais un decalage temporaire est possible</li>
+</ul>
+</div>
+<div style="margin-top:12px;padding:14px;background:var(--ol);border-radius:10px;border:1px solid #fde68a;font-size:.84em">
+<strong>&#9878; Base juridique :</strong> La methodologie NormaCheck s appuie sur le Code de la Securite sociale (CSS), le Code General des Impots (CGI), le Livre des Procedures Fiscales (LPF), le Code de commerce, et les normes internationales d audit (ISA/NEP). Chaque point de controle reference l article de loi correspondant.
+</div>
+</div>
+
+<div class="card" style="text-align:center;padding:24px">
+<p style="font-size:.92em;color:var(--tx2)">Pour consulter les formules mathematiques detaillees et les references legales de chaque point de controle :</p>
+<button class="btn btn-blue" onclick="showS('score-details')" style="margin-top:8px">Voir le detail complet des formules &#8594;</button>
+</div>
+</div>
+
 </div><!-- end .page -->
 </div><!-- end .content -->
 </div><!-- end .layout -->
@@ -12455,7 +12626,7 @@ APP_HTML += """
 <script>
 /* === CORE NAV (separate script to guarantee availability) === */
 var _ncUser=null;
-var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite"};
+var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
 function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
 function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
 function resetTabs(tabsSel,secSel,defaultId){var tabs=document.querySelectorAll(tabsSel+" .tab");tabs.forEach(function(t){t.classList.remove("active")});if(tabs.length)tabs[0].classList.add("active");document.querySelectorAll(secSel+" .tc").forEach(function(t){t.classList.remove("active")});var def=document.getElementById(defaultId);if(def)def.classList.add("active");}
@@ -13767,7 +13938,7 @@ h+="</ul></div>";}
 document.getElementById("rh-ctr-res").innerHTML=h;loadRHContrats();});
 }
 function fusionnerDoublon(idGarder,idSupprimer){if(!confirm("Fusionner les deux fiches ? La fiche la plus ancienne sera completee puis le doublon supprime."))return;fetch("/api/rh/doublons/fusionner",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id_garder:idGarder,id_supprimer:idSupprimer}),credentials:"same-origin"}).then(safeJson).then(function(r){toast(r.message,"ok");loadRHSalaries();loadRHContrats();}).catch(function(e){toast(e.message||"Erreur fusion");});}
-function detecterDoublons(){fetch("/api/rh/doublons",{credentials:"same-origin"}).then(safeJson).then(function(r){var el=document.getElementById("rh-doublons-alert");if(!r.doublons||!r.doublons.length){el.innerHTML="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span>Aucun doublon detecte parmi les "+(_rh_contrats?_rh_contrats.length:"")+" salaries.</span></div>";el.style.display="block";return;}el.style.display="block";var h="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>"+r.nb_doublons+" doublon(s) potentiel(s) detecte(s) !</strong> Des salaries apparaissent dans plusieurs fiches. Verifiez et fusionnez si necessaire.</span></div>";for(var i=0;i<r.doublons.length;i++){var d=r.doublons[i];var typeLabel=d.type==="nir"?"<span class='badge badge-red'>Meme NIR : "+d.valeur+"</span>":"<span class='badge badge-amber'>Meme Nom/Prenom : "+d.valeur+"</span>";h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'><div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'><strong>"+d.nb_occurrences+" fiches</strong> "+typeLabel+"</div>";h+="<table><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Source</th><th>Brut</th><th>Action</th></tr>";for(var j=0;j<d.fiches.length;j++){var f=d.fiches[j];var nirAff=f.nir?(f.nir.length>8?f.nir.substring(0,8)+"...":f.nir):"-";h+="<tr><td>"+f.nom+"</td><td>"+f.prenom+"</td><td>"+f.poste+"</td><td>"+f.type_contrat+"</td><td>"+f.date_debut+"</td><td style='font-size:.8em'>"+nirAff+"</td><td style='font-size:.78em'>"+f.source+"</td><td class='num'>"+(parseFloat(f.salaire_brut)||0).toFixed(0)+" EUR</td>";if(j>0)h+="<td><button class='btn btn-s btn-sm' onclick='fusionnerDoublon(\""+d.fiches[0].id+"\",\""+f.id+"\")'>Fusionner dans 1ere</button></td>";else h+="<td><span class='badge badge-green'>Principale</span></td>";h+="</tr>";}h+="</table></div>";}el.innerHTML=h;}).catch(function(e){toast(e.message||"Erreur detection");});}}
+function detecterDoublons(){fetch("/api/rh/doublons",{credentials:"same-origin"}).then(safeJson).then(function(r){var el=document.getElementById("rh-doublons-alert");if(!r.doublons||!r.doublons.length){el.innerHTML="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span>Aucun doublon detecte parmi vos salaries.</span></div>";el.style.display="block";return;}el.style.display="block";var h="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>"+r.nb_doublons+" doublon(s) potentiel(s) detecte(s) !</strong> Des salaries apparaissent dans plusieurs fiches. Verifiez et fusionnez si necessaire.</span></div>";for(var i=0;i<r.doublons.length;i++){var d=r.doublons[i];var typeLabel=d.type==="nir"?"<span class='badge badge-red'>Meme NIR : "+d.valeur+"</span>":"<span class='badge badge-amber'>Meme Nom/Prenom : "+d.valeur+"</span>";h+="<div style='border:1px solid var(--brd);border-radius:10px;padding:12px;margin:6px 0'><div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'><strong>"+d.nb_occurrences+" fiches</strong> "+typeLabel+"</div>";h+="<table><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Source</th><th>Brut</th><th>Action</th></tr>";for(var j=0;j<d.fiches.length;j++){var f=d.fiches[j];var nirAff=f.nir?(f.nir.length>8?f.nir.substring(0,8)+"...":f.nir):"-";h+="<tr><td>"+f.nom+"</td><td>"+f.prenom+"</td><td>"+f.poste+"</td><td>"+f.type_contrat+"</td><td>"+f.date_debut+"</td><td style='font-size:.8em'>"+nirAff+"</td><td style='font-size:.78em'>"+f.source+"</td><td class='num'>"+(parseFloat(f.salaire_brut)||0).toFixed(0)+" EUR</td>";if(j>0)h+="<td><button class='btn btn-s btn-sm' onclick='fusionnerDoublon(\""+d.fiches[0].id+"\",\""+f.id+"\")'>Fusionner dans 1ere</button></td>";else h+="<td><span class='badge badge-green'>Principale</span></td>";h+="</tr>";}h+="</table></div>";}el.innerHTML=h;}).catch(function(e){toast(e.message||"Erreur detection");});}
 
 function loadRHSalaries(){
 rhGet("/api/rh/contrats",function(list){
@@ -13917,29 +14088,171 @@ function genererAttestation(){var fd=new FormData();fd.append("salarie_id",docum
 rhPost("/api/rh/attestations/generer",fd,function(d){document.getElementById("rh-at-res").innerHTML="<div class='card' style='background:var(--pl);margin-top:8px'><pre style='white-space:pre-wrap;font-size:.82em;line-height:1.6'>"+(d.texte||d.contenu||"Erreur generation")+"</pre><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer</button></div>";toast("Attestation generee.","ok");loadRHAttestations();});}
 function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el=document.getElementById("rh-at-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-blue'>"+a.type_attestation+"</span></td><td>"+a.date_generation+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
-rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");loadRHPlanning();});}
-function loadRHPlanning(){rhGet("/api/rh/planning",function(list){var el=document.getElementById("rh-pl-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun planning.</p>";return;}var h="<table><tr><th>Salarie</th><th>Date</th><th>Debut</th><th>Fin</th><th>Type</th></tr>";for(var i=0;i<list.length;i++){var p=list[i];var nom=p.salarie_nom||p.salarie_id||"?";var tp=p.type_poste||p.type||"normal";h+="<tr><td>"+nom+"</td><td>"+p.date+"</td><td>"+p.heure_debut+"</td><td>"+p.heure_fin+"</td><td><span class='badge badge-blue'>"+tp+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
-function renderCalendar(){rhGet("/api/rh/planning",function(list){
+var _planningView="semaine";
+var _planningDate=new Date();
+var _planningColors={"normal":"#3b82f6","astreinte":"#f59e0b","nuit":"#6366f1","dimanche":"#ef4444","ferie":"#22c55e"};
+var _statutColors={"present":"#22c55e","conge_cp":"#f97316","conge_maladie":"#e11d48","arret_maladie":"#e11d48","arret_accident_travail":"#dc2626","formation":"#0ea5e9","teletravail":"#8b5cf6"};
+
+function setPlanningView(v){_planningView=v;
+["jour","semaine","mois","annee"].forEach(function(k){var b=document.getElementById("pl-v-"+k);if(b){b.style.border="2px solid transparent";b.style.background="";b.style.color="";}});
+var ab=document.getElementById("pl-v-"+v);if(ab){ab.style.border="2px solid var(--p2)";ab.style.background="var(--p2)";ab.style.color="#fff";}
+renderPlanningView();}
+
+function planningNav(dir){
+if(_planningView==="jour"){_planningDate.setDate(_planningDate.getDate()+dir);}
+else if(_planningView==="semaine"){_planningDate.setDate(_planningDate.getDate()+7*dir);}
+else if(_planningView==="mois"){_planningDate.setMonth(_planningDate.getMonth()+dir);}
+else if(_planningView==="annee"){_planningDate.setFullYear(_planningDate.getFullYear()+dir);}
+document.getElementById("rh-pl-sem").value=_planningDate.toISOString().substring(0,10);
+renderPlanningView();}
+
+function planningGoToday(){_planningDate=new Date();document.getElementById("rh-pl-sem").value=_planningDate.toISOString().substring(0,10);renderPlanningView();}
+
+function renderPlanningView(){
+var semInput=document.getElementById("rh-pl-sem");
+if(semInput&&semInput.value){_planningDate=new Date(semInput.value+"T12:00:00");}
+if(_planningView==="jour")renderPlanningJour();
+else if(_planningView==="semaine")renderPlanningHebdo();
+else if(_planningView==="mois")renderPlanningMois();
+else if(_planningView==="annee")renderPlanningAnnee();}
+
+function _plFilter(){return(document.getElementById("rh-pl-filter")||{}).value||"";}
+function _plStatutFilter(){return(document.getElementById("rh-pl-statut-filter")||{}).value||"";}
+function _plFmtDate(d){return d.toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long",year:"numeric"});}
+function _plStatutBadge(st){var c=_statutColors[st]||"#94a3b8";var labels={"present":"Present","conge_cp":"Conge CP","conge_maladie":"Arret maladie","arret_maladie":"Arret maladie","arret_accident_travail":"AT","formation":"Formation","teletravail":"Teletravail"};return "<span style='background:"+c+";color:#fff;border-radius:4px;padding:1px 6px;font-size:.75em'>"+(labels[st]||st||"Present")+"</span>";}
+function _plSlotDiv(s){var tp=s.type_poste||s.type||"normal";var bg=_planningColors[tp]||"#3b82f6";return "<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 6px;margin:1px 0;font-size:.78em;display:inline-block'>"+(s.heure_debut||"")+"-"+(s.heure_fin||"")+"</div>";}
+
+function renderPlanningJour(){
+var ds=_planningDate.toISOString().substring(0,10);
+var label=document.getElementById("rh-pl-period-label");if(label)label.textContent=_plFmtDate(_planningDate);
+var filter=_plFilter().toLowerCase();var stFilter=_plStatutFilter();
+var url="/api/rh/planning/jour?date_jour="+ds;if(stFilter)url+="&statut="+stFilter;
+rhGet(url,function(data){
 var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
-var semInput=document.getElementById("rh-pl-sem");var filterInput=document.getElementById("rh-pl-filter");
-var startDate;if(semInput&&semInput.value){startDate=new Date(semInput.value);}else{startDate=new Date();startDate.setDate(startDate.getDate()-startDate.getDay()+1);}
-var filter=(filterInput&&filterInput.value)?filterInput.value.toLowerCase():"";
+var entrees=data.entrees||[];if(filter)entrees=entrees.filter(function(e){return(e.salarie_nom||e.salarie_id||"").toLowerCase().indexOf(filter)>=0;});
+var h="<div style='text-align:center;margin:8px 0;font-size:.85em;color:var(--tx2)'>"+data.jour+" &mdash; <b>"+data.nb_presents+"</b> present(s), <b>"+data.nb_absents+"</b> absent(s)</div>";
+h+="<table style='width:100%;border-collapse:collapse;font-size:.85em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left'>Salarie</th><th>Horaires</th><th>Type</th><th>Statut</th></tr>";
+if(!entrees.length){h+="<tr><td colspan='4' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun salarie ce jour.</td></tr>";}
+for(var i=0;i<entrees.length;i++){var e=entrees[i];var st=e.statut_reel||e.statut||"present";var stc=_statutColors[st]||"#94a3b8";
+h+="<tr style='border-bottom:1px solid var(--brd)'><td style='padding:6px;font-weight:600'>"+_esc(e.salarie_nom||e.salarie_id||"?")+"</td>";
+h+="<td style='text-align:center'>"+((e.heure_debut&&e.heure_fin)?_plSlotDiv(e):"<span style='color:#cbd5e1'>-</span>")+"</td>";
+h+="<td style='text-align:center'><span class='badge badge-blue'>"+(e.type_poste||"-")+"</span></td>";
+h+="<td style='text-align:center'>"+_plStatutBadge(st)+"</td></tr>";}
+h+="</table>";
+cal.innerHTML=h;
+_renderPlanningStats(data);});}
+
+function renderPlanningHebdo(){
+var startDate=new Date(_planningDate);startDate.setDate(startDate.getDate()-startDate.getDay()+1);
+var endDate=new Date(startDate);endDate.setDate(endDate.getDate()+6);
+var label=document.getElementById("rh-pl-period-label");
+if(label)label.textContent=startDate.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+" - "+endDate.toLocaleDateString("fr-FR",{day:"numeric",month:"short",year:"numeric"});
+var filter=_plFilter().toLowerCase();var stFilter=_plStatutFilter();
+rhGet("/api/rh/planning",function(list){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+if(Array.isArray(list)===false&&list.entrees)list=list.entrees;
+if(!Array.isArray(list))list=[];
 var jours=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
-var colors={"normal":"#3b82f6","astreinte":"#f59e0b","nuit":"#6366f1","dimanche":"#ef4444","ferie":"#22c55e"};
-var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left'>Salarie</th>";
-for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);h+="<th style='padding:8px;text-align:center'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
+var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left;min-width:120px'>Salarie</th>";
+for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);var isToday=d.toISOString().substring(0,10)===new Date().toISOString().substring(0,10);h+="<th style='padding:8px;text-align:center;"+(isToday?"background:#1e40af;":"")+"'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
 h+="</tr>";
-var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;if(!salaries[sid])salaries[sid]={};var pd=new Date(p.date);for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
-for(var sid in salaries){h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd)'>"+sid+"</td>";for(var j=0;j<7;j++){h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){var s=slots[k];var tp=s.type_poste||s.type||"normal";var bg=colors[tp]||"#3b82f6";h+="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 4px;margin:1px 0;font-size:.78em'>"+s.heure_debut+"-"+s.heure_fin+"</div>";}
+var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;var st=p.statut_reel||p.statut||"present";if(stFilter&&st!==stFilter)continue;if(!salaries[sid])salaries[sid]={statut:st};var pd=new Date(p.date+"T12:00:00");for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
+var nbPresent=0,nbAbsent=0;
+for(var sid in salaries){var st=salaries[sid].statut||"present";var stc=_statutColors[st]||"#94a3b8";
+h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd);border-left:4px solid "+stc+"'>"+_esc(sid)+" "+_plStatutBadge(st)+"</td>";
+if(st==="present")nbPresent++;else nbAbsent++;
+for(var j=0;j<7;j++){var isToday2=false;var cd2=new Date(startDate);cd2.setDate(cd2.getDate()+j);if(cd2.toISOString().substring(0,10)===new Date().toISOString().substring(0,10))isToday2=true;
+h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top;"+(isToday2?"background:rgba(59,130,246,.06);":"")+"'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){h+=_plSlotDiv(slots[k]);}
 if(!slots.length)h+="<span style='color:#cbd5e1'>-</span>";h+="</td>";}h+="</tr>";}
 if(!Object.keys(salaries).length){h+="<tr><td colspan='8' style='text-align:center;padding:20px;color:var(--tx2)'>Aucun creneau pour cette semaine.</td></tr>";}
 h+="</table>";
-h+="<div style='margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;font-size:.8em'>";
-var colorLabels={"normal":"Normal","astreinte":"Astreinte","nuit":"Nuit (+25% min)","dimanche":"Dimanche (+100%)","ferie":"Ferie (+100%)"};
-for(var tp in colors){h+="<span style='display:inline-flex;align-items:center;gap:4px'><span style='width:14px;height:14px;border-radius:3px;background:"+colors[tp]+";display:inline-block'></span>"+colorLabels[tp]+"</span>";}
+cal.innerHTML=h;
+var statsEl=document.getElementById("rh-pl-stats");if(statsEl)statsEl.innerHTML="<div class='card' style='padding:8px 14px;background:#f0fdf4;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#16a34a'>"+nbPresent+"</div><div style='font-size:.78em;color:#166534'>Presents</div></div><div class='card' style='padding:8px 14px;background:#fef2f2;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#dc2626'>"+nbAbsent+"</div><div style='font-size:.78em;color:#991b1b'>Absents</div></div>";});}
+
+function renderPlanningMois(){
+var y=_planningDate.getFullYear();var m=_planningDate.getMonth()+1;
+var moisNoms=["","Janvier","Fevrier","Mars","Avril","Mai","Juin","Juillet","Aout","Septembre","Octobre","Novembre","Decembre"];
+var label=document.getElementById("rh-pl-period-label");if(label)label.textContent=moisNoms[m]+" "+y;
+var filter=_plFilter().toLowerCase();var stFilter=_plStatutFilter();
+var url="/api/rh/planning/mois?annee="+y+"&mois="+m;if(stFilter)url+="&statut="+stFilter;
+rhGet(url,function(data){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+var jours=data.jours||[];
+var joursSem=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
+var h="<table style='width:100%;border-collapse:collapse;font-size:.78em;table-layout:fixed'>";
+h+="<tr style='background:var(--p2);color:#fff'>";for(var j=0;j<7;j++)h+="<th style='padding:6px;text-align:center;width:14.28%'>"+joursSem[j]+"</th>";h+="</tr>";
+var firstDay=new Date(y,m-1,1);var startDow=(firstDay.getDay()+6)%7;
+var todayStr=new Date().toISOString().substring(0,10);
+h+="<tr>";for(var i=0;i<startDow;i++)h+="<td style='border:1px solid var(--brd);padding:4px;vertical-align:top;min-height:60px'></td>";
+var cellCount=startDow;
+for(var d=0;d<jours.length;d++){if(cellCount>0&&cellCount%7===0)h+="</tr><tr>";
+var jour=jours[d];var isToday=jour.date===todayStr;
+var bgCol=isToday?"rgba(59,130,246,.1)":"";
+h+="<td style='border:1px solid var(--brd);padding:4px;vertical-align:top;min-height:70px;background:"+bgCol+"'>";
+h+="<div style='font-weight:600;font-size:1em;margin-bottom:2px;"+(isToday?"color:var(--p2);":"")+"'>"+(d+1)+"</div>";
+if(jour.nb_salaries>0){
+h+="<div style='display:flex;gap:3px;flex-wrap:wrap'>";
+if(jour.nb_presents>0)h+="<span style='background:#22c55e;color:#fff;border-radius:3px;padding:0 4px;font-size:.72em'>"+jour.nb_presents+" P</span>";
+if(jour.nb_absents>0)h+="<span style='background:#ef4444;color:#fff;border-radius:3px;padding:0 4px;font-size:.72em'>"+jour.nb_absents+" A</span>";
 h+="</div>";
-cal.innerHTML=h;});}
+var entrees=jour.entrees||[];if(filter)entrees=entrees.filter(function(e){return(e.salarie_nom||e.salarie_id||"").toLowerCase().indexOf(filter)>=0;});
+for(var e=0;e<Math.min(entrees.length,3);e++){var en=entrees[e];var stc=_statutColors[en.statut]||"#94a3b8";
+h+="<div style='font-size:.68em;margin-top:1px;border-left:3px solid "+stc+";padding-left:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis' title='"+_esc(en.salarie_nom||en.salarie_id)+" - "+_esc(en.statut||"present")+"'>"+_esc(en.salarie_nom||en.salarie_id||"?")+"</div>";}
+if(entrees.length>3)h+="<div style='font-size:.65em;color:var(--tx2)'>+"+(entrees.length-3)+" autres</div>";}
+h+="</td>";cellCount++;}
+while(cellCount%7!==0){h+="<td style='border:1px solid var(--brd);padding:4px'></td>";cellCount++;}
+h+="</tr></table>";
+cal.innerHTML=h;
+var statsEl=document.getElementById("rh-pl-stats");if(statsEl){var totH=data.total_heures_planifiees||0;statsEl.innerHTML="<div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:var(--p2)'>"+totH+"h</div><div style='font-size:.78em;color:var(--tx2)'>Heures planifiees</div></div>";}});}
+
+function renderPlanningAnnee(){
+var y=_planningDate.getFullYear();
+var label=document.getElementById("rh-pl-period-label");if(label)label.textContent="Annee "+y;
+var filter=_plFilter().toLowerCase();
+var url="/api/rh/planning/annee?annee="+y;if(filter)url+="&salarie_id="+encodeURIComponent(filter);
+rhGet(url,function(data){
+var cal=document.getElementById("rh-pl-calendar");if(!cal)return;
+var moisData=data.mois||[];
+var moisNoms=["","Jan","Fev","Mar","Avr","Mai","Jun","Jul","Aou","Sep","Oct","Nov","Dec"];
+var h="<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:8px'>";
+for(var i=0;i<moisData.length;i++){var md=moisData[i];
+var pct=md.jours_travailles>0?Math.round((md.jours_travailles/(md.jours_travailles+md.jours_absence||1))*100):0;
+var barColor=pct>75?"#22c55e":(pct>50?"#f59e0b":"#ef4444");
+h+="<div class='card' style='padding:10px;cursor:pointer' onclick='_planningDate=new Date("+y+","+(md.mois-1)+",1);setPlanningView(\"mois\")'>";
+h+="<div style='font-weight:700;font-size:.95em;margin-bottom:6px'>"+moisNoms[md.mois]+"</div>";
+h+="<div style='display:flex;justify-content:space-between;font-size:.78em;color:var(--tx2)'><span>"+md.jours_travailles+"j trav.</span><span>"+md.heures_planifiees+"h</span></div>";
+if(md.jours_absence>0)h+="<div style='font-size:.75em;color:#e11d48;margin-top:2px'>"+md.jours_absence+"j absence</div>";
+h+="<div style='background:#e5e7eb;border-radius:4px;height:6px;margin-top:6px'><div style='background:"+barColor+";border-radius:4px;height:6px;width:"+pct+"%'></div></div>";
+h+="</div>";}
+h+="</div>";
+cal.innerHTML=h;
+var statsEl=document.getElementById("rh-pl-stats");if(statsEl)statsEl.innerHTML="<div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:var(--p2)'>"+data.total_heures+"h</div><div style='font-size:.78em;color:var(--tx2)'>Total heures "+y+"</div></div><div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#16a34a'>"+data.total_jours_travailles+"</div><div style='font-size:.78em;color:var(--tx2)'>Jours travailles</div></div><div class='card' style='padding:8px 14px;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#dc2626'>"+data.total_jours_absence+"</div><div style='font-size:.78em;color:var(--tx2)'>Jours absence</div></div>";});}
+
+function _renderPlanningStats(data){var el=document.getElementById("rh-pl-stats");if(!el)return;el.innerHTML="<div class='card' style='padding:8px 14px;background:#f0fdf4;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#16a34a'>"+(data.nb_presents||0)+"</div><div style='font-size:.78em;color:#166534'>Presents</div></div><div class='card' style='padding:8px 14px;background:#fef2f2;text-align:center'><div style='font-size:1.3em;font-weight:700;color:#dc2626'>"+(data.nb_absents||0)+"</div><div style='font-size:.78em;color:#991b1b'>Absents</div></div>";}
+
+function integrerSalaries(){
+var today=new Date();var nextWeek=new Date();nextWeek.setDate(nextWeek.getDate()+7);
+document.getElementById("rh-pl-int-debut").value=today.toISOString().substring(0,10);
+document.getElementById("rh-pl-int-fin").value=nextWeek.toISOString().substring(0,10);
+document.getElementById("rh-pl-integrer-section").open=true;
+document.getElementById("rh-pl-integrer-section").scrollIntoView({behavior:"smooth"});}
+
+function integrerSalariesManuel(){
+var fd=new FormData();
+fd.append("date_debut",document.getElementById("rh-pl-int-debut").value);
+fd.append("date_fin",document.getElementById("rh-pl-int-fin").value);
+fd.append("heure_debut",document.getElementById("rh-pl-int-hd").value);
+fd.append("heure_fin",document.getElementById("rh-pl-int-hf").value);
+fd.append("jours_semaine",document.getElementById("rh-pl-int-jours").value);
+rhPost("/api/rh/planning/integrer-salaries",fd,function(d){
+var res=document.getElementById("rh-pl-int-result");
+res.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span><b>"+d.nb_entrees_creees+"</b> creneaux crees pour <b>"+d.nb_salaries+"</b> salaries.</span></div>";
+toast(d.nb_entrees_creees+" creneaux crees","ok");renderPlanningView();});}
+
+function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
+rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");renderPlanningView();});}
+function loadRHPlanning(){renderPlanningView();}
+function renderCalendar(){renderPlanningView();}
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
 function voirBulletinDoc(el){var bid=el.dataset.bid;if(bid)window.open("/api/rh/bulletins/"+bid+"/document","_blank");}
 
@@ -14048,6 +14361,9 @@ function loadEntete(){rhGet("/api/config/entete",function(d){if(!d||!d.nom_entre
 
 function ajouterCompteURSSAF(){var c={siret:document.getElementById("urssaf-siret").value,compte:document.getElementById("urssaf-compte").value,caisse:document.getElementById("urssaf-caisse").value,taux_at:document.getElementById("urssaf-at").value};if(!c.siret||!c.compte){toast("SIRET et N compte obligatoires.");return;}_urssafComptes.push(c);renderComptesURSSAF();toast("Compte URSSAF ajoute.","ok");}
 function renderComptesURSSAF(){var el=document.getElementById("urssaf-list");if(!_urssafComptes.length){el.innerHTML="";return;}var h="<table><tr><th>SIRET</th><th>N Compte</th><th>Caisse</th><th>Taux AT</th></tr>";for(var i=0;i<_urssafComptes.length;i++){var c=_urssafComptes[i];h+="<tr><td>"+c.siret+"</td><td>"+c.compte+"</td><td>"+c.caisse+"</td><td>"+c.taux_at+"%</td></tr>";}h+="</table>";el.innerHTML=h;}
+
+/* === HELPERS === */
+function _esc(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 
 /* === TOAST === */
 var _toastStack=[];
