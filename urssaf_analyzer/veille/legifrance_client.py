@@ -272,6 +272,98 @@ class LegifranceClient:
 # --- Donnees pre-chargees (mode hors-ligne) ---
 
 ARTICLES_CSS_COTISATIONS = {
+    2020: {
+        "description": "Legislation cotisations sociales 2020 - Reforme assurance chomage et Covid-19",
+        "textes_cles": [
+            {
+                "reference": "Art. L241-13 CSS",
+                "titre": "Reduction generale des cotisations patronales (Fillon)",
+                "resume": "Extension aux cotisations de retraite complementaire depuis le 1er janvier 2019. Parametre T = 0.3205 (< 50 sal.) ou 0.3245 (>= 50 sal.).",
+                "url": "https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000041469040",
+            },
+            {
+                "reference": "Ordonnance 2020-312",
+                "titre": "Mesures d'urgence Covid-19 - Report de cotisations",
+                "resume": "Report des echeances URSSAF pour les employeurs impactes par la crise sanitaire.",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000041746313",
+            },
+            {
+                "reference": "Decret 2019-797 (modifie)",
+                "titre": "Reforme de l'assurance chomage - Bonus-malus",
+                "resume": "Introduction du bonus-malus sur les cotisations chomage pour les entreprises de 11 salaries et plus dans certains secteurs.",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000038829574",
+            },
+        ],
+    },
+    2021: {
+        "description": "Legislation cotisations sociales 2021 - Aides embauche et prolongation mesures Covid",
+        "textes_cles": [
+            {
+                "reference": "Decret 2021-94",
+                "titre": "Aide a l'embauche des jeunes de moins de 26 ans",
+                "resume": "Aide de 4 000 EUR pour l'embauche d'un jeune de moins de 26 ans en CDI ou CDD de plus de 3 mois, remunere jusqu'a 2 SMIC.",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000043034903",
+            },
+            {
+                "reference": "Art. L6243-2 CT (modifie)",
+                "titre": "Aide exceptionnelle aux employeurs d'apprentis",
+                "resume": "Aide unique de 5 000 EUR (mineur) ou 8 000 EUR (majeur) pour la 1ere annee du contrat d'apprentissage.",
+                "url": "https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000037385842",
+            },
+            {
+                "reference": "LFSS 2021 art. 9",
+                "titre": "Prolongation des exonerations Covid",
+                "resume": "Prolongation des dispositifs d'exoneration et d'aide au paiement des cotisations pour les secteurs proteges (S1/S1bis).",
+                "url": "https://www.legifrance.gouv.fr/jorf/id/JORFTEXT000042665307",
+            },
+        ],
+    },
+    2022: {
+        "description": "Legislation cotisations sociales 2022 - Hausse SMIC et mesures pouvoir d'achat",
+        "textes_cles": [
+            {
+                "reference": "Decret 2022-1608",
+                "titre": "PASS 2022 et SMIC - revalorisations successives",
+                "resume": "SMIC revalorise 3 fois en 2022 (janv., mai, aout) en raison de l'inflation. PASS inchange a 41 136 EUR.",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000046771180",
+            },
+            {
+                "reference": "Loi 2022-1158 art. 1",
+                "titre": "Loi pouvoir d'achat - PPV (Prime de Partage de la Valeur)",
+                "resume": "Remplacement de la PEPA par la PPV. Exoneration de cotisations et d'impot sous conditions (plafond 3 000 EUR ou 6 000 EUR).",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000046186723",
+            },
+            {
+                "reference": "Art. L241-17 CSS",
+                "titre": "Exoneration heures supplementaires (TEPA)",
+                "resume": "Reduction de cotisations salariales sur les heures supplementaires (11,31%) et exoneration IR dans la limite de 7 500 EUR/an.",
+                "url": "https://www.legifrance.gouv.fr/codes/article_lc/LEGIARTI000037949929",
+            },
+        ],
+    },
+    2023: {
+        "description": "Legislation cotisations sociales 2023 - Hausse PASS et reforme retraites",
+        "textes_cles": [
+            {
+                "reference": "Decret 2022-1608",
+                "titre": "PASS 2023 - Revalorisation historique (+6.9%)",
+                "resume": "PASS annuel porte a 43 992 EUR (mensuel 3 666 EUR). Plus forte hausse depuis 20 ans, impact direct sur les cotisations plafonnees.",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000046771180",
+            },
+            {
+                "reference": "Loi 2023-270",
+                "titre": "Reforme des retraites - Report age legal",
+                "resume": "Age legal de depart progressivement porte a 64 ans. Acceleration du calendrier Touraine (43 annuites). Impact sur les cotisations vieillesse.",
+                "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000047466357",
+            },
+            {
+                "reference": "LFSS 2023 art. 10",
+                "titre": "Aide unique apprentissage 6 000 EUR",
+                "resume": "Aide unique de 6 000 EUR pour tout contrat d'apprentissage, quel que soit l'age de l'apprenti et le niveau du diplome (prolongee en 2024).",
+                "url": "https://www.legifrance.gouv.fr/jorf/id/JORFTEXT000046796753",
+            },
+        ],
+    },
     2024: {
         "description": "Legislation cotisations sociales 2024",
         "textes_cles": [

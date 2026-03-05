@@ -3703,6 +3703,70 @@ async def sim_exonerations(
             "conditions": "Zone a finalite regionale. Exoneration partielle cotisations."})
         total_exo += exo_afr
 
+    # === REGLES DE NON-CUMUL DES EXONERATIONS ===
+    # Certaines exonerations sont mutuellement exclusives (Art. L.131-4-2, L.131-4-3 CSS)
+    _NON_CUMUL_GROUPS = {
+        "zone": ["Exoneration ZRR", "Exoneration ZFU-TE", "Exoneration QPV",
+                 "Exoneration BER", "Exoneration AFR", "Exoneration ZRD"],
+        "generale_vs_zone": ["Reduction generale (ex-Fillon)"],
+    }
+    # La reduction generale n'est pas cumulable avec les exo de zone, JEI, LODEOM, ACRE
+    _INCOMPATIBLES_FILLON = [
+        "Exoneration ZRR", "Exoneration ZFU-TE", "Exoneration QPV",
+        "Exoneration BER", "Exoneration ZRD", "Exoneration AFR",
+        "Exoneration JEI (Jeune Entreprise Innovante)",
+        "ACRE (Aide aux Createurs/Repreneurs)",
+    ]
+    # ACRE non cumulable avec JEI
+    _INCOMPATIBLES_ACRE = ["Exoneration JEI (Jeune Entreprise Innovante)"]
+
+    # Detecter les exo applicables
+    noms_applicables = [e["nom"] for e in exonerations if e.get("applicable") and e.get("montant_mensuel", 0) > 0]
+
+    # Appliquer les regles de non-cumul
+    exo_desactivees = set()
+
+    # 1. Exonerations de zone mutuellement exclusives: garder la plus avantageuse
+    zone_exos = [e for e in exonerations if e["nom"] in _NON_CUMUL_GROUPS["zone"] and e.get("applicable") and e.get("montant_mensuel", 0) > 0]
+    if len(zone_exos) > 1:
+        zone_exos.sort(key=lambda e: e.get("montant_mensuel", 0), reverse=True)
+        for e in zone_exos[1:]:
+            exo_desactivees.add(e["nom"])
+
+    # 2. Reduction generale vs exonerations specifiques
+    has_fillon = any(e["nom"] == "Reduction generale (ex-Fillon)" and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
+    exos_specifiques = [e for e in exonerations if e["nom"] in _INCOMPATIBLES_FILLON and e.get("applicable") and e.get("montant_mensuel", 0) > 0]
+    if has_fillon and exos_specifiques:
+        fillon = next((e for e in exonerations if e["nom"] == "Reduction generale (ex-Fillon)"), None)
+        best_specific = max(exos_specifiques, key=lambda e: e.get("montant_mensuel", 0))
+        if fillon and best_specific["montant_mensuel"] >= fillon["montant_mensuel"]:
+            exo_desactivees.add("Reduction generale (ex-Fillon)")
+        else:
+            for e in exos_specifiques:
+                exo_desactivees.add(e["nom"])
+
+    # 3. ACRE vs JEI
+    has_acre = any(e["nom"] == "ACRE (Aide aux Createurs/Repreneurs)" and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
+    has_jei = any(e["nom"] == "Exoneration JEI (Jeune Entreprise Innovante)" and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
+    if has_acre and has_jei:
+        acre_m = next((e for e in exonerations if "ACRE" in e["nom"]), None)
+        jei_m = next((e for e in exonerations if "JEI" in e["nom"]), None)
+        if acre_m and jei_m and jei_m.get("montant_mensuel", 0) >= acre_m.get("montant_mensuel", 0):
+            exo_desactivees.add("ACRE (Aide aux Createurs/Repreneurs)")
+        elif acre_m and jei_m:
+            exo_desactivees.add("Exoneration JEI (Jeune Entreprise Innovante)")
+
+    # Recalculer le total en tenant compte des non-cumuls
+    total_exo = 0.0
+    for e in exonerations:
+        if e["nom"] in exo_desactivees:
+            e["applicable"] = False
+            e["conditions"] = (e.get("conditions", "") or "") + " [NON CUMULABLE - desactivee au profit d'une exoneration plus avantageuse]"
+            e["montant_mensuel"] = 0
+            e["montant_annuel"] = 0
+        if e.get("applicable") and e.get("montant_mensuel", 0) > 0:
+            total_exo += e["montant_mensuel"]
+
     # Impact des absences sur cotisations
     info_absences = {}
     if jours_absence > 0 and type_absence:
@@ -5864,8 +5928,45 @@ async def rechercher_subventions(
     # Filtrage : ne garder que les aides eligible = True
     aides_eligibles = [a for a in toutes_aides if a.get("eligible")]
 
-    # Tri par priorite puis nom
-    aides_eligibles.sort(key=lambda a: (a.get("priorite", 5), a["nom"]))
+    # Calculer un score de correspondance aux criteres utilisateur
+    criteres_actifs = []
+    if innovation: criteres_actifs.append("innovation")
+    if environnement: criteres_actifs.append("environnement")
+    if numerique: criteres_actifs.append("numerique")
+    if export_intl: criteres_actifs.append("export")
+    if formation: criteres_actifs.append("formation")
+    if creation_reprise: criteres_actifs.append("creation")
+    if investissement: criteres_actifs.append("investissement")
+    if ess: criteres_actifs.append("ess")
+    if zone and zone != "metropole": criteres_actifs.append("zone")
+
+    cat_critere_map = {
+        "innovation": "innovation", "environnement": "environnement",
+        "numerique": "numerique", "export": "export",
+        "emploi": "formation", "creation": "creation",
+        "investissement": "investissement", "ess": "ess",
+        "fiscal": "innovation", "social": "formation",
+    }
+
+    for a in aides_eligibles:
+        score = 0
+        cat = a.get("categorie", "")
+        mapped = cat_critere_map.get(cat, "")
+        if mapped and mapped in criteres_actifs:
+            score += 10
+        # Bonus si montant estime disponible
+        est = a.get("montant_estime")
+        if est and isinstance(est, (int, float)) and est > 0:
+            score += 5
+        a["_score_criteres"] = score
+
+    # Tri par: score criteres (desc), montant estime (desc), priorite, nom
+    def _sort_key(a):
+        est = a.get("montant_estime")
+        montant = est if isinstance(est, (int, float)) else 0
+        return (-a.get("_score_criteres", 0), -montant, a.get("priorite", 5), a["nom"])
+
+    aides_eligibles.sort(key=_sort_key)
 
     # Statistiques
     montant_total = 0
@@ -11006,13 +11107,16 @@ async def liste_salaries():
 async def ajouter_planning(
     salarie_id: str = Form(...),
     date: str = Form(...),
+    date_fin: str = Form(""),
     heure_debut: str = Form(""),
     heure_fin: str = Form(""),
     type_poste: str = Form(""),
     statut: str = Form(""),
+    jours_semaine: str = Form("1,2,3,4,5"),
 ):
     """Ajoute ou modifie une entree de planning pour un salarie.
 
+    Si date_fin est fourni, cree des entrees pour chaque jour de la periode.
     Si heure_debut/heure_fin ne sont pas fournis, utilise le creneau par defaut.
     Le statut peut etre force (conge_cp, arret_maladie...) ou determine automatiquement.
     """
@@ -11028,8 +11132,6 @@ async def ajouter_planning(
     if type_poste not in types_valides:
         raise HTTPException(400, f"Type de poste invalide. Valeurs acceptees: {', '.join(types_valides)}")
 
-    planning_id = str(uuid.uuid4())[:8]
-
     # Calcul de la duree
     try:
         h_deb = datetime.strptime(heure_debut, "%H:%M")
@@ -11040,45 +11142,72 @@ async def ajouter_planning(
         duree_heures = 0
 
     majorations = _calculer_majorations(type_poste)
-
-    # Verifier s'il existe deja une entree pour ce salarie a cette date/heure
-    index_existant = None
-    for i, p in enumerate(_rh_planning):
-        if p["salarie_id"] == salarie_id and p["date"] == date and p["heure_debut"] == heure_debut:
-            index_existant = i
-            break
-
-    # Resoudre le nom du salarie
     sal_info = _resoudre_salarie(salarie_id)
 
-    # Determiner le statut automatiquement si non force
-    if not statut:
-        statut = _get_statut_jour(salarie_id, date)
+    # Determiner les jours de la semaine a planifier
+    try:
+        jours_valides = [int(j) for j in jours_semaine.split(",") if j.strip()]
+    except ValueError:
+        jours_valides = [1, 2, 3, 4, 5]
 
-    entree = {
-        "id": planning_id,
-        "salarie_id": salarie_id,
-        "salarie_nom": sal_info["nom_complet"],
-        "salarie_statut": sal_info["statut"],
-        "date": date,
-        "heure_debut": heure_debut,
-        "heure_fin": heure_fin,
-        "duree_heures": duree_heures,
-        "type_poste": type_poste,
-        "statut": statut,
-        "majorations": majorations,
-        "date_creation": datetime.now().isoformat(),
-    }
-
-    if index_existant is not None:
-        entree["id"] = _rh_planning[index_existant]["id"]
-        _rh_planning[index_existant] = entree
-        log_action("utilisateur", "modification_planning", f"salarie {salarie_id} le {date} {heure_debut}-{heure_fin}")
+    # Generer la liste de dates (mono ou periode)
+    dates_a_planifier = []
+    if date_fin and date_fin >= date:
+        from datetime import timedelta as _td
+        d_start = datetime.strptime(date, "%Y-%m-%d")
+        d_end = datetime.strptime(date_fin, "%Y-%m-%d")
+        current = d_start
+        while current <= d_end:
+            # isoweekday: 1=lundi, 7=dimanche
+            if current.isoweekday() in jours_valides:
+                dates_a_planifier.append(current.strftime("%Y-%m-%d"))
+            current += _td(days=1)
     else:
-        _rh_planning.append(entree)
-        log_action("utilisateur", "ajout_planning", f"salarie {salarie_id} le {date} {heure_debut}-{heure_fin} ({type_poste})")
+        dates_a_planifier = [date]
 
-    return entree
+    nb_creees = 0
+    derniere_entree = None
+    for d in dates_a_planifier:
+        planning_id = str(uuid.uuid4())[:8]
+
+        # Determiner le statut automatiquement si non force
+        st = statut if statut else _get_statut_jour(salarie_id, d)
+
+        entree = {
+            "id": planning_id,
+            "salarie_id": salarie_id,
+            "salarie_nom": sal_info["nom_complet"],
+            "salarie_statut": sal_info["statut"],
+            "date": d,
+            "heure_debut": heure_debut,
+            "heure_fin": heure_fin,
+            "duree_heures": duree_heures,
+            "type_poste": type_poste,
+            "statut": st,
+            "majorations": majorations,
+            "date_creation": datetime.now().isoformat(),
+        }
+
+        # Verifier s'il existe deja une entree pour ce salarie a cette date/heure
+        index_existant = None
+        for i, p in enumerate(_rh_planning):
+            if p["salarie_id"] == salarie_id and p["date"] == d and p["heure_debut"] == heure_debut:
+                index_existant = i
+                break
+
+        if index_existant is not None:
+            entree["id"] = _rh_planning[index_existant]["id"]
+            _rh_planning[index_existant] = entree
+        else:
+            _rh_planning.append(entree)
+            nb_creees += 1
+        derniere_entree = entree
+
+    log_action("utilisateur", "ajout_planning", f"salarie {salarie_id} {date}-{date_fin or date} {heure_debut}-{heure_fin} ({type_poste}) - {nb_creees} creneaux")
+
+    if len(dates_a_planifier) > 1:
+        return {"ok": True, "nb_creneaux_crees": nb_creees, "periode": f"{date} - {date_fin}", "derniere_entree": derniere_entree}
+    return derniere_entree
 
 
 @app.get("/api/rh/planning")
@@ -12639,7 +12768,7 @@ tr:hover{background:var(--pl)}.num{text-align:right;font-family:'SF Mono','Conso
 .badge-red{background:var(--rl);color:var(--r)}.badge-amber{background:var(--ol);color:#d97706}
 .badge-purple{background:var(--pul);color:var(--pu)}.badge-teal{background:#f0fdfa;color:var(--tl)}
 .badge-paye{background:var(--gl);color:#16a34a}.badge-impaye{background:var(--rl);color:var(--r)}
-.sug-box{position:relative;z-index:50}.sug-box .sug-list{position:absolute;left:0;right:0;background:var(--card-bg);border:1px solid var(--brd);border-radius:6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.1);display:none}.sug-box .sug-list.show{display:block}.sug-item{padding:8px 10px;cursor:pointer;font-size:.84em;border-bottom:1px solid #f1f5f9;min-height:44px;display:flex;align-items:center}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
+.sug-box{position:relative;z-index:999}.sug-box .sug-list{position:absolute;left:0;right:0;top:0;background:var(--card-bg);border:1px solid var(--brd);border-radius:6px;max-height:280px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.18);display:none;z-index:9999}.sug-box .sug-list.show{display:block}.sug-item{padding:8px 10px;cursor:pointer;font-size:.84em;border-bottom:1px solid #f1f5f9;min-height:44px;display:flex;align-items:center}.sug-item:hover{background:var(--pl)}.sug-item .sug-num{font-weight:700;color:var(--p2)}.sug-item .sug-lbl{color:var(--tx2);margin-left:6px}
 /* Tabs */
 .tabs{display:flex;flex-wrap:wrap;gap:4px;background:#e2e8f0;border-radius:12px;padding:5px;margin-bottom:16px}
 .tab{padding:8px 14px;cursor:pointer;border-radius:8px;color:var(--tx2);font-weight:600;font-size:.82em;transition:all .2s ease;white-space:nowrap;-webkit-tap-highlight-color:transparent;min-height:38px;display:inline-flex;align-items:center}
@@ -12772,6 +12901,8 @@ th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
 <script>
 /* === CORE NAV (inline before content to guarantee availability) === */
 var _ncUser=null;
+/* Global fetch wrapper: auto-include credentials for API calls */
+(function(){var _origFetch=window.fetch;window.fetch=function(url,opts){opts=opts||{};if(typeof url==="string"&&url.indexOf("/api/")>=0){if(!opts.credentials)opts.credentials="same-origin";}return _origFetch.call(this,url,opts);};})();
 var titles={"dashboard":"Dashboard","analyse":"Import / Analyse","biblio":"Bibliotheque","factures":"Factures","dsn":"Creation DSN","compta":"Comptabilite","rh":"Ressources humaines","simulation":"Simulation","subventions":"Subventions et aides","veille":"Veille juridique","portefeuille":"Portefeuille","equipe":"Equipe","config":"Configuration","score-details":"Details des scores de conformite","ensavoirplus":"En savoir plus"};
 function toggleSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.toggle("open");if(ov)ov.classList.toggle("show");}
 function closeSidebar(){var sb=document.getElementById("sidebar");var ov=document.getElementById("sidebar-overlay");if(sb)sb.classList.remove("open");if(ov)ov.classList.remove("show");}
@@ -13330,7 +13461,7 @@ APP_HTML += """
 <div class="card">
 <h2>Veille juridique</h2>
 <p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Baremes et legislation 2020-2026. Historique 6 ans.</p>
-<div class="g3"><div><label>Annee</label><select id="v-annee"><option value="2020">2020</option><option value="2021">2021</option><option value="2022">2022</option><option value="2023">2023</option><option value="2024">2024</option><option value="2025">2025</option><option value="2026" selected>2026</option></select></div><div><button class="btn btn-blue btn-f" onclick="loadVeille()" style="margin-top:22px">Charger</button></div><div><button class="btn btn-s btn-f" onclick="compAnnees()" style="margin-top:22px">Comparer N-1</button></div></div>
+<div class="g3"><div><label>Annee</label><select id="v-annee" onchange="loadVeille()"><option value="2020">2020</option><option value="2021">2021</option><option value="2022">2022</option><option value="2023">2023</option><option value="2024">2024</option><option value="2025">2025</option><option value="2026" selected>2026</option></select></div><div><button class="btn btn-blue btn-f" onclick="loadVeille()" style="margin-top:22px">Charger</button></div><div><button class="btn btn-s btn-f" onclick="compAnnees()" style="margin-top:22px">Comparer N-1</button></div></div>
 </div>
 <div id="v-res" style="display:none">
 <div class="card"><h2>Baremes URSSAF</h2><div class="btn-group" style="justify-content:flex-end"><button class="btn btn-s btn-sm" onclick="exportSection('veille')">&#128190; Export</button></div><div id="v-baremes"></div></div>
@@ -13587,9 +13718,12 @@ APP_HTML += """
 <details style="margin-bottom:12px">
 <summary style="cursor:pointer;font-weight:600;color:var(--p2)">&#10010; Ajouter un creneau manuellement</summary>
 <div style="margin-top:10px">
-<div class="g3"><div><label>Salarie</label><input id="rh-pl-sal" placeholder="Nom"></div>
-<div><label>Date</label><input type="date" id="rh-pl-date"></div>
-<div><label>Type</label><select id="rh-pl-type"><option value="normal">Normal</option><option value="astreinte">Astreinte</option><option value="nuit">Nuit</option><option value="dimanche">Dimanche</option><option value="ferie">Jour ferie</option></select></div></div>
+<div class="g3"><div><label>Salarie</label><input id="rh-pl-sal" placeholder="Nom ou ID"></div>
+<div><label>Date debut</label><input type="date" id="rh-pl-date"></div>
+<div><label>Date fin (optionnel, pour une periode)</label><input type="date" id="rh-pl-date-fin"></div></div>
+<div class="g3"><div><label>Type</label><select id="rh-pl-type"><option value="normal">Normal</option><option value="astreinte">Astreinte</option><option value="nuit">Nuit</option><option value="dimanche">Dimanche</option><option value="ferie">Jour ferie</option></select></div>
+<div><label>Statut</label><select id="rh-pl-statut"><option value="">Automatique</option><option value="present">Present</option><option value="conge_cp">Conge CP</option><option value="conge_maladie">Arret maladie</option><option value="arret_accident_travail">Accident travail</option><option value="formation">Formation</option><option value="teletravail">Teletravail</option></select></div>
+<div><label>Jours a planifier</label><select id="rh-pl-jours"><option value="1,2,3,4,5">Lun-Ven</option><option value="1,2,3,4,5,6">Lun-Sam</option><option value="1,2,3,4,5,6,7">Tous les jours</option></select></div></div>
 <div class="g3"><div><label>Heure debut</label><input type="time" id="rh-pl-hd" value="09:00"></div>
 <div><label>Heure fin</label><input type="time" id="rh-pl-hf" value="17:00"></div>
 <div><button class="btn btn-blue btn-f" onclick="ajouterPlanning()" style="margin-top:22px">Ajouter</button></div></div>
@@ -13799,6 +13933,18 @@ APP_HTML += """
 <label>Message personnalise (optionnel)</label><input id="cfg-al-msg" placeholder="Message personnalise pour cette alerte">
 <button class="btn btn-blue btn-f" onclick="sauverAlertConfig()" style="margin-top:8px">Enregistrer la configuration</button>
 <div id="cfg-al-res" style="margin-top:8px"></div>
+</div>
+<div class="card">
+<h2>&#10010; Creer une alerte personnalisee</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Ajoutez une alerte avec un nom personnalise. Pour un parametrage complet (recurrence, destinataire, reference legale), utilisez l onglet <strong>RH > Alertes > Creer une alerte</strong>.</p>
+<div class="g3">
+<div><label>Nom de l alerte *</label><input id="cfg-al-libre-titre" placeholder="Ex: Renouvellement bail, Echeance certification..."></div>
+<div><label>Urgence</label><select id="cfg-al-libre-urgence"><option value="info">Info</option><option value="moyenne" selected>Moyenne</option><option value="haute">Haute</option></select></div>
+<div><label>Date d echeance</label><input type="date" id="cfg-al-libre-echeance"></div>
+</div>
+<div><label>Description (optionnel)</label><input id="cfg-al-libre-desc" placeholder="Description de l alerte..."></div>
+<button class="btn btn-blue btn-f" onclick="creerAlerteLibreDepuisConfig()" style="margin-top:8px">Creer l alerte</button>
+<div id="cfg-al-libre-res" style="margin-top:8px"></div>
 </div>
 <div class="card">
 <h2>&#128274; Signature electronique (eIDAS)</h2>
@@ -14572,14 +14718,14 @@ var _sugTimer=null;
 function suggestCompte(inputId,sugId,counterpartId){
 clearTimeout(_sugTimer);_sugTimer=setTimeout(function(){
 var v=document.getElementById(inputId).value;if(v.length<2){closeSugs(sugId);return;}
-fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)+"&description="+encodeURIComponent(v)).then(safeJson).then(function(d){
+fetch("/api/comptabilite/suggestions?compte="+encodeURIComponent(v)+"&description="+encodeURIComponent(v),{headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(d){
 var box=document.getElementById(sugId);var items=d.suggestions||[];if(!items.length){closeSugs(sugId);return;}
 var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<8;i++){var num=items[i].numero;var cp=(d.contreparties||{})[num]||"";var expl=items[i].explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:8px 10px' data-num='"+num+"' data-cp='"+cp+"' data-iid='"+inputId+"' data-sid='"+sugId+"' data-cpid='"+counterpartId+"'><div><span class='sug-num'>"+num+"</span><span class='sug-lbl'>"+items[i].libelle+"</span></div>"+(expl?"<div style='font-size:.78em;color:var(--tx2);margin-top:2px;line-height:1.3'>"+expl+"</div>":"")+"</div>";}
-h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(){});},250);}
+h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){pickSug(el.getAttribute("data-iid"),el.getAttribute("data-sid"),el.getAttribute("data-num"),el.getAttribute("data-cpid"),el.getAttribute("data-cp"));});});}).catch(function(e){console.error("Suggestion error:",e);});},250);}
 var _sugSearchTimer=null;
 function suggestByDescription(){clearTimeout(_sugSearchTimer);_sugSearchTimer=setTimeout(function(){
 var v=document.getElementById("em-search").value;if(v.length<2){closeSugs("em-search-sug");return;}
-fetch("/api/comptabilite/suggestions?description="+encodeURIComponent(v)).then(safeJson).then(function(d){
+fetch("/api/comptabilite/suggestions?description="+encodeURIComponent(v),{headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(d){
 var box=document.getElementById("em-search-sug");var items=d.suggestions||[];if(!items.length){closeSugs("em-search-sug");return;}
 var h="<div class='sug-list show'>";for(var i=0;i<items.length&&i<10;i++){var item=items[i];var expl=item.explication||"";h+="<div class='sug-item' style='flex-direction:column;align-items:flex-start;padding:10px 12px;cursor:pointer' data-num='"+item.numero+"'><div style='display:flex;align-items:center;gap:8px'><span class='sug-num' style='font-size:.95em'>"+item.numero+"</span><span class='sug-lbl' style='font-weight:600;color:var(--tx)'>"+item.libelle+"</span></div>"+(expl?"<div style='font-size:.82em;color:var(--tx2);margin-top:3px;line-height:1.4'>&#128161; "+expl+"</div>":"")+"</div>";}
 h+="</div>";box.innerHTML=h;box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){var num=el.getAttribute("data-num");document.getElementById("em-deb").value=num;closeSugs("em-search-sug");suggestCompte("em-deb","em-deb-sug","em-cre");});});}).catch(function(){});},300);}
@@ -14626,8 +14772,9 @@ if(r.info_absences){var ab=r.info_absences;h+="<div style='margin-top:10px;paddi
 // Tableau exonerations
 h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel (EUR)</th><th class='num'>Annuel (EUR)</th><th>Statut</th></tr>";
 var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"":"color:var(--tx2);opacity:.6";
-h+="<tr style='"+cls+"'><td>"+e.nom+"</td><td style='font-size:.78em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"<span class='badge badge-green'>Applicable</span>":"<span class='badge' style='background:var(--bg2)'>Non applicable</span>")+"</td></tr>";
-if(e.applicable&&e.conditions){h+="<tr style='"+cls+"'><td colspan='5' style='font-size:.78em;color:var(--tx2);padding:2px 8px 6px;border-top:none'>"+e.conditions+"</td></tr>";}}
+var isNonCumul=e.conditions&&e.conditions.indexOf("NON CUMULABLE")>=0;
+h+="<tr style='"+cls+"'><td>"+e.nom+(isNonCumul?" <span class='badge badge-amber' style='font-size:.7em'>Non cumulable</span>":"")+"</td><td style='font-size:.78em'>"+e.reference+"</td><td class='num'>"+e.montant_mensuel.toFixed(2)+"</td><td class='num'>"+e.montant_annuel.toFixed(2)+"</td><td>"+(e.applicable?"<span class='badge badge-green'>Applicable</span>":(isNonCumul?"<span class='badge badge-amber'>Ecartee (non cumul)</span>":"<span class='badge' style='background:var(--bg2)'>Non applicable</span>"))+"</td></tr>";
+if(e.conditions){h+="<tr style='"+cls+"'><td colspan='5' style='font-size:.78em;color:var(--tx2);padding:2px 8px 6px;border-top:none'>"+e.conditions+"</td></tr>";}}
 h+="</table>";
 h+="<p style='margin-top:8px;color:var(--tx2);font-size:.82em'>Zone: "+r.zone+" | Heures contrat: "+r.heures_contrat+"h | TP: "+r.temps_partiel_pct+"% | Presence: "+(r.coeff_presence*100).toFixed(0)+"%"+(r.bareme_lodeom?" | LODEOM: "+r.bareme_lodeom:"")+"</p>";
 document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
@@ -14723,7 +14870,7 @@ if(cfg.forme_juridique){var sel=document.getElementById("sub-forme");for(var i=0
 
 /* === VEILLE === */
 function loadVeille(){var a=document.getElementById("v-annee").value;document.getElementById("v-res").style.display="block";
-fetch("/api/veille/baremes/"+a).then(safeJson).then(function(b){var h="<table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>";for(var k in b){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+b[k]+"</td></tr>";}h+="</table>";document.getElementById("v-baremes").innerHTML=h;}).catch(function(){});
+fetch("/api/veille/baremes/"+a).then(safeJson).then(function(b){var keys=Object.keys(b);var essentiels=["pass_annuel","pass_mensuel","smic_horaire","smic_mensuel","taux_maladie_patronal","taux_vieillesse_plafonnee_patronal","taux_af_patronal","taux_at_moyen","taux_chomage_patronal","taux_csg_deductible","taux_crds"];var h="<table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>";var hFull="";var nbShown=0;for(var i=0;i<keys.length;i++){var k=keys[i];var row="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+b[k]+"</td></tr>";if(essentiels.indexOf(k)>=0){h+=row;nbShown++;}else{hFull+=row;}}h+="</table>";if(hFull){h+="<div id='v-baremes-full' style='display:none'><table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>"+hFull+"</table></div>";h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick=\"var el=document.getElementById('v-baremes-full');if(el.style.display==='none'){el.style.display='block';this.textContent='Masquer les details';}else{el.style.display='none';this.textContent='Afficher tous les baremes ('+"+keys.length+"+')';}\">"+"Afficher tous les baremes ("+keys.length+")</button>";}document.getElementById("v-baremes").innerHTML=h;}).catch(function(){});
 fetch("/api/veille/legislation/"+a).then(safeJson).then(function(l){var h="<p style='margin-bottom:10px'><strong>"+l.description+"</strong></p>";var tx=l.textes_cles||[];for(var i=0;i<tx.length;i++){h+="<div class='al info' style='margin:4px 0'><span class='ai'>&#9878;</span><span><strong>"+tx[i].reference+"</strong> - "+tx[i].titre+"<br><small>"+tx[i].resume+"</small></span></div>";}document.getElementById("v-legis").innerHTML=h;}).catch(function(){});}
 function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),a1=a2-1;fetch("/api/veille/baremes/comparer/"+a1+"/"+a2).then(safeJson).then(function(d){if(!d.length){toast("Pas de differences.","info");return;}var h="<table><tr><th>Parametre</th><th class='num'>"+a1+"</th><th class='num'>"+a2+"</th><th>Evolution</th></tr>";for(var i=0;i<d.length;i++){h+="<tr><td>"+d[i].parametre+"</td><td class='num'>"+(d[i]["valeur_"+a1]||"-")+"</td><td class='num'>"+(d[i]["valeur_"+a2]||"-")+"</td><td>"+d[i].evolution+"</td></tr>";}h+="</table>";document.getElementById("v-comp").innerHTML=h;document.getElementById("v-comp-card").style.display="block";}).catch(function(e){toast(e.message);});}
 
@@ -15563,7 +15710,7 @@ function _plFilter(){return(document.getElementById("rh-pl-filter")||{}).value||
 function _plStatutFilter(){return(document.getElementById("rh-pl-statut-filter")||{}).value||"";}
 function _plFmtDate(d){return d.toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long",year:"numeric"});}
 function _plStatutBadge(st){var c=_statutColors[st]||"#94a3b8";var labels={"present":"Present","conge_cp":"Conge CP","conge_maladie":"Arret maladie","arret_maladie":"Arret maladie","arret_accident_travail":"AT","formation":"Formation","teletravail":"Teletravail"};return "<span style='background:"+c+";color:#fff;border-radius:4px;padding:1px 6px;font-size:.75em'>"+(labels[st]||st||"Present")+"</span>";}
-function _plSlotDiv(s){var tp=s.type_poste||s.type||"normal";var bg=_planningColors[tp]||"#3b82f6";return "<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 6px;margin:1px 0;font-size:.78em;display:inline-block'>"+(s.heure_debut||"")+"-"+(s.heure_fin||"")+"</div>";}
+function _plSlotDiv(s){var tp=s.type_poste||s.type||"normal";var bg=_planningColors[tp]||"#3b82f6";var pid=s.id||"";var sid=s.salarie_id||"";var dt=s.date||"";var h="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 6px;margin:1px 0;font-size:.78em;display:inline-flex;align-items:center;gap:4px;position:relative' class='pl-slot'>"+(s.heure_debut||"")+"-"+(s.heure_fin||"");if(pid){h+=" <span data-pl-action='delete' data-pl-id='"+pid+"' style='cursor:pointer;opacity:.7;font-size:.9em' title='Supprimer'>&#10005;</span>";}h+="</div>";return h;}
 
 function renderPlanningJour(){
 var ds=_planningDate.toISOString().substring(0,10);
@@ -15599,10 +15746,10 @@ var jours=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
 var h="<table style='width:100%;border-collapse:collapse;font-size:.82em'><tr style='background:var(--p2);color:#fff'><th style='padding:8px;text-align:left;min-width:120px'>Salarie</th>";
 for(var j=0;j<7;j++){var d=new Date(startDate);d.setDate(d.getDate()+j);var isToday=d.toISOString().substring(0,10)===new Date().toISOString().substring(0,10);h+="<th style='padding:8px;text-align:center;"+(isToday?"background:#1e40af;":"")+"'>"+jours[j]+"<br><small>"+d.toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+"</small></th>";}
 h+="</tr>";
-var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;var st=p.statut_reel||p.statut||"present";if(stFilter&&st!==stFilter)continue;if(!salaries[sid])salaries[sid]={statut:st};var pd=new Date(p.date+"T12:00:00");for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
+var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;var st=p.statut_reel||p.statut||"present";if(stFilter&&st!==stFilter)continue;if(!salaries[sid])salaries[sid]={statut:st,_sid:p.salarie_id||sid};var pd=new Date(p.date+"T12:00:00");for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
 var nbPresent=0,nbAbsent=0;
 for(var sid in salaries){var st=salaries[sid].statut||"present";var stc=_statutColors[st]||"#94a3b8";
-h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd);border-left:4px solid "+stc+"'>"+_esc(sid)+" "+_plStatutBadge(st)+"</td>";
+h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd);border-left:4px solid "+stc+"'>"+_esc(sid)+" "+_plStatutBadge(st)+" <select style='font-size:.7em;padding:1px 4px;border-radius:4px;border:1px solid var(--brd);margin-left:4px' onchange=\"if(this.value){var fd=new FormData();fd.append('salarie_id','"+_esc(salaries[sid]._sid||sid)+"');fd.append('date','"+startDate.toISOString().substring(0,10)+"');fd.append('statut',this.value);rhPost('/api/rh/planning',fd,function(){toast('Statut modifie.','ok');renderPlanningView();});}\"><option value=''>Modifier...</option><option value='present'>Present</option><option value='conge_cp'>Conge CP</option><option value='conge_maladie'>Arret maladie</option><option value='formation'>Formation</option><option value='teletravail'>Teletravail</option></select></td>";
 if(st==="present")nbPresent++;else nbAbsent++;
 for(var j=0;j<7;j++){var isToday2=false;var cd2=new Date(startDate);cd2.setDate(cd2.getDate()+j);if(cd2.toISOString().substring(0,10)===new Date().toISOString().substring(0,10))isToday2=true;
 h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top;"+(isToday2?"background:rgba(59,130,246,.06);":"")+"'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){h+=_plSlotDiv(slots[k]);}
@@ -15692,10 +15839,17 @@ var res=document.getElementById("rh-pl-int-result");
 res.innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span><b>"+d.nb_entrees_creees+"</b> creneaux crees pour <b>"+d.nb_salaries+"</b> salaries.</span></div>";
 toast(d.nb_entrees_creees+" creneaux crees","ok");renderPlanningView();});}
 
-function ajouterPlanning(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-pl-sal").value);fd.append("date",document.getElementById("rh-pl-date").value);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);
-rhPost("/api/rh/planning",fd,function(){toast("Planning mis a jour.","ok");renderPlanningView();});}
+function ajouterPlanning(){var fd=new FormData();var sal=document.getElementById("rh-pl-sal").value;if(!sal){toast("Veuillez saisir un salarie.");return;}fd.append("salarie_id",sal);fd.append("date",document.getElementById("rh-pl-date").value);var dateFin=document.getElementById("rh-pl-date-fin").value;if(dateFin)fd.append("date_fin",dateFin);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);var statut=(document.getElementById("rh-pl-statut")||{}).value;if(statut)fd.append("statut",statut);var jours=(document.getElementById("rh-pl-jours")||{}).value;if(jours)fd.append("jours_semaine",jours);
+rhPost("/api/rh/planning",fd,function(d){if(d.nb_creneaux_crees){toast(d.nb_creneaux_crees+" creneaux crees sur la periode.","ok");}else{toast("Planning mis a jour.","ok");}renderPlanningView();});}
 function loadRHPlanning(){renderPlanningView();}
 function renderCalendar(){renderPlanningView();}
+/* Interactive planning: click on slot to edit, drag to extend */
+document.addEventListener("click",function(ev){
+var target=ev.target.closest("[data-pl-action]");if(!target)return;
+var action=target.getAttribute("data-pl-action");var pid=target.getAttribute("data-pl-id");var sid=target.getAttribute("data-pl-sid");
+if(action==="delete"){if(!confirm("Supprimer ce creneau ?"))return;fetch("/api/rh/planning/"+pid,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Creneau supprime.","ok");renderPlanningView();}).catch(function(e){toast(e.message);});}
+if(action==="edit-statut"){var newSt=target.getAttribute("data-pl-statut");var fd=new FormData();fd.append("salarie_id",sid);fd.append("date",target.getAttribute("data-pl-date"));fd.append("statut",newSt);rhPost("/api/rh/planning",fd,function(){toast("Statut modifie.","ok");renderPlanningView();});}
+});
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
 function voirBulletinDoc(el){var bid=el.dataset.bid;if(bid)window.open("/api/rh/bulletins/"+bid+"/document","_blank");}
 
@@ -15791,6 +15945,7 @@ for(var i=0;i<list.length;i++){var b=list[i];h+="<tr><td>"+b.mois+"</td><td>"+(b
 h+="</table>";el.innerHTML=h;});}
 function sauverAlertConfig(){var fd=new FormData();fd.append("type_alerte",document.getElementById("cfg-al-type").value);fd.append("actif",document.getElementById("cfg-al-actif").value);fd.append("delai_jours",document.getElementById("cfg-al-delai").value);var msg=document.getElementById("cfg-al-msg").value;if(msg)fd.append("message_personnalise",msg);
 rhPost("/api/rh/alertes/personnaliser",fd,function(d){document.getElementById("cfg-al-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Configuration alerte sauvegardee : "+d.type_alerte+" ("+(d.actif?"actif":"inactif")+")</span></div>";loadAlertConfigs();toast("Configuration alerte sauvegardee.","ok");});}
+function creerAlerteLibreDepuisConfig(){var titre=document.getElementById("cfg-al-libre-titre").value;if(!titre){toast("Le nom de l alerte est obligatoire.");return;}var fd=new FormData();fd.append("titre",titre);fd.append("urgence",document.getElementById("cfg-al-libre-urgence").value);fd.append("date_echeance",document.getElementById("cfg-al-libre-echeance").value||"");fd.append("description",document.getElementById("cfg-al-libre-desc").value||"");rhPost("/api/rh/alertes/libres",fd,function(d){document.getElementById("cfg-al-libre-res").innerHTML="<div class='al ok'><span class='ai'>&#9989;</span><span>Alerte <strong>"+d.titre+"</strong> creee.</span></div>";document.getElementById("cfg-al-libre-titre").value="";document.getElementById("cfg-al-libre-desc").value="";document.getElementById("cfg-al-libre-echeance").value="";toast("Alerte creee.","ok");});}
 function loadAlertConfigs(){rhGet("/api/rh/alertes/config",function(list){var el=document.getElementById("cfg-alertes-list");if(!list||!list.length){el.innerHTML="<p style='color:var(--tx2)'>Configuration par defaut (toutes alertes actives).</p>";return;}
 var h="<table><tr><th>Type</th><th>Actif</th><th>Delai (j)</th><th>Message</th></tr>";for(var i=0;i<list.length;i++){var c=list[i];h+="<tr><td><span class='badge "+(c.actif?"badge-green":"badge-red")+"'>"+c.type_alerte+"</span></td><td>"+(c.actif?"Oui":"Non")+"</td><td class='num'>"+(c.delai_jours||30)+"</td><td>"+(c.message_personnalise||"-")+"</td></tr>";}
 h+="</table>";el.innerHTML=h;});}
