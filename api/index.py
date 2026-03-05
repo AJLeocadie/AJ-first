@@ -2852,6 +2852,188 @@ async def sim_ir(
     }
 
 
+# ======================================================================
+# EPARGNE SALARIALE - Simulation & Contrats
+# ======================================================================
+
+@app.post("/api/simulation/epargne-salariale")
+async def sim_epargne_salariale(
+    type_dispositif: str = Form("pee"),
+    masse_salariale_brute: str = Form("500000"),
+    effectif: str = Form("10"),
+    montant_verse: str = Form("10000"),
+    abondement_pct: str = Form("100"),
+    plafond_abondement: str = Form("0"),
+    taux_forfait_social: str = Form("0"),
+    benefice_net: str = Form("100000"),
+):
+    """Simulation epargne salariale : PEE, PERCO/PER, Interessement, Participation."""
+    ms = float(masse_salariale_brute)
+    eff = int(effectif)
+    montant = float(montant_verse)
+    abond_pct = float(abondement_pct)
+    plaf_abond = float(plafond_abondement)
+    tfs_override = float(taux_forfait_social)
+    bn = float(benefice_net)
+    td = type_dispositif.lower().strip()
+    pass_annuel = 48060.0  # PASS 2026
+
+    # Forfait social par defaut selon dispositif
+    if tfs_override > 0:
+        taux_fs = tfs_override / 100.0
+    elif td in ("pee", "perco", "per"):
+        taux_fs = 0.20 if eff >= 50 else 0.0
+    elif td == "interessement":
+        taux_fs = 0.20 if eff >= 250 else 0.0
+    elif td == "participation":
+        taux_fs = 0.20 if eff >= 50 else 0.0
+    else:
+        taux_fs = 0.20
+
+    # Plafonds legaux
+    plafonds = {
+        "pee": {"versement_max_salarie": pass_annuel * 0.25, "abondement_max": pass_annuel * 8 / 100 * 100},
+        "perco": {"versement_max_salarie": pass_annuel * 0.25, "abondement_max": pass_annuel * 16 / 100 * 100},
+        "per": {"versement_max_salarie": pass_annuel * 0.25, "abondement_max": pass_annuel * 16 / 100 * 100},
+        "interessement": {"plafond_global": ms * 0.20, "plafond_individuel": pass_annuel * 0.75},
+        "participation": {"plafond_rsp": 0},
+    }
+    info_plafond = plafonds.get(td, {})
+
+    # Calcul RSP (Reserve Speciale de Participation) si participation
+    rsp = 0
+    if td == "participation" and bn > 0:
+        capitaux_propres = ms * 0.5  # estimation
+        rsp = round(max(0, 0.5 * (bn - 0.05 * capitaux_propres) * (ms / (ms + 0))), 2)
+        if montant == 0 or montant > rsp:
+            montant = rsp
+        info_plafond["plafond_rsp"] = rsp
+
+    # Abondement
+    abondement = round(montant * abond_pct / 100, 2)
+    if plaf_abond > 0:
+        abondement = min(abondement, plaf_abond)
+    if td == "pee":
+        abondement = min(abondement, pass_annuel * 8 / 100 * 100 / eff) if eff > 0 else abondement
+    elif td in ("perco", "per"):
+        abondement = min(abondement, pass_annuel * 16 / 100 * 100 / eff) if eff > 0 else abondement
+    abondement_total = round(abondement * eff, 2) if td in ("pee", "perco", "per") else 0
+
+    # Cout total pour l'entreprise
+    montant_total = montant
+    if td in ("interessement", "participation"):
+        montant_total = montant  # prime globale
+    forfait_social = round((montant_total + abondement_total) * taux_fs, 2)
+    csg_crds_taux = 0.097  # 9.7% (CSG 9.2% + CRDS 0.5%)
+    csg_crds = round(montant_total * csg_crds_taux, 2)
+
+    cout_brut_entreprise = round(montant_total + abondement_total + forfait_social, 2)
+
+    # Comparaison prime classique equivalente
+    taux_charges_patronales = 0.45
+    taux_charges_salariales = 0.22
+    prime_brute_equiv = montant_total
+    charges_patronales_prime = round(prime_brute_equiv * taux_charges_patronales, 2)
+    charges_salariales_prime = round(prime_brute_equiv * taux_charges_salariales, 2)
+    cout_prime_classique = round(prime_brute_equiv + charges_patronales_prime, 2)
+    net_salarie_prime = round(prime_brute_equiv - charges_salariales_prime, 2)
+
+    economie_entreprise = round(cout_prime_classique - cout_brut_entreprise, 2)
+    economie_pct = round(economie_entreprise / cout_prime_classique * 100, 2) if cout_prime_classique > 0 else 0
+
+    # Avantage fiscal entreprise (deductible IS)
+    taux_is = 0.25
+    deduction_is = round(cout_brut_entreprise * taux_is, 2)
+
+    # Gain net salarie (pas de charges sociales hors CSG/CRDS, pas d'IR sur PEE/PERCO 5 ans)
+    net_salarie_epargne = round(montant_total - csg_crds, 2)
+    gain_salarie = round(net_salarie_epargne - net_salarie_prime, 2)
+
+    return {
+        "type_dispositif": td.upper(),
+        "montant_verse": montant_total,
+        "abondement_employeur": abondement_total,
+        "taux_forfait_social": round(taux_fs * 100, 1),
+        "forfait_social": forfait_social,
+        "csg_crds_salarie": csg_crds,
+        "cout_total_entreprise": cout_brut_entreprise,
+        "deduction_is": deduction_is,
+        "cout_net_apres_is": round(cout_brut_entreprise - deduction_is, 2),
+        "comparaison_prime": {
+            "prime_brute": prime_brute_equiv,
+            "charges_patronales": charges_patronales_prime,
+            "cout_total_prime": cout_prime_classique,
+            "net_salarie_prime": net_salarie_prime,
+        },
+        "net_salarie_epargne": net_salarie_epargne,
+        "economie_entreprise": economie_entreprise,
+        "economie_entreprise_pct": economie_pct,
+        "gain_net_salarie": gain_salarie,
+        "plafonds_legaux": info_plafond,
+        "effectif": eff,
+        "masse_salariale": ms,
+        "rappel_regles": {
+            "pee": "Blocage 5 ans. Abondement max 8% PASS/salarie. Forfait social 20% (>=50 sal.) ou 0%.",
+            "perco": "Blocage retraite. Abondement max 16% PASS/salarie. Forfait social 20% (>=50 sal.) ou 0%.",
+            "per": "Blocage retraite (sortie capital/rente). Abondement max 16% PASS/salarie.",
+            "interessement": "Accord 1-5 ans. Plafond 20% MS, 75% PASS/salarie. Forfait social 20% (>=250 sal.) ou 0%.",
+            "participation": "Obligatoire >=50 sal. RSP = formule legale. Forfait social 20% (>=50 sal.) ou 0%.",
+        }.get(td, ""),
+    }
+
+
+@app.post("/api/epargne-salariale/contrats")
+async def creer_contrat_epargne(
+    type_dispositif: str = Form("pee"),
+    nom_contrat: str = Form(""),
+    organisme: str = Form(""),
+    date_mise_en_place: str = Form(""),
+    duree_accord: str = Form("3"),
+    montant_prevu: str = Form("0"),
+    abondement_pct: str = Form("100"),
+    plafond_abondement: str = Form("0"),
+    beneficiaires: str = Form("tous"),
+    observations: str = Form(""),
+):
+    """Creer un contrat/accord d'epargne salariale."""
+    global _epargne_contrats
+    import uuid as _uuid_ep
+    contrat = {
+        "id": str(_uuid_ep.uuid4())[:8],
+        "type_dispositif": type_dispositif.upper(),
+        "nom_contrat": nom_contrat or f"Accord {type_dispositif.upper()}",
+        "organisme": organisme,
+        "date_mise_en_place": date_mise_en_place,
+        "duree_accord_ans": int(duree_accord),
+        "montant_prevu": float(montant_prevu),
+        "abondement_pct": float(abondement_pct),
+        "plafond_abondement": float(plafond_abondement),
+        "beneficiaires": beneficiaires,
+        "observations": observations,
+        "statut": "actif",
+        "date_creation": datetime.now().isoformat(),
+    }
+    _epargne_contrats.append(contrat)
+    return {"ok": True, "contrat": contrat, "total": len(_epargne_contrats)}
+
+
+@app.get("/api/epargne-salariale/contrats")
+async def lister_contrats_epargne():
+    """Lister tous les contrats d'epargne salariale."""
+    return {"contrats": _epargne_contrats, "total": len(_epargne_contrats)}
+
+
+@app.delete("/api/epargne-salariale/contrats/{contrat_id}")
+async def supprimer_contrat_epargne(contrat_id: str):
+    """Supprimer un contrat d'epargne salariale."""
+    global _epargne_contrats
+    before = len(_epargne_contrats)
+    _epargne_contrats = [c for c in _epargne_contrats if c["id"] != contrat_id]
+    if len(_epargne_contrats) == before:
+        return {"ok": False, "error": "Contrat non trouve"}
+    return {"ok": True, "total": len(_epargne_contrats)}
+
+
 # --- Simulation : Exonerations ---
 @app.get("/api/simulation/exonerations")
 async def sim_exonerations(
@@ -7550,6 +7732,7 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 # ======================================================================
 
 _rh_bulletins: list[dict] = []
+_epargne_contrats: list[dict] = []
 
 
 @app.post("/api/rh/bulletins/generer")
@@ -11927,6 +12110,7 @@ APP_HTML += """
 <div class="tab" onclick="showSimTab('tns',this)">TNS</div>
 <div class="tab" onclick="showSimTab('guso',this)">GUSO</div>
 <div class="tab" onclick="showSimTab('ir',this)">IR</div>
+<div class="tab" onclick="showSimTab('epargne',this)">Epargne salariale</div>
 </div>
 <div class="card">
 <div class="tc active" id="sim-bulletin">
@@ -12034,6 +12218,51 @@ APP_HTML += """
 <div class="tc" id="sim-ir"><h2>Impot sur le revenu</h2>
 <div class="g3"><div><label>Benefice</label><input type="number" step="0.01" id="sim-ben" value="40000"></div><div><label>Parts</label><input type="number" step="0.5" id="sim-parts" value="1"></div><div><label>Autres rev.</label><input type="number" step="0.01" id="sim-autres" value="0"></div></div>
 <button class="btn btn-blue" onclick="simIR()">Simuler</button><div id="sim-ir-res" style="margin-top:12px"></div></div>
+<div class="tc" id="sim-epargne"><h2>Epargne salariale</h2>
+<div class="al info" style="margin-bottom:14px"><span class="ai">&#128161;</span><span>Simulez les dispositifs d'epargne salariale (PEE, PERCO/PER, Interessement, Participation) et creez vos contrats/accords.</span></div>
+<details open><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128200; Simulation</summary>
+<div class="g3">
+<div><label>Dispositif</label><select id="ep-type"><option value="pee">PEE (Plan Epargne Entreprise)</option><option value="perco">PERCO/PER Collectif</option><option value="per">PER Obligatoire</option><option value="interessement">Interessement</option><option value="participation">Participation</option></select></div>
+<div><label>Masse salariale brute annuelle</label><input type="number" id="ep-ms" value="500000"></div>
+<div><label>Effectif</label><input type="number" id="ep-eff" value="10"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Montant a verser (total)</label><input type="number" id="ep-montant" value="10000"></div>
+<div><label>Abondement employeur (%)</label><input type="number" id="ep-abond" value="100" min="0" max="300"></div>
+<div><label>Plafond abondement (0=auto)</label><input type="number" id="ep-plaf" value="0"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Forfait social % (0=auto)</label><input type="number" id="ep-fs" value="0" min="0" max="20"></div>
+<div><label>Benefice net (si Participation)</label><input type="number" id="ep-bn" value="100000"></div>
+<div></div>
+</div>
+<button class="btn btn-blue" onclick="simEpargne()" style="margin-top:10px">Simuler</button>
+<div id="sim-epargne-res" style="margin-top:12px"></div>
+</details>
+<details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128196; Creer un contrat / accord</summary>
+<div class="g3">
+<div><label>Type de dispositif</label><select id="epc-type"><option value="pee">PEE</option><option value="perco">PERCO/PER Collectif</option><option value="per">PER Obligatoire</option><option value="interessement">Interessement</option><option value="participation">Participation</option></select></div>
+<div><label>Nom du contrat</label><input type="text" id="epc-nom" placeholder="Ex: Accord PEE 2026"></div>
+<div><label>Organisme gestionnaire</label><input type="text" id="epc-org" placeholder="Ex: Amundi, Natixis..."></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Date mise en place</label><input type="date" id="epc-date"></div>
+<div><label>Duree accord (ans)</label><input type="number" id="epc-duree" value="3" min="1" max="5"></div>
+<div><label>Montant prevu annuel</label><input type="number" id="epc-montant" value="10000"></div>
+</div>
+<div class="g3" style="margin-top:8px">
+<div><label>Abondement (%)</label><input type="number" id="epc-abond" value="100"></div>
+<div><label>Plafond abondement</label><input type="number" id="epc-plaf" value="0"></div>
+<div><label>Beneficiaires</label><select id="epc-benef"><option value="tous">Tous les salaries</option><option value="3mois">Anciennete 3 mois</option><option value="cadres">Cadres uniquement</option></select></div>
+</div>
+<div style="margin-top:8px"><label>Observations</label><textarea id="epc-obs" rows="2" style="width:100%"></textarea></div>
+<button class="btn btn-green" onclick="creerContratEpargne()" style="margin-top:10px">Creer le contrat</button>
+</details>
+<details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600;margin-bottom:10px">&#128203; Contrats existants</summary>
+<button class="btn btn-blue" onclick="loadContratsEpargne()" style="margin-bottom:10px">Actualiser</button>
+<div id="epargne-contrats-list"></div>
+</details>
+</div>
 </div>
 </div>
 
@@ -13367,6 +13596,10 @@ function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="
 function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simGUSO(){fetch("/api/simulation/guso?salaire_brut="+document.getElementById("sim-gbrut").value+"&nb_heures="+document.getElementById("sim-gh").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simIR(){fetch("/api/simulation/impot-independant?benefice="+document.getElementById("sim-ben").value+"&nb_parts="+document.getElementById("sim-parts").value+"&autres_revenus="+document.getElementById("sim-autres").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-ir-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simEpargne(){var fd=new FormData();fd.append("type_dispositif",gv("ep-type"));fd.append("masse_salariale_brute",gv("ep-ms"));fd.append("effectif",gv("ep-eff"));fd.append("montant_verse",gv("ep-montant"));fd.append("abondement_pct",gv("ep-abond"));fd.append("plafond_abondement",gv("ep-plaf"));fd.append("taux_forfait_social",gv("ep-fs"));fd.append("benefice_net",gv("ep-bn"));fetch("/api/simulation/epargne-salariale",{method:"POST",body:fd}).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.type_dispositif+"</div><div class='lab'>Dispositif</div></div><div class='sc green'><div class='val'>"+fmtN(r.montant_verse)+"</div><div class='lab'>Montant verse</div></div><div class='sc amber'><div class='val'>"+fmtN(r.cout_total_entreprise)+"</div><div class='lab'>Cout total entreprise</div></div><div class='sc green'><div class='val'>"+fmtN(r.economie_entreprise)+"</div><div class='lab'>Economie vs prime ("+r.economie_entreprise_pct+"%)</div></div></div>";h+="<div class='g4' style='margin-top:10px'><div class='sc'><div class='val'>"+fmtN(r.abondement_employeur)+"</div><div class='lab'>Abondement total</div></div><div class='sc'><div class='val'>"+r.taux_forfait_social+"%</div><div class='lab'>Taux forfait social</div></div><div class='sc'><div class='val'>"+fmtN(r.forfait_social)+"</div><div class='lab'>Forfait social</div></div><div class='sc'><div class='val'>"+fmtN(r.deduction_is)+"</div><div class='lab'>Deduction IS</div></div></div>";h+="<h3 style='margin-top:14px'>&#9878; Comparaison prime classique vs epargne salariale</h3><table><thead><tr><th></th><th class='num'>Prime classique</th><th class='num'>Epargne salariale</th><th class='num'>Ecart</th></tr></thead><tbody>";h+="<tr><td>Cout employeur</td><td class='num'>"+fmtN(r.comparaison_prime.cout_total_prime)+"</td><td class='num'>"+fmtN(r.cout_total_entreprise)+"</td><td class='num' style='color:#16a34a'>"+fmtN(r.economie_entreprise)+"</td></tr>";h+="<tr><td>Net percu salarie</td><td class='num'>"+fmtN(r.comparaison_prime.net_salarie_prime)+"</td><td class='num'>"+fmtN(r.net_salarie_epargne)+"</td><td class='num' style='color:#16a34a'>"+fmtN(r.gain_net_salarie)+"</td></tr>";h+="<tr><td>Charges patronales</td><td class='num'>"+fmtN(r.comparaison_prime.charges_patronales)+"</td><td class='num'>"+fmtN(r.forfait_social)+"</td><td class='num'></td></tr>";h+="<tr><td>CSG/CRDS salarie</td><td class='num'>-</td><td class='num'>"+fmtN(r.csg_crds_salarie)+"</td><td class='num'></td></tr>";h+="</tbody></table>";h+="<div class='al ok' style='margin-top:12px'><span class='ai'>&#9989;</span><span><strong>Cout net apres IS : "+fmtN(r.cout_net_apres_is)+" EUR</strong></span></div>";if(r.rappel_regles){h+="<p style='margin-top:8px;font-size:.84em;color:var(--tx2);font-style:italic'>"+r.rappel_regles+"</p>";}document.getElementById("sim-epargne-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function creerContratEpargne(){var fd=new FormData();fd.append("type_dispositif",gv("epc-type"));fd.append("nom_contrat",gv("epc-nom"));fd.append("organisme",gv("epc-org"));fd.append("date_mise_en_place",gv("epc-date"));fd.append("duree_accord",gv("epc-duree"));fd.append("montant_prevu",gv("epc-montant"));fd.append("abondement_pct",gv("epc-abond"));fd.append("plafond_abondement",gv("epc-plaf"));fd.append("beneficiaires",gv("epc-benef"));fd.append("observations",gv("epc-obs"));fetch("/api/epargne-salariale/contrats",{method:"POST",body:fd}).then(safeJson).then(function(r){if(r.ok){toast("Contrat cree avec succes");loadContratsEpargne();}else{toast(r.error||"Erreur");}}).catch(function(e){toast(e.message);});}
+function loadContratsEpargne(){fetch("/api/epargne-salariale/contrats").then(safeJson).then(function(r){var el=document.getElementById("epargne-contrats-list");if(!r.contrats||r.contrats.length===0){el.innerHTML="<p style='color:var(--tx2);font-style:italic'>Aucun contrat enregistre.</p>";return;}var h="<table><thead><tr><th>Type</th><th>Nom</th><th>Organisme</th><th>Date</th><th>Duree</th><th>Montant prevu</th><th>Abond.</th><th>Statut</th><th></th></tr></thead><tbody>";for(var i=0;i<r.contrats.length;i++){var c=r.contrats[i];h+="<tr><td><strong>"+_esc(c.type_dispositif)+"</strong></td><td>"+_esc(c.nom_contrat)+"</td><td>"+_esc(c.organisme)+"</td><td>"+_esc(c.date_mise_en_place)+"</td><td>"+c.duree_accord_ans+" ans</td><td>"+fmtN(c.montant_prevu)+"</td><td>"+c.abondement_pct+"%</td><td><span style='color:#16a34a'>"+_esc(c.statut)+"</span></td><td><button class='btn btn-red' style='padding:2px 8px;font-size:.8em' onclick=\"supprimerContratEpargne('"+c.id+"')\">Suppr.</button></td></tr>";}h+="</tbody></table>";el.innerHTML=h;}).catch(function(e){toast(e.message);});}
+function supprimerContratEpargne(id){if(!confirm("Supprimer ce contrat ?"))return;fetch("/api/epargne-salariale/contrats/"+id,{method:"DELETE"}).then(safeJson).then(function(r){if(r.ok){toast("Contrat supprime");loadContratsEpargne();}else{toast(r.error||"Erreur");}}).catch(function(e){toast(e.message);});}
 function simCout(){var p="brut_mensuel="+gv("ce-brut")+"&effectif="+gv("ce-eff")+"&est_cadre="+gv("ce-cadre")+"&primes="+gv("ce-primes")+"&avantages_nature="+gv("ce-avantages")+"&frais_km="+gv("ce-km")+"&tickets_restaurant="+gv("ce-tr")+"&mutuelle_employeur="+gv("ce-mut");fetch("/api/simulation/cout-employeur?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_total.toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_mensuel.toFixed(2)+"</div><div class='lab'>Cout total/mois</div></div><div class='sc'><div class='val'>"+r.cout_total_annuel.toFixed(2)+"</div><div class='lab'>Cout total/an</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";h+="<tr><td>Charges patronales URSSAF</td><td class='num'>"+r.charges_patronales_urssaf.toFixed(2)+"</td></tr>";h+="<tr><td>Charges salariales</td><td class='num'>"+r.charges_salariales.toFixed(2)+"</td></tr>";h+="<tr><td>Formation professionnelle</td><td class='num'>"+r.formation_professionnelle.toFixed(2)+"</td></tr>";h+="<tr><td>Taxe apprentissage</td><td class='num'>"+r.taxe_apprentissage.toFixed(2)+"</td></tr>";h+="<tr><td>Effort construction</td><td class='num'>"+r.effort_construction.toFixed(2)+"</td></tr>";h+="<tr><td>Participation obligatoire</td><td class='num'>"+r.participation_obligatoire.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total charges annexes</td><td class='num'>"+r.total_charges_annexes.toFixed(2)+"</td></tr>";h+="<tr><td>Avantages nature</td><td class='num'>"+r.avantages_nature.toFixed(2)+"</td></tr>";h+="<tr><td>Frais km rembourses</td><td class='num'>"+r.frais_km_rembourses.toFixed(2)+"</td></tr>";h+="<tr><td>Tickets restaurant</td><td class='num'>"+r.tickets_restaurant.toFixed(2)+"</td></tr>";h+="<tr><td>Mutuelle employeur</td><td class='num'>"+r.mutuelle_employeur.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total avantages</td><td class='num'>"+r.total_avantages.toFixed(2)+"</td></tr></table>";h+="<div class='g4' style='margin-top:12px'><div class='sc'><div class='val'>"+r.repartition.salaire_net+"%</div><div class='lab'>Salaire net</div></div><div class='sc'><div class='val'>"+r.repartition.charges_salariales+"%</div><div class='lab'>Charges sal.</div></div><div class='sc'><div class='val'>"+r.repartition.charges_patronales+"%</div><div class='lab'>Charges pat.</div></div><div class='sc'><div class='val'>"+r.repartition.annexes_avantages+"%</div><div class='lab'>Annexes+Avantages</div></div></div>";h+="<p style='margin-top:10px;color:var(--tx2);font-size:.84em'>Ratio cout/net : <b>"+r.ratio_cout_net+"x</b> - Pour 1 EUR net verse, l employeur depense "+r.ratio_cout_net+" EUR</p>";document.getElementById("sim-cout-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function toggleLodeom(){var z=gv("exo-zone");document.getElementById("lodeom-bareme-wrap").style.display=z==="outremer"?"block":"none";}
 function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"))+"&nb_heures_mensuelles="+(gv("exo-heures")||"151.67")+"&temps_partiel_pct="+(gv("exo-tp")||"100")+"&jours_absence="+(gv("exo-abs-jours")||"0")+"&type_absence="+gv("exo-abs-type")+"&bareme_lodeom="+gv("exo-lodeom")+"&est_cadre="+gv("exo-cadre")+"&taux_at="+(gv("exo-at")||"0")+"&nb_salaries_simules="+(gv("exo-nb")||"1");
