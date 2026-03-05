@@ -13773,7 +13773,7 @@ var icon="";
 if(type==="ok"){d.style.background="#f0fdf4";d.style.color="#166534";d.style.border="1px solid #bbf7d0";icon="&#9989; ";}
 else if(type==="warn"||type==="info"){d.style.background="#eff6ff";d.style.color="#1e40af";d.style.border="1px solid #bfdbfe";icon="&#128161; ";}
 else{d.style.background="#fef2f2";d.style.color="#991b1b";d.style.border="1px solid #fecaca";icon="&#9888; ";}
-d.innerHTML="<span>"+icon+"</span><span>"+msg.replace(/</g,"&lt;").replace(/>/g,"&gt;")+"</span>";
+d.innerHTML="<span>"+icon+"<\/span><span>"+msg.replace(/\u003c/g,"&lt;").replace(/>/g,"&gt;")+"<\/span>";
 document.body.appendChild(d);_toastStack.push(d);
 requestAnimationFrame(function(){requestAnimationFrame(function(){d.style.transform="translateX(0)";});});
 setTimeout(function(){d.style.opacity="0";d.style.transform="translateX(120%)";setTimeout(function(){d.remove();var idx=_toastStack.indexOf(d);if(idx>-1)_toastStack.splice(idx,1);},350);},4000);}
