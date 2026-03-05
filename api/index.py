@@ -5841,7 +5841,7 @@ td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
 @app.get("/api/version")
 async def get_version():
     """Retourne la version deployee pour diagnostic."""
-    return {"version": "3.8.1", "build": "20260222f", "audit_checks": 63, "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB, "auth": True}
+    return {"version": "3.8.1", "build": "20260222f", "audit_checks": 82, "controles_v": "4.1", "idcc_base": True, "atmp_table": True, "regimes_speciaux": 9, "multi_annuel": True, "env": "ovhcloud" if _IS_OVH else "vercel", "persistence": bool(_persist), "max_files": _MAX_FILES, "max_upload_mb": _MAX_UPLOAD_MB, "auth": True}
 
 
 @app.get("/api/bibliotheque/knowledge/audit")
@@ -6483,6 +6483,105 @@ async def knowledge_audit():
         "Bordereaux recapitulatifs, avis d appel, justificatifs de paiement URSSAF",
     ))
 
+    # 40. Entretien professionnel biennal (L.6315-1 CT)
+    has_entretien_pro = any(d.get("nature") in ("entretien_professionnel", "entretien_biennal", "compte_rendu_entretien") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Entretien professionnel biennal",
+        "Art. L.6315-1 CT - Tous les 2 ans + bilan tous les 6 ans",
+        has_entretien_pro or ks["nb_entretiens"] > 0,
+        f"{ks['nb_entretiens']} entretien(s) enregistre(s)" if ks["nb_entretiens"] > 0 else ("Documents entretiens importes" if has_entretien_pro else "Aucun entretien professionnel enregistre - obligatoire tous les 2 ans"),
+        "Comptes-rendus d entretiens professionnels signes, bilan a 6 ans",
+        incidence="Abondement correctif CPF de 3000 EUR par salarie concerne (art. L.6315-1 CT)" if not has_entretien_pro and ks["nb_entretiens"] == 0 and ks["nb_contrats_rh"] > 0 else "",
+    ))
+
+    # 41. Referent harcelement (L.1153-5-1 CT)
+    has_referent = any(d.get("nature") in ("referent_harcelement", "designation_referent", "charte_harcelement") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Referent harcelement sexuel et agissements sexistes",
+        "Art. L.1153-5-1 CT (>= 250 salaries) - Art. L.2314-1 CT (CSE)",
+        has_referent or nb_actifs < 250,
+        "Non applicable (effectif < 250)" if nb_actifs < 250 else ("Document designation referent importe" if has_referent else "Aucune designation de referent harcelement importee - obligatoire >= 250 salaries"),
+        "Designation du referent harcelement, charte de prevention",
+        incidence="Responsabilite employeur (obligation de prevention, L.4121-1 CT)" if nb_actifs >= 250 and not has_referent else "",
+    ))
+
+    # 42. Teletravail - accord ou charte (L.1222-9 CT)
+    has_teletravail = any(d.get("nature") in ("accord_teletravail", "charte_teletravail", "avenant_teletravail") for d in _doc_library)
+    nb_teletravail_planning = sum(1 for p in _rh_planning if p.get("statut") == "teletravail" or p.get("type_poste") == "teletravail")
+    social_checks.append(_audit_check(
+        "Teletravail - Accord ou charte",
+        "Art. L.1222-9 CT - Art. L.1222-10 CT",
+        has_teletravail or nb_teletravail_planning == 0,
+        "Accord/charte teletravail importe" if has_teletravail else ("Pas de teletravail detecte" if nb_teletravail_planning == 0 else f"{nb_teletravail_planning} jour(s) teletravail planifie(s) sans accord/charte importe"),
+        "Accord collectif teletravail ou charte unilaterale + consultation CSE",
+        incidence="Risque de requalification en modification du contrat de travail + accident du travail non couvert" if nb_teletravail_planning > 0 and not has_teletravail else "",
+    ))
+
+    # 43. PPV - Prime de partage de la valeur (Loi 2022-1158)
+    has_ppv = any(d.get("nature") in ("ppv", "prime_partage_valeur", "accord_ppv") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "PPV - Prime de partage de la valeur",
+        "Loi 2022-1158 du 16/08/2022 - Art. 1 (ex-prime Macron)",
+        True,  # Non obligatoire mais recommande
+        "Document PPV importe" if has_ppv else "Aucun versement PPV detecte - dispositif facultatif mais avantageux (exoneration sous conditions)",
+        "Accord PPV, DUE, bulletins de paie avec prime",
+    ))
+
+    # 44. Bonus-malus assurance chomage (L.5422-12 CT)
+    social_checks.append(_audit_check(
+        "Bonus-malus assurance chomage (si >= 11 salaries, 7 secteurs)",
+        "Art. L.5422-12 CT - Decret 2019-797",
+        nb_actifs < 11 or ks["has_bulletins"],
+        "Non applicable (effectif < 11)" if nb_actifs < 11 else ("Taux chomage verifiable via bulletins importes" if ks["has_bulletins"] else "Non verifiable sans bulletin - taux entre 3% et 5.05% selon taux de separation"),
+        "Notification du taux modulé, bulletins avec taux chomage",
+        incidence="Sur/sous-cotisation chomage non detectee" if nb_actifs >= 11 and not ks["has_bulletins"] else "",
+    ))
+
+    # 45. Versement mobilite (L.2333-64 CGCT)
+    has_vm = "versement_mobilite" in types_cot_presents
+    social_checks.append(_audit_check(
+        "Versement mobilite (transport - si >= 11 salaries)",
+        "Art. L.2333-64 CGCT - Variable selon commune AOM",
+        nb_actifs < 11 or has_vm or not ks["has_bulletins"],
+        "Non applicable (effectif < 11)" if nb_actifs < 11 else ("Cotisation VM detectee sur bulletins" if has_vm else "Versement mobilite non detecte sur bulletins - verifier l assujettissement"),
+        "Bulletins de paie avec ligne VM, attestation AOM",
+        incidence="Redressement URSSAF + majorations de retard sur 3 ans" if nb_actifs >= 11 and not has_vm and ks["has_bulletins"] else "",
+        alerte=nb_actifs >= 11 and not has_vm and ks["has_bulletins"],
+    ))
+
+    # 46. Activite partielle / chomage partiel (L.5122-1 CT)
+    has_activite_partielle = any(d.get("nature") in ("activite_partielle", "chomage_partiel", "autorisation_ap") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Activite partielle (si applicable)",
+        "Art. L.5122-1 CT - Art. R.5122-1 CT",
+        True,  # Verifiable seulement si applicable
+        "Documents activite partielle importes" if has_activite_partielle else "Aucun document d activite partielle importe (non obligatoire si non concerne)",
+        "Autorisation DDETS, bulletins avec mention activite partielle, convention FNE",
+    ))
+
+    # 47. Accord temps de travail / forfait jours (L.3121-53 CT)
+    has_forfait = any(d.get("nature") in ("accord_forfait_jours", "convention_forfait", "accord_temps_travail") for d in _doc_library)
+    nb_cadres_kb = ks.get("nb_cadres", 0)
+    social_checks.append(_audit_check(
+        "Convention de forfait jours (cadres autonomes)",
+        "Art. L.3121-53 a L.3121-66 CT",
+        has_forfait or nb_cadres_kb == 0,
+        "Accord forfait jours importe" if has_forfait else ("Pas de cadre detecte" if nb_cadres_kb == 0 else f"{nb_cadres_kb} cadre(s) detecte(s) - verifier si convention de forfait applicable"),
+        "Accord collectif forfait jours, conventions individuelles, suivi charge de travail",
+        incidence="Annulation du forfait = rappel d heures supplementaires sur 3 ans" if nb_cadres_kb > 0 and not has_forfait else "",
+    ))
+
+    # 48. Penibilite / C2P (L.4163-1 CT)
+    has_c2p = any(d.get("nature") in ("c2p", "penibilite", "declaration_penibilite", "fiche_penibilite") for d in _doc_library)
+    social_checks.append(_audit_check(
+        "Compte professionnel de prevention (C2P)",
+        "Art. L.4163-1 CT - Art. D.4163-1 CT",
+        has_c2p or ks["nb_contrats_rh"] == 0,
+        "Document C2P/penibilite importe" if has_c2p else ("Non applicable (aucun salarie)" if ks["nb_contrats_rh"] == 0 else "Aucune declaration de penibilite importee - obligatoire si facteurs de risque (bruit, temperatures, travail de nuit...)"),
+        "Declaration des expositions (DSN bloc S21.G00.34), fiches de penibilite",
+        incidence="Cotisation penibilite non versee + sanctions L.4163-16 CT",
+    ))
+
     # --- AUDIT FISCAL (CGI) ---
     fiscal_checks = []
 
@@ -6590,6 +6689,59 @@ async def knowledge_audit():
         "Attestation de formation, cerfa 2079-FCE",
     ))
 
+    # Fiscal 16. PAS - Prelevement a la source (art. 204 A CGI)
+    has_pas = any("pas" in str(cot.get("code", "")).lower() or "prelevement_source" in str(cot.get("code", "")).lower() for cot in kb["cotisations"])
+    fiscal_checks.append(_audit_check(
+        "PAS - Prelevement a la source (retenue employeur)",
+        "Art. 204 A a 204 N CGI - Decret 2017-866",
+        has_pas or ks["has_bulletins"],
+        "PAS verifiable via bulletins importes" if ks["has_bulletins"] else "Non verifiable sans bulletin de paie",
+        "Bulletins de paie avec ligne PAS, declarations DSN (bloc PAS S21.G00.50)",
+        incidence="Penalite de 5% des retenues non effectuees + interet de retard 0.40%/mois (art. 1759-0 A CGI)",
+    ))
+
+    # Fiscal 17. Facturation electronique (art. 289 bis CGI - obligation 2024-2026)
+    has_facture_elec = any(d.get("nature") in ("facture_electronique", "piste_audit_fiable", "factur_x") for d in _doc_library)
+    fiscal_checks.append(_audit_check(
+        "Facturation electronique (obligation progressive 2024-2026)",
+        "Art. 289 bis CGI - Ordonnance 2021-1190 - Decret 2022-1299",
+        has_facture_elec or nb_factures == 0,
+        "Documents facturation electronique importes" if has_facture_elec else ("Pas de facture importee" if nb_factures == 0 else "Aucun justificatif de conformite facturation electronique - obligation progressive (reception 2024, emission 2026)"),
+        "Attestation PDP (Plateforme de Dematerialisation Partenaire), factures Factur-X",
+        incidence="Amende de 15 EUR par facture non conforme (art. 1737 CGI)" if nb_factures > 0 and not has_facture_elec else "",
+    ))
+
+    # Fiscal 18. Taxe apprentissage - solde (art. 1599 ter A CGI)
+    has_ta = "taxe_apprentissage" in types_cot_presents
+    fiscal_checks.append(_audit_check(
+        "Taxe d apprentissage - versement et solde",
+        "Art. 1599 ter A CGI - Art. L.6241-1 CT",
+        has_ta or not ks["has_bulletins"],
+        "Taxe apprentissage detectee sur bulletins" if has_ta else ("Non verifiable sans bulletin" if not ks["has_bulletins"] else "Taxe apprentissage non detectee sur les bulletins"),
+        "Bordereau de versement TA, recu liberatoire, attestation OPCO",
+        incidence="Redressement URSSAF + majoration de 100% du montant du (art. L.6252-4 CT)" if ks["has_bulletins"] and not has_ta else "",
+    ))
+
+    # Fiscal 19. TVA - Autoliquidation (art. 283-2 CGI)
+    has_autoliq = any(d.get("nature") in ("autoliquidation_tva", "facture_autoliquidation") for d in _doc_library)
+    fiscal_checks.append(_audit_check(
+        "TVA - Autoliquidation (sous-traitance BTP, acquisitions intra-UE)",
+        "Art. 283-2 CGI - Art. 283-1 CGI",
+        True,  # Non obligatoire systematiquement
+        "Documents autoliquidation importes" if has_autoliq else "Aucun document d autoliquidation importe (non obligatoire si non concerne)",
+        "Factures avec mention autoliquidation, declarations CA3 avec autoliquidation",
+    ))
+
+    # Fiscal 20. CVAE - Declaration si CA > 500 000 EUR (art. 1586 ter CGI)
+    fiscal_checks.append(_audit_check(
+        "CVAE - Cotisation sur la valeur ajoutee (si CA > 500 000 EUR)",
+        "Art. 1586 ter CGI - Art. 1586 quater CGI",
+        "cvae" in kb["pieces_justificatives"] or "cet" in kb["pieces_justificatives"],
+        "Declaration CVAE/CET importee" if "cvae" in kb["pieces_justificatives"] or "cet" in kb["pieces_justificatives"] else "Declaration CVAE non importee - verifier si CA > 500 000 EUR",
+        "Declaration 1330-CVAE, declaration 1329-DEF",
+        incidence="Amende 150 EUR pour defaut de declaration + interet de retard",
+    ))
+
     # --- COUR DES COMPTES ---
     cdc_checks = []
     cdc_checks.append(_audit_check("Regularite des comptes", "Normes NEP - ISA",
@@ -6643,6 +6795,58 @@ async def knowledge_audit():
         "procedures_ci" in kb["pieces_justificatives"],
         "Documentation controle interne importee" if "procedures_ci" in kb["pieces_justificatives"] else "Non renseigne",
         "Documentation des procedures, organigramme, delegations"))
+
+    # CDC 9. Rapprochement bancaire
+    has_rappr_banc = any(d.get("nature") in ("rapprochement_bancaire", "releve_bancaire", "etat_rapprochement") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Rapprochement bancaire",
+        "ISA 500 - PCG art. 410-5",
+        has_rappr_banc,
+        "Document(s) de rapprochement bancaire importe(s)" if has_rappr_banc else "Aucun rapprochement bancaire importe - obligatoire pour justifier la tresorerie",
+        "Etats de rapprochement bancaire, releves de compte",
+        incidence="Reserves du CAC sur les comptes de tresorerie" if not has_rappr_banc else "",
+    ))
+
+    # CDC 10. Annexe aux comptes annuels
+    has_annexe = any(d.get("nature") in ("annexe_comptes", "annexe_comptable", "notes_annexes") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Annexe aux comptes annuels",
+        "Art. L.123-14 Code de commerce - PCG art. 531-1",
+        has_annexe or "comptes_annuels" in kb["pieces_justificatives"],
+        "Annexe importee" if has_annexe else ("Incluse dans les comptes annuels" if "comptes_annuels" in kb["pieces_justificatives"] else "Annexe non importee - obligatoire avec le bilan et le compte de resultat"),
+        "Annexe aux comptes annuels (regles et methodes, notes explicatives)",
+    ))
+
+    # CDC 11. Rapport de gestion
+    has_rapport_gestion = any(d.get("nature") in ("rapport_gestion", "rapport_annuel") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Rapport de gestion",
+        "Art. L.232-1 Code de commerce",
+        has_rapport_gestion or nb_actifs < 11,
+        "Rapport de gestion importe" if has_rapport_gestion else ("Dispense possible (petite entreprise)" if nb_actifs < 11 else "Rapport de gestion non importe"),
+        "Rapport de gestion du dirigeant, rapport du CA",
+    ))
+
+    # CDC 12. Depot des comptes annuels (greffe)
+    has_depot = any(d.get("nature") in ("depot_comptes", "recepisse_greffe", "kbis") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Depot des comptes annuels au greffe",
+        "Art. L.232-21 a L.232-23 Code de commerce",
+        has_depot,
+        "Recepisse de depot importe" if has_depot else "Aucun justificatif de depot au greffe importe",
+        "Recepisse de depot au greffe, Kbis a jour",
+        incidence="Amende de 1500 EUR + astreinte pour non-depot (art. L.123-5-1 C.com)",
+    ))
+
+    # CDC 13. Inventaire physique (L.123-12 C.com)
+    has_inventaire = any(d.get("nature") in ("inventaire", "inventaire_physique", "etat_stocks") for d in _doc_library)
+    cdc_checks.append(_audit_check(
+        "Inventaire physique annuel",
+        "Art. L.123-12 Code de commerce - PCG art. 410-8",
+        has_inventaire,
+        "Inventaire importe" if has_inventaire else "Aucun inventaire physique importe - obligatoire au moins une fois par exercice",
+        "Proces-verbal d inventaire, etat des stocks valorises",
+    ))
 
     # Rapprochement detaille des masses (donnees supplementaires pour affichage)
     rapprochement_detail = {
