@@ -8476,12 +8476,14 @@ async def generer_bulletin(
 
     alertes = []
 
-    # Si contrat_id fourni, recuperer les infos
+    # Si contrat_id fourni, recuperer les infos (accepte ID ou nom salarie)
     contrat = None
     ccn_label = ""
     if contrat_id:
+        cid_lower = contrat_id.strip().lower()
         for c in _rh_contrats:
-            if c["id"] == contrat_id:
+            c_nom_complet = f"{c.get('prenom_salarie', '')} {c.get('nom_salarie', '')}".strip().lower()
+            if c.get("id", "").lower() == cid_lower or c.get("salarie_id", "").lower() == cid_lower or c_nom_complet == cid_lower or cid_lower in c_nom_complet:
                 contrat = c
                 nom_salarie = nom_salarie or c.get("nom_salarie", "") or c.get("nom", "")
                 prenom_salarie = prenom_salarie or c.get("prenom_salarie", "") or c.get("prenom", "")
@@ -9543,9 +9545,17 @@ async def generer_attestation(
     attestation_id = str(uuid.uuid4())[:8]
 
     # Recherche des informations du salarie a travers les contrats
+    # Accepte un UUID (salarie_id), un nom complet, ou un nom partiel
     contrat_salarie = None
+    sid_lower = salarie_id.strip().lower()
     for c in _rh_contrats:
-        if c["salarie_id"] == salarie_id:
+        c_sid = (c.get("salarie_id") or "").lower()
+        c_id = (c.get("id") or "").lower()
+        c_nom_complet = f"{c.get('prenom_salarie', '')} {c.get('nom_salarie', '')}".strip().lower()
+        c_nom = (c.get("nom_salarie") or "").lower()
+        c_prenom = (c.get("prenom_salarie") or "").lower()
+        if (c_sid == sid_lower or c_id == sid_lower or c_nom_complet == sid_lower
+                or c_nom == sid_lower or sid_lower in c_nom_complet):
             contrat_salarie = c
             break
 
@@ -9555,11 +9565,16 @@ async def generer_attestation(
     date_debut = ""
     salaire_brut = 0
     if contrat_salarie:
-        nom_salarie = contrat_salarie["nom_salarie"]
-        prenom_salarie = contrat_salarie["prenom_salarie"]
-        poste = contrat_salarie["poste"]
-        date_debut = contrat_salarie["date_debut"]
-        salaire_brut = contrat_salarie["salaire_brut"]
+        nom_salarie = contrat_salarie.get("nom_salarie", "")
+        prenom_salarie = contrat_salarie.get("prenom_salarie", "")
+        poste = contrat_salarie.get("poste", "")
+        date_debut = contrat_salarie.get("date_debut", "")
+        salaire_brut = contrat_salarie.get("salaire_brut", 0)
+    else:
+        # Fallback: utiliser le texte saisi comme nom
+        parts = salarie_id.strip().split(" ", 1)
+        prenom_salarie = parts[0] if parts else salarie_id
+        nom_salarie = parts[1] if len(parts) > 1 else ""
 
     # Configuration entete entreprise
     nom_entreprise = _entete_config.get("nom_entreprise", "[Nom entreprise]")
@@ -11053,12 +11068,14 @@ async def liste_salaries():
 
     # 2. Salaries issus des contrats RH (enrichir ou ajouter)
     for c in _rh_contrats:
-        cid = c.get("id", "")
-        nom_complet = f"{c.get('prenom', '')} {c.get('nom', '')}".strip()
+        cid = c.get("salarie_id", "") or c.get("id", "")
+        c_nom = c.get("nom_salarie", "") or c.get("nom", "")
+        c_prenom = c.get("prenom_salarie", "") or c.get("prenom", "")
+        nom_complet = f"{c_prenom} {c_nom}".strip()
         # Chercher si deja present par NIR dans les salaries detectes
         matched = False
         for nir, sal in list(salaries.items()):
-            if sal["nom"] == c.get("nom", "") and sal["prenom"] == c.get("prenom", ""):
+            if sal["nom"] == c_nom and sal["prenom"] == c_prenom:
                 # Enrichir le salarie existant
                 salaries[nir]["type_contrat"] = c.get("type_contrat", "")
                 salaries[nir]["date_embauche"] = c.get("date_debut", "")
@@ -11070,11 +11087,11 @@ async def liste_salaries():
             salaries[cid] = {
                 "id": cid,
                 "nir": c.get("nir", ""),
-                "nom": c.get("nom", ""),
-                "prenom": c.get("prenom", ""),
+                "nom": c_nom,
+                "prenom": c_prenom,
                 "nom_complet": nom_complet or cid,
                 "statut": c.get("categorie", c.get("statut", "")),
-                "dernier_brut": float(c.get("remuneration", 0)),
+                "dernier_brut": float(c.get("salaire_brut", 0) or c.get("remuneration", 0) or 0),
                 "type_contrat": c.get("type_contrat", ""),
                 "source": "contrat_rh",
                 "date_embauche": c.get("date_debut", ""),
@@ -12940,7 +12957,10 @@ function fmt(n){return typeof n==="number"?n.toFixed(2).replace(/\B(?=(\d{3})+(?
 function fmtN(n){return typeof n==="number"?n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g," "):String(n);}
 function showSimTab(n,el){try{document.querySelectorAll("#s-simulation .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-simulation .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("sim-"+n);if(tc)tc.classList.add("active");}catch(e){console.error("showSimTab error:",n,e);}}
 function showRHTab(n,el){try{document.querySelectorAll("#rh-tabs .tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll("#s-rh .tc").forEach(function(t){t.classList.remove("active")});if(el)el.classList.add("active");var tc=document.getElementById("rh-"+n);if(tc)tc.classList.add("active");
-if(typeof loadRHSalaries==="function"&&n==="salaries")loadRHSalaries();if(n==="contrats"){if(typeof loadRHContrats==="function")loadRHContrats();if(typeof loadRHAvenants==="function")loadRHAvenants();}if(typeof loadRHConges==="function"&&n==="conges")loadRHConges();if(typeof loadRHArrets==="function"&&n==="arrets")loadRHArrets();if(typeof loadRHSanctions==="function"&&n==="sanctions")loadRHSanctions();if(typeof loadRHEntretiens==="function"&&n==="entretiens")loadRHEntretiens();if(typeof loadRHVisites==="function"&&n==="visites")loadRHVisites();if(typeof loadRHAttestations==="function"&&n==="attestations")loadRHAttestations();if(n==="planning"){if(typeof loadRHPlanning==="function")loadRHPlanning();if(typeof renderCalendar==="function")renderCalendar();}if(typeof loadRHEchanges==="function"&&n==="echanges")loadRHEchanges();if(typeof loadRHAlertes==="function"&&n==="alertes")loadRHAlertes();if(typeof loadRHBulletins==="function"&&n==="bulletins")loadRHBulletins();}catch(e){console.error("showRHTab error:",n,e);}}
+if(typeof loadRHSalaries==="function"&&n==="salaries")loadRHSalaries();if(n==="contrats"){if(typeof loadRHContrats==="function")loadRHContrats();if(typeof loadRHAvenants==="function")loadRHAvenants();}if(typeof loadRHConges==="function"&&n==="conges")loadRHConges();if(typeof loadRHArrets==="function"&&n==="arrets")loadRHArrets();if(typeof loadRHSanctions==="function"&&n==="sanctions")loadRHSanctions();if(typeof loadRHEntretiens==="function"&&n==="entretiens")loadRHEntretiens();if(typeof loadRHVisites==="function"&&n==="visites")loadRHVisites();if(typeof loadRHAttestations==="function"&&n==="attestations")loadRHAttestations();if(n==="planning"){if(typeof loadRHPlanning==="function")loadRHPlanning();if(typeof renderCalendar==="function")renderCalendar();}if(typeof loadRHEchanges==="function"&&n==="echanges")loadRHEchanges();if(typeof loadRHAlertes==="function"&&n==="alertes")loadRHAlertes();if(typeof loadRHBulletins==="function"&&n==="bulletins")loadRHBulletins();
+/* Setup autocomplete on salarie input fields */
+var salInputs={"conges":"rh-cg-sal","arrets":"rh-ar-sal","sanctions":"rh-sa-sal","entretiens":"rh-en-sal","visites":"rh-vm-sal","attestations":"rh-at-sal","echanges":"rh-ec-sal","planning":"rh-pl-sal","bulletins":"rh-bp-nom"};
+if(salInputs[n]&&typeof setupSalarieAutocomplete==="function"){_salariesCache=null;setupSalarieAutocomplete(salInputs[n]);}}catch(e){console.error("showRHTab error:",n,e);}}
 function showPortTab(name,el){document.querySelectorAll("#s-portefeuille .port-panel").forEach(function(p){p.style.display="none";});
 var panel=document.getElementById("port-"+name);if(panel)panel.style.display="block";
 document.querySelectorAll("#s-portefeuille > div:first-child .tab").forEach(function(t){t.classList.remove("active");});
@@ -15515,6 +15535,38 @@ _pdfScoreTable(ts.cdc,"Score Cour des comptes (Regularite comptable)","#0d9488")
 html+="<p style='text-align:center;margin-top:30px;font-size:.8em;color:#94a3b8'>Document genere par NormaCheck v4.0 - SCORE PROVISOIRE - Outil d'aide a la decision, non decision automatisee (art. 22 RGPD). Indicateur methodologique interne, non opposable aux administrations (art. L.243-6-3 CSS). Score indicatif soumis a procedure contradictoire (art. L121-1 CRPA). Validation humaine requise avant utilisation decisionnelle.</p></body></html>";
 w.document.write(html);w.document.close();setTimeout(function(){w.print();},600);}
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
+
+/* === RH SALARIES AUTOCOMPLETE === */
+var _salariesCache=null;
+function loadSalariesCache(cb){
+if(_salariesCache){if(cb)cb(_salariesCache);return;}
+fetch("/api/rh/salaries").then(safeJson).then(function(list){
+_salariesCache=Array.isArray(list)?list:[];
+if(cb)cb(_salariesCache);
+}).catch(function(){_salariesCache=[];if(cb)cb([]);});}
+
+function setupSalarieAutocomplete(inputId){
+var inp=document.getElementById(inputId);if(!inp)return;
+inp.setAttribute("autocomplete","off");
+var sugId=inputId+"-sug";
+var existing=document.getElementById(sugId);
+if(!existing){var box=document.createElement("div");box.id=sugId;box.className="sug-box";box.style.cssText="position:relative;z-index:10";inp.parentNode.insertBefore(box,inp.nextSibling);}
+inp.addEventListener("input",function(){
+var q=inp.value.toLowerCase().trim();
+var box=document.getElementById(sugId);if(!box)return;
+if(q.length<1){box.innerHTML="";return;}
+loadSalariesCache(function(list){
+var matches=list.filter(function(s){return(s.nom_complet||"").toLowerCase().indexOf(q)>=0||(s.nom||"").toLowerCase().indexOf(q)>=0||(s.prenom||"").toLowerCase().indexOf(q)>=0;});
+if(!matches.length){box.innerHTML="";return;}
+var h="<div class='sug-list show' style='position:absolute;width:100%;background:var(--card-bg);border:1px solid var(--brd);border-radius:8px;box-shadow:var(--sh);max-height:200px;overflow-y:auto;z-index:100'>";
+for(var i=0;i<Math.min(matches.length,8);i++){var s=matches[i];
+h+="<div class='sug-item' style='padding:8px 12px;cursor:pointer;font-size:.85em;border-bottom:1px solid var(--brd)' data-val='"+_esc(s.nom_complet||s.id)+"' onmouseover='this.style.background=\"var(--bg2)\"' onmouseout='this.style.background=\"\"'><strong>"+_esc(s.nom_complet||s.id)+"</strong>"+(s.type_contrat?" <span style='color:var(--tx2);font-size:.8em'>"+_esc(s.type_contrat)+"</span>":"")+"</div>";}
+h+="</div>";box.innerHTML=h;
+box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){inp.value=el.getAttribute("data-val");box.innerHTML="";});});
+});
+});
+inp.addEventListener("focus",function(){if(inp.value.length>=1)inp.dispatchEvent(new Event("input"));});
+}
 
 /* === RH MODULE === */
 function _btnLoading(btn,loading){if(!btn)return;if(loading){btn._origText=btn.innerHTML;btn.classList.add("loading");btn.disabled=true;btn.innerHTML="&#9203; Chargement...";}else{btn.classList.remove("loading");btn.disabled=false;if(btn._origText)btn.innerHTML=btn._origText;}}
