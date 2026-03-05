@@ -12072,7 +12072,7 @@ body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;backgroun
 .plan .profiles{font-size:.82em;color:var(--blue);font-weight:600;margin-bottom:12px}
 .plan ul{list-style:none;text-align:left;margin:12px 0}
 .plan li{padding:5px 0;font-size:.84em;color:var(--slate-600)}
-.plan li::before{content:"\2713 ";color:var(--green);font-weight:700}
+.plan li::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--green));margin-right:8px;vertical-align:middle}
 .plan-btn{width:100%;padding:12px;border-radius:8px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid var(--slate-200);background:#fff;color:var(--slate-700);font-family:inherit}
 .plan-btn:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-1px);box-shadow:0 4px 12px rgba(37,99,235,.06)}
 .plan-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
@@ -12185,11 +12185,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
 </div>
 <div class="inst-bar">
-<div class="inst-badge">URSSAF / CSS</div>
-<div class="inst-badge">DGFIP / CGI</div>
-<div class="inst-badge">Cour des comptes</div>
-<div class="inst-badge">France Travail</div>
-<div class="inst-badge">CARSAT</div>
+<div class="inst-badge" style="max-width:600px;font-size:.95em;letter-spacing:.01em">Couvrez l'ensemble de vos obligations sociales et fiscales en un seul outil</div>
 </div>
 </main>
 
@@ -12212,7 +12208,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <span>Formats compatibles :</span>
 <span class="tag">PDF</span><span class="tag">Excel</span><span class="tag">CSV</span><span class="tag">DSN</span><span class="tag">XML</span><span class="tag">FEC</span><span class="tag">Images</span><span class="tag">DOCX</span>
 <span style="color:var(--slate-300)">|</span>
-<span>SAGE, CIEL, EBP, ADP, Silae, PayFit, CEGID, Quadratus</span>
+<span>Compatible avec tous les logiciels de paie et comptabilite</span>
 </div>
 </div>
 
@@ -12225,11 +12221,10 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div class="price">5 EUR <em>HT / mois</em></div>
 <div class="profiles">1 profil utilisateur</div>
 <ul>
+<li>Toutes les fonctionnalites</li>
 <li>Analyses illimitees</li>
-<li>Comptabilite complete</li>
-<li>Generation DSN</li>
-<li>Gestion factures</li>
-<li>Simulation (paie, micro, TNS)</li>
+<li>Comptabilite, DSN, factures</li>
+<li>Simulations (paie, micro, TNS)</li>
 <li>Veille juridique 2020-2026</li>
 <li>Export CSV</li>
 </ul>
@@ -12240,13 +12235,11 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div class="price">8.33 EUR <em>HT / mois</em></div>
 <div class="profiles">Jusqu'a 3 profils</div>
 <ul>
-<li>Tout Solo +</li>
-<li>Collaboration multi-profils</li>
+<li>Toutes les fonctionnalites</li>
+<li>3 profils collaborateurs</li>
 <li>Profil decisionnaire</li>
 <li>Tracabilite des actions</li>
 <li>Bibliotheque partagee</li>
-<li>Audit trail complet</li>
-<li>Support prioritaire</li>
 </ul>
 <button class="plan-btn" onclick="selectOffer('equipe')">Choisir Equipe</button>
 </div>
@@ -12255,13 +12248,11 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div class="price">15 EUR <em>HT / mois</em></div>
 <div class="profiles">Jusqu'a 10 profils</div>
 <ul>
-<li>Tout Equipe +</li>
+<li>Toutes les fonctionnalites</li>
+<li>10 profils collaborateurs</li>
 <li>Multi-dossiers (portefeuille)</li>
-<li>10 utilisateurs simultanes</li>
 <li>DSN multi-etablissements</li>
-<li>Veille personnalisee</li>
 <li>Accompagnement demarrage</li>
-<li>Support dedie</li>
 </ul>
 <button class="plan-btn" onclick="selectOffer('cabinet')">Choisir Cabinet</button>
 </div>
