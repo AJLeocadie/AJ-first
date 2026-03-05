@@ -123,6 +123,46 @@ if _admin:
     logger.info("Compte admin cree: %s", _admin["email"])
 
 
+# --- Retention des donnees (RGPD art. 5.1.e - limitation de la conservation) ---
+_RETENTION_UPLOADS_DAYS = int(os.getenv("NORMACHECK_RETENTION_UPLOADS_DAYS", "90"))
+_RETENTION_AUDIT_DAYS = int(os.getenv("NORMACHECK_RETENTION_AUDIT_DAYS", "1825"))  # 5 ans (art. L102 B LPF)
+
+
+def _purger_fichiers_expires():
+    """Supprime les fichiers uploades depassant la duree de retention (RGPD art. 5.1.e)."""
+    if not _IS_OVH:
+        return
+    uploads_dir = _DATA_DIR / "uploads"
+    if not uploads_dir.exists():
+        return
+    import time as _time
+    now = _time.time()
+    seuil = now - (_RETENTION_UPLOADS_DAYS * 86400)
+    count = 0
+    for f in uploads_dir.rglob("*"):
+        if f.is_file() and f.stat().st_mtime < seuil:
+            try:
+                from urssaf_analyzer.security.secure_storage import suppression_securisee
+                suppression_securisee(f, passes=1)
+                count += 1
+            except Exception:
+                try:
+                    f.unlink()
+                    count += 1
+                except OSError:
+                    pass
+    if count > 0:
+        logger.info("Purge RGPD: %d fichier(s) expire(s) supprime(s) (retention %d jours)",
+                     count, _RETENTION_UPLOADS_DAYS)
+
+
+# Purge au demarrage
+try:
+    _purger_fichiers_expires()
+except Exception as e:
+    logger.warning("Erreur purge retention: %s", e)
+
+
 # --- Middleware securite : CSP + en-tetes de protection ---
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
@@ -1135,6 +1175,179 @@ async def statut_validation_score(session_id: str):
     return {
         "session_id": session_id,
         **validation,
+    }
+
+
+# ============================================================
+# RGPD - DROITS DES PERSONNES CONCERNEES
+# Art. 15 (acces), 17 (effacement), 20 (portabilite)
+# ============================================================
+
+@app.get("/api/rgpd/export")
+async def rgpd_export(request: Request):
+    """Droit d'acces et portabilite (art. 15 et 20 RGPD).
+
+    Exporte toutes les donnees personnelles de l'utilisateur dans un format
+    structure, couramment utilise et lisible par machine (JSON).
+    """
+    user = get_current_user(request)
+    email = user["email"]
+    tenant_id = user.get("tenant_id", "")
+
+    # Collecter toutes les donnees de l'utilisateur
+    export_data = {
+        "meta": {
+            "date_export": datetime.now().isoformat(),
+            "format": "JSON (art. 20 RGPD - portabilite)",
+            "utilisateur": email,
+            "base_legale": "Art. 15 et 20 du Reglement (UE) 2016/679 (RGPD)",
+        },
+        "compte": {
+            "email": user.get("email"),
+            "nom": user.get("nom"),
+            "prenom": user.get("prenom"),
+            "role": user.get("role"),
+            "offre": user.get("offre"),
+            "entreprise": user.get("entreprise"),
+            "telephone": user.get("telephone"),
+            "date_creation": user.get("created_at"),
+            "tenant_id": tenant_id,
+        },
+        "documents_importes": [
+            {k: v for k, v in doc.items() if k != "sha256"}
+            for doc in _doc_library
+        ],
+        "journal_activite": [
+            e for e in _audit_log if e.get("profil") == email
+        ],
+        "dashboard": load_dashboard(email),
+        "base_connaissances": {
+            "salaries": _biblio_knowledge.get("salaries", {}),
+            "employeurs": _biblio_knowledge.get("employeurs", {}),
+            "periodes_couvertes": _biblio_knowledge.get("periodes_couvertes", []),
+        },
+    }
+
+    log_action(email, "rgpd_export", "Export donnees personnelles (art. 15/20 RGPD)")
+    return export_data
+
+
+@app.delete("/api/rgpd/suppression")
+async def rgpd_suppression(request: Request):
+    """Droit a l'effacement (art. 17 RGPD).
+
+    Supprime toutes les donnees personnelles de l'utilisateur.
+    Les donnees necessaires au respect d'obligations legales (art. 17.3.b)
+    sont conservees de maniere anonymisee pendant la duree de retention legale.
+    """
+    user = get_current_user(request)
+    email = user["email"]
+    tenant_id = user.get("tenant_id", "")
+
+    # 1. Anonymiser les entrees du journal d'audit (conservation legale)
+    for entry in _audit_log:
+        if entry.get("profil") == email:
+            entry["profil"] = f"[supprime-{entry.get('id', '')[:4]}]"
+
+    # 2. Supprimer les documents de la bibliotheque
+    docs_supprimes = len(_doc_library)
+    _doc_library.clear()
+
+    # 3. Supprimer le dashboard
+    if email in _dashboards:
+        del _dashboards[email]
+        if _dashboard_store:
+            _dashboard_store.save(_dashboards)
+
+    # 4. Nettoyer la base de connaissances (donnees personnelles)
+    _biblio_knowledge["salaries"] = {}
+    _biblio_knowledge["employeurs"] = {}
+    _biblio_knowledge["contrats_detectes"] = []
+
+    # 5. Supprimer les fichiers uploades sur disque (OVHcloud)
+    if _IS_OVH:
+        uploads_dir = _DATA_DIR / "uploads"
+        if uploads_dir.exists():
+            try:
+                from urssaf_analyzer.security.secure_storage import nettoyer_repertoire_temp
+                nettoyer_repertoire_temp(uploads_dir, passes=3)
+            except Exception:
+                import shutil
+                shutil.rmtree(uploads_dir, ignore_errors=True)
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    # 6. Desactiver le compte utilisateur
+    from auth import _users, _save_users
+    if email in _users:
+        _users[email]["active"] = False
+        _users[email]["nom"] = "[supprime]"
+        _users[email]["prenom"] = "[supprime]"
+        _users[email]["telephone"] = ""
+        _users[email]["entreprise"] = ""
+        _save_users()
+
+    _save_state()
+
+    log_action("[supprime]", "rgpd_suppression",
+               f"Effacement donnees personnelles (art. 17 RGPD) - {docs_supprimes} documents")
+
+    return {
+        "status": "ok",
+        "message": (
+            "Vos donnees personnelles ont ete supprimees conformement a l'art. 17 du RGPD. "
+            "Les traces d'audit anonymisees sont conservees conformement aux obligations "
+            "legales (art. 17.3.b - obligation legale de conservation, L.102 B LPF). "
+            "Votre compte a ete desactive. Contactez dpo@normacheck-app.fr pour toute question."
+        ),
+        "details": {
+            "documents_supprimes": docs_supprimes,
+            "compte_desactive": True,
+            "audit_anonymise": True,
+        },
+    }
+
+
+@app.get("/api/rgpd/info-traitement")
+async def rgpd_info_traitement(request: Request):
+    """Information sur le traitement des donnees (art. 13-14 RGPD)."""
+    get_current_user(request)
+    return {
+        "responsable_traitement": {
+            "denomination": "NormaCheck",
+            "contact_dpo": "dpo@normacheck-app.fr",
+        },
+        "finalites": [
+            "Analyse de conformite des documents sociaux et fiscaux",
+            "Generation de rapports d'audit",
+            "Calcul et verification des cotisations sociales",
+        ],
+        "base_legale": "Execution du contrat (art. 6.1.b RGPD)",
+        "categories_donnees": [
+            "Donnees d'identification (nom, prenom, email)",
+            "Donnees professionnelles (SIRET, poste, salaire)",
+            "Donnees sociales (NIR, cotisations, bulletins de paie)",
+            "Documents comptables et fiscaux",
+        ],
+        "duree_conservation": {
+            "donnees_compte": "Duree de l'inscription + 3 ans",
+            "documents_analyses": "Duree de la session d'analyse",
+            "fichiers_uploades": "90 jours (suppression automatique)",
+            "journal_audit": "5 ans (obligation legale, art. L102 B LPF)",
+        },
+        "droits": {
+            "acces": "GET /api/rgpd/export",
+            "effacement": "DELETE /api/rgpd/suppression",
+            "portabilite": "GET /api/rgpd/export (format JSON)",
+            "opposition": "Contacter dpo@normacheck-app.fr",
+            "limitation": "Contacter dpo@normacheck-app.fr",
+            "rectification": "PUT /api/auth/profil",
+        },
+        "transferts_hors_ue": "Aucun - hebergement OVHcloud (France/UE)",
+        "decision_automatisee": {
+            "nature": "Outil d'aide a la decision (non decision automatisee)",
+            "art_22": "Les scores sont provisoires et necessitent une validation humaine",
+            "contestation": "POST /api/scores/contestation",
+        },
     }
 
 
@@ -2827,7 +3040,7 @@ async def sim_bulletin(
     est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
 ):
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
-    calc = ContributionRules()
+    calc = ContributionRules(effectif_entreprise=effectif)
     res = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
     lignes = []
     for l in res.get("lignes", []):
@@ -2851,6 +3064,7 @@ async def sim_micro(
     chiffre_affaires: float = Query(50000),
     activite: str = Query("prestations_bnc"),
     acre: bool = Query(False),
+    nb_parts: float = Query(1, description="Nombre de parts fiscales du foyer"),
 ):
     ca = Decimal(str(chiffre_affaires))
     taux = {"vente_marchandises": Decimal("0.128"), "prestations_bic": Decimal("0.220"),
@@ -2863,11 +3077,14 @@ async def sim_micro(
                   "prestations_bnc": Decimal("0.34"), "liberal_cipav": Decimal("0.34")}
     abat = ir_forfait.get(activite, Decimal("0.34"))
     revenu_imposable = round(float(ca * (1 - abat)), 2)
-    ir_estim = round(revenu_imposable * 0.11, 2)
+    # Calcul IR progressif par tranches (bareme 2026)
+    ir_estim = _calculer_ir_simple(revenu_imposable, nb_parts)
+    taux_moyen = round(ir_estim / revenu_imposable * 100, 2) if revenu_imposable > 0 else 0
     return {
         "chiffre_affaires": float(ca), "taux_cotisations": float(t),
         "cotisations_sociales": cotisations, "acre_applique": acre,
         "revenu_imposable": revenu_imposable, "impot_estime": ir_estim,
+        "nb_parts": nb_parts, "taux_moyen_imposition": taux_moyen,
         "revenu_net": round(float(ca) - cotisations - ir_estim, 2),
     }
 
@@ -2880,13 +3097,44 @@ async def sim_tns(
 ):
     rev = Decimal(str(revenu_net))
     base = rev
-    maladie = round(float(base * Decimal("0.065")), 2)
-    vieillesse_base = round(float(min(base, Decimal("46368")) * Decimal("0.1775")), 2)
-    vieillesse_compl = round(float(min(base, Decimal("185472")) * Decimal("0.07")), 2)
-    invalidite = round(float(base * Decimal("0.013")), 2)
-    af = round(float(base * Decimal("0.0310")), 2)
+    pass_annuel = Decimal("48060")  # PASS 2026
+
+    # Maladie-maternite : taux progressif selon revenu
+    # <= 45% PASS : taux reduit, > 45% PASS : 6.50%
+    seuil_maladie_bas = pass_annuel * Decimal("0.45")
+    if base <= seuil_maladie_bas:
+        taux_maladie = Decimal("0.02")  # Taux reduit (bareme progressif)
+    elif base <= pass_annuel:
+        taux_maladie = Decimal("0.065")
+    else:
+        taux_maladie = Decimal("0.065")  # + 0.50% sur la part > 5 PASS (contribution equilibre)
+    maladie = round(float(base * taux_maladie), 2)
+
+    # Vieillesse base : 17.75% jusqu'a 1 PASS
+    vieillesse_base = round(float(min(base, pass_annuel) * Decimal("0.1775")), 2)
+    # Vieillesse complementaire : 7% jusqu'a 4 PASS
+    plafond_compl = pass_annuel * 4
+    vieillesse_compl = round(float(min(base, plafond_compl) * Decimal("0.07")), 2)
+    # Invalidite-deces : 1.30% jusqu'a 1 PASS
+    invalidite = round(float(min(base, pass_annuel) * Decimal("0.013")), 2)
+    # Allocations familiales : taux progressif
+    # <= 110% PASS : 0%, > 110% PASS et <= 140% PASS : progressif, > 140% PASS : 3.10%
+    seuil_af_bas = pass_annuel * Decimal("1.10")
+    seuil_af_haut = pass_annuel * Decimal("1.40")
+    if base <= seuil_af_bas:
+        af = 0.0
+    elif base <= seuil_af_haut:
+        # Taux progressif entre 0% et 3.10%
+        ratio = (base - seuil_af_bas) / (seuil_af_haut - seuil_af_bas)
+        af = round(float(base * ratio * Decimal("0.0310")), 2)
+    else:
+        af = round(float(base * Decimal("0.0310")), 2)
+
+    # CSG/CRDS : 9.70% sur revenu + cotisations obligatoires
     csg_crds = round(float(base * Decimal("0.097")), 2)
-    formation = round(float(base * Decimal("0.0025")), 2)
+    # Formation professionnelle : 0.25% du PASS (forfaitaire)
+    formation = round(float(pass_annuel * Decimal("0.0025")), 2)
+
     total = maladie + vieillesse_base + vieillesse_compl + invalidite + af + csg_crds + formation
     if acre:
         total = round(total * 0.5, 2)
@@ -2896,6 +3144,7 @@ async def sim_tns(
         "vieillesse_complementaire": vieillesse_compl, "invalidite_deces": invalidite,
         "allocations_familiales": af, "csg_crds": csg_crds, "formation": formation,
         "total_cotisations": total, "acre_applique": acre,
+        "pass_annuel_2026": float(pass_annuel),
     }
 
 
@@ -2909,7 +3158,7 @@ async def sim_guso(
     """Simulation GUSO exhaustive: spectacle occasionnel, intermittents, artistes."""
     brut = Decimal(str(salaire_brut))
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
-    calc = ContributionRules()
+    calc = ContributionRules(effectif_entreprise=1)
     res = calc.calculer_bulletin_complet(brut, est_cadre=False)
     # Cotisations specifiques spectacle
     conge_spectacle = round(float(brut * Decimal("0.155")), 2)  # 15.5% patronal
@@ -3781,7 +4030,7 @@ async def sim_cout_employeur(
 ):
     brut = brut_mensuel + primes
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
-    calc = ContributionRules()
+    calc = ContributionRules(effectif_entreprise=effectif)
     res = calc.calculer_bulletin_complet(Decimal(str(brut)), est_cadre=est_cadre)
 
     # Charges patronales detaillees
@@ -3793,8 +4042,8 @@ async def sim_cout_employeur(
     formation = round(brut * (0.0055 if effectif < 11 else 0.01), 2)
     # Taxe apprentissage
     taxe_apprentissage = round(brut * 0.0068, 2)
-    # Effort construction (>= 50)
-    effort_construction = round(brut * 0.0045, 2) if effectif >= 50 else 0
+    # Effort construction (PEEC >= 20 salaries, art. L313-1 CCH)
+    effort_construction = round(brut * 0.0045, 2) if effectif >= 20 else 0
     # Participation (>= 50)
     participation_oblig = round(brut * 0.005, 2) if effectif >= 50 else 0
 
@@ -7518,14 +7767,21 @@ async def equipe(request: Request):
     tenant_id = user.get("tenant_id", "")
     user_email = user.get("email", "")
     user_role = user.get("role", "collaborateur")
-    if user_role == "admin" and not tenant_id:
-        # Super-admin sans tenant voit tout
+    if user_role == "admin" and tenant_id == "default":
+        # Super-admin (tenant "default") voit tout
         inv_filtered = _invitations
         log_filtered = _audit_log[-50:]
-    elif user_role in ("admin", "decisionnaire"):
+    elif user_role in ("admin", "decisionnaire") and tenant_id:
         # Admin/decisionnaire d'un tenant : voit les activites du tenant
+        # Inclut les entrees des membres de l'equipe (par email) pour les
+        # anciennes entrees sans tenant_id
+        team_emails = {u["email"] for u in list_users_by_tenant(tenant_id)}
         inv_filtered = [i for i in _invitations if i.get("tenant_id") == tenant_id]
-        log_filtered = [e for e in _audit_log if e.get("tenant_id") == tenant_id][-50:]
+        log_filtered = [
+            e for e in _audit_log
+            if e.get("tenant_id") == tenant_id
+            or (not e.get("tenant_id") and e.get("profil") in team_emails)
+        ][-50:]
     else:
         # Utilisateur standard : voit uniquement ses propres activites
         inv_filtered = [i for i in _invitations if i.get("tenant_id") == tenant_id]
@@ -7546,12 +7802,18 @@ async def get_audit_log(request: Request, limit: int = Query(100, ge=1, le=500))
     tenant_id = user.get("tenant_id", "")
     user_email = user.get("email", "")
     user_role = user.get("role", "collaborateur")
-    if user_role == "admin" and not tenant_id:
-        # Super-admin sans tenant voit tout
+    if user_role == "admin" and tenant_id == "default":
+        # Super-admin (tenant "default") voit tout
         filtered = _audit_log
-    elif user_role in ("admin", "decisionnaire"):
+    elif user_role in ("admin", "decisionnaire") and tenant_id:
         # Admin/decisionnaire d'un tenant : voit les activites du tenant
-        filtered = [e for e in _audit_log if e.get("tenant_id") == tenant_id]
+        # Inclut les anciennes entrees sans tenant_id des membres de l'equipe
+        team_emails = {u["email"] for u in list_users_by_tenant(tenant_id)}
+        filtered = [
+            e for e in _audit_log
+            if e.get("tenant_id") == tenant_id
+            or (not e.get("tenant_id") and e.get("profil") in team_emails)
+        ]
     else:
         # Utilisateur standard : voit uniquement ses propres activites
         filtered = [e for e in _audit_log if e.get("profil") == user_email]

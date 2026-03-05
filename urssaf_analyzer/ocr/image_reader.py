@@ -1,8 +1,8 @@
 """Lecteur multi-format avec detection d'ecriture manuscrite.
 
 Supporte :
-- Images : JPEG, PNG, BMP, TIFF, GIF, WEBP
-- PDF (via pdfplumber)
+- Images : JPEG, PNG, BMP, TIFF, GIF, WEBP, HEIC, HEIF
+- PDF (via pdfplumber, avec OCR page-par-page pour les scans)
 - Excel (via openpyxl)
 - Texte brut, CSV, XML, DSN
 - Documents scannes avec detection OCR
@@ -14,11 +14,23 @@ Detection manuscrit :
 """
 
 import re
+import io
 import base64
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Enregistrer le plugin HEIC/HEIF si disponible
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HAS_HEIF = True
+except ImportError:
+    HAS_HEIF = False
 
 
 class FormatFichier(str, Enum):
@@ -235,7 +247,7 @@ class LecteurMultiFormat:
         return resultat
 
     def _lire_pdf(self, chemin: Path, resultat: ResultatLecture) -> ResultatLecture:
-        """Lit un fichier PDF."""
+        """Lit un fichier PDF avec OCR page-par-page pour les scans."""
         resultat.format_detecte = FormatFichier.PDF
         try:
             import pdfplumber
@@ -253,11 +265,21 @@ class LecteurMultiFormat:
                     if mots_par_page < 20:
                         resultat.est_scan = True
                         resultat.confiance_ocr = 0.5
-                        resultat.avertissements.append(
-                            "AVERTISSEMENT : Ce PDF semble etre un document scanne "
-                            f"(~{mots_par_page:.0f} mots/page). Le contenu textuel "
-                            "peut etre incomplet ou imprecis."
-                        )
+                        # Tenter l'OCR page par page
+                        ocr_texte = self._ocr_pdf_pages(pdf)
+                        if ocr_texte and len(ocr_texte.split()) > len(resultat.texte.split()):
+                            resultat.texte = ocr_texte
+                            resultat.confiance_ocr = 0.65
+                            resultat.avertissements.append(
+                                "Ce PDF est un document scanne. Le texte a ete extrait par OCR "
+                                f"({resultat.nb_pages} page(s)). Verification recommandee."
+                            )
+                        else:
+                            resultat.avertissements.append(
+                                "AVERTISSEMENT : Ce PDF semble etre un document scanne "
+                                f"(~{mots_par_page:.0f} mots/page). Le contenu textuel "
+                                "peut etre incomplet ou imprecis."
+                            )
         except ImportError:
             resultat.avertissements.append(
                 "Module pdfplumber non disponible. Lecture PDF limitee."
@@ -267,12 +289,34 @@ class LecteurMultiFormat:
 
         return resultat
 
+    def _ocr_pdf_pages(self, pdf) -> str:
+        """OCR page par page d'un PDF scanne via conversion en image."""
+        try:
+            from PIL import Image
+            import pytesseract
+        except ImportError:
+            return ""
+
+        pages_texte = []
+        for i, page in enumerate(pdf.pages):
+            try:
+                # Convertir la page en image via pdfplumber
+                img = page.to_image(resolution=300)
+                pil_img = img.original
+                texte = pytesseract.image_to_string(pil_img, lang="fra")
+                if texte and texte.strip():
+                    pages_texte.append(texte)
+            except Exception as e:
+                logger.debug("OCR echoue sur page %d: %s", i + 1, e)
+                continue
+
+        return "\n".join(pages_texte)
+
     def _lire_pdf_bytes(self, contenu: bytes, resultat: ResultatLecture) -> ResultatLecture:
-        """Lit un PDF depuis des bytes."""
+        """Lit un PDF depuis des bytes avec OCR page-par-page pour les scans."""
         resultat.format_detecte = FormatFichier.PDF
         try:
             import pdfplumber
-            import io
             with pdfplumber.open(io.BytesIO(contenu)) as pdf:
                 pages_texte = []
                 for page in pdf.pages:
@@ -286,9 +330,18 @@ class LecteurMultiFormat:
                     if mots_par_page < 20:
                         resultat.est_scan = True
                         resultat.confiance_ocr = 0.5
-                        resultat.avertissements.append(
-                            "AVERTISSEMENT : Ce PDF semble etre un document scanne."
-                        )
+                        # Tenter l'OCR page par page
+                        ocr_texte = self._ocr_pdf_pages(pdf)
+                        if ocr_texte and len(ocr_texte.split()) > len(resultat.texte.split()):
+                            resultat.texte = ocr_texte
+                            resultat.confiance_ocr = 0.65
+                            resultat.avertissements.append(
+                                "Ce PDF est un document scanne. Texte extrait par OCR."
+                            )
+                        else:
+                            resultat.avertissements.append(
+                                "AVERTISSEMENT : Ce PDF semble etre un document scanne."
+                            )
         except ImportError:
             resultat.avertissements.append(
                 "Module pdfplumber non disponible."
