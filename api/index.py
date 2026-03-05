@@ -12748,7 +12748,7 @@ label{display:block;font-weight:600;margin-bottom:5px;font-size:.8em;color:var(-
 /* Buttons */
 .btn{display:inline-flex;align-items:center;gap:6px;padding:11px 22px;border:none;border-radius:10px;font-size:.86em;font-weight:600;cursor:pointer;transition:all .2s ease;font-family:inherit;-webkit-tap-highlight-color:transparent;min-height:44px;letter-spacing:.01em}
 .btn-p{background:linear-gradient(135deg,var(--p),#1e293b);color:#fff;box-shadow:0 2px 4px rgba(15,23,42,.15)}.btn-p:hover{box-shadow:0 4px 12px rgba(15,23,42,.25);transform:translateY(-1px)}.btn-p:disabled{background:#94a3b8;cursor:not-allowed;box-shadow:none;transform:none}
-.btn-blue{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;box-shadow:0 2px 4px rgba(37,99,235,.2)}.btn-blue:hover{box-shadow:0 4px 12px rgba(37,99,235,.3);transform:translateY(-1px)}
+.btn-blue{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;box-shadow:0 2px 4px rgba(37,99,235,.2);position:relative}.btn-blue:hover:not(:disabled):not(.loading){box-shadow:0 4px 12px rgba(37,99,235,.3);transform:translateY(-1px)}.btn-blue:disabled{background:#94a3b8;cursor:not-allowed;box-shadow:none;transform:none;opacity:.7}.btn-blue:active:not(:disabled){transform:translateY(1px);box-shadow:0 1px 2px rgba(37,99,235,.2)}.btn-blue.loading{pointer-events:none;opacity:.8}
 .btn-s{background:var(--pl);color:var(--p3);border:1px solid #bfdbfe}.btn-s:hover{background:#dbeafe;transform:translateY(-1px)}
 .btn-green{background:linear-gradient(135deg,#059669,#047857);color:#fff;box-shadow:0 2px 4px rgba(5,150,105,.2)}.btn-green:hover{box-shadow:0 4px 12px rgba(5,150,105,.3);transform:translateY(-1px)}
 .btn-red{background:var(--rl);color:var(--r);border:1px solid #fecaca}.btn-red:hover{background:#fee2e2;transform:translateY(-1px)}
@@ -13186,7 +13186,7 @@ APP_HTML += """
 <div class="period-sel" id="period-sel" style="display:none">
 <div class="g3"><div><label>Debut</label><input type="date" id="gl-dd"></div><div><label>Fin</label><input type="date" id="gl-df"></div><div><button class="btn btn-blue btn-f" onclick="loadCompta()" style="margin-top:22px">Appliquer</button></div></div>
 </div>
-<div class="tc active" id="ct-journal"><div id="ct-journal-c"></div></div>
+<div class="tc active" id="ct-journal"><div style="margin-bottom:10px"><input id="ct-journal-search" placeholder="Rechercher par mot-cle (libelle, compte, date...)" oninput="filterJournal()" style="width:100%;max-width:400px"></div><div id="ct-journal-c"></div></div>
 <div class="tc" id="ct-balance"><div id="ct-balance-c"></div></div>
 <div class="tc" id="ct-grandlivre"><div id="ct-grandlivre-c"></div></div>
 <div class="tc" id="ct-resultat"><div id="ct-resultat-c"></div></div>
@@ -13980,6 +13980,12 @@ APP_HTML += """
 <button class="btn btn-blue" onclick="loadAuditLog()" style="margin-bottom:10px">Charger le journal</button>
 <div id="cfg-audit-log"></div>
 </div>
+<div class="card">
+<h2>&#128295; Diagnostic de navigation</h2>
+<p style="color:var(--tx2);font-size:.86em;margin-bottom:14px">Lancez un audit exhaustif de la navigation, des boutons et des onglets. Les resultats sont affiches ci-dessous et dans la console du navigateur (F12).</p>
+<button class="btn btn-blue" onclick="runNavAuditUI()" style="margin-bottom:10px">&#128269; Lancer l audit de navigation</button>
+<div id="cfg-nav-audit"></div>
+</div>
 </div>
 
 <!-- ===== DETAILS DES SCORES DE CONFORMITE ===== -->
@@ -14655,7 +14661,7 @@ h+="<table><tr><th>Compte</th><th>Libelle</th><th class='num'>Debit</th><th clas
 for(var k=0;k<e.lignes.length;k++){var l=e.lignes[k];var sj=l.libelle.indexOf("[SANS JUSTIFICATIF]")>=0;
 if(e.validee){h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td>"+l.libelle+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"</td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}
 else{h+="<tr"+(sj?" class='sans-just'":"")+"><td>"+l.compte+"</td><td style='display:flex;align-items:center;gap:4px'><span id='ecr-lig-"+e.id+"-"+k+"'>"+l.libelle+"</span>"+(sj?" <span class='badge badge-red'>Sans justif.</span>":"")+"<button class='btn btn-s btn-sm edl-btn' style='padding:1px 6px;font-size:.72em' data-ecr='"+e.id+"' data-span='ecr-lig-"+e.id+"-"+k+"' data-lig='"+k+"' title='Modifier'>&#9998;</button></td><td class='num'>"+l.debit.toFixed(2)+"</td><td class='num'>"+l.credit.toFixed(2)+"</td></tr>";}}
-h+="</table></div>";}document.getElementById("ct-journal-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-journal-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
+h+="</table></div>";}window._journalData=j;document.getElementById("ct-journal-c").innerHTML=h;filterJournal();}).catch(function(e){document.getElementById("ct-journal-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 
 fetch("/api/comptabilite/balance").then(safeJson).then(function(b){
 var h="";if(!b.length)h="<p style='color:var(--tx2)'>Aucune donnee.</p>";
@@ -14709,6 +14715,8 @@ var h="<input placeholder='Rechercher...' oninput='rechPC(this.value)' style='ma
 for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}h+="</table>";
 document.getElementById("ct-plan-c").innerHTML=h;}).catch(function(e){document.getElementById("ct-plan-c").innerHTML="<p style='color:var(--r)'>Erreur: "+e.message+"</p>";});
 }catch(e){console.error("loadCompta error:",e);}}
+
+function filterJournal(){var searchEl=document.getElementById("ct-journal-search");if(!searchEl)return;var q=searchEl.value.toLowerCase().trim();var cards=document.querySelectorAll("#ct-journal-c > div[data-ecr-id]");if(!cards.length)return;cards.forEach(function(card){if(!q){card.style.display="";return;}var text=card.textContent.toLowerCase();card.style.display=text.indexOf(q)>=0?"":"none";});}
 
 function rechPC(t){fetch(t?"/api/comptabilite/plan-comptable?terme="+encodeURIComponent(t):"/api/comptabilite/plan-comptable").then(safeJson).then(function(pc){var tb=document.getElementById("pc-t");if(!tb)return;var h="<tr><th>N</th><th>Libelle</th><th>Classe</th></tr>";for(var i=0;i<pc.length;i++){h+="<tr><td>"+pc[i].numero+"</td><td>"+pc[i].libelle+"</td><td>"+pc[i].classe+"</td></tr>";}tb.innerHTML=h;}).catch(function(e){console.error("Plan comptable",e);});}
 function validerEcr(){fetch("/api/comptabilite/valider",{method:"POST"}).then(safeJson).then(function(d){toast("Validees: "+d.nb_validees+(d.erreurs.length?" | Erreurs: "+d.erreurs.join(", "):""),"ok");loadCompta();}).catch(function(e){toast(e.message);});}
@@ -15509,10 +15517,11 @@ w.document.write(html);w.document.close();setTimeout(function(){w.print();},600)
 function exportPDFServer(){if(!analysisData){toast("Aucun rapport a exporter.","warn");return;}fetch("/api/export/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:analysisData}),credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error("Erreur export");return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="normacheck_rapport.html";a.click();toast("Rapport telecharge.","ok");}).catch(function(e){toast(e.message);exportPDF();});}
 
 /* === RH MODULE === */
-function rhPost(url,fd,cb){fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(cb).catch(function(e){toast(e.message);});}
+function _btnLoading(btn,loading){if(!btn)return;if(loading){btn._origText=btn.innerHTML;btn.classList.add("loading");btn.innerHTML="&#9203; Chargement...";}else{btn.classList.remove("loading");if(btn._origText)btn.innerHTML=btn._origText;}}
+function rhPost(url,fd,cb,btnEl){if(btnEl)_btnLoading(btnEl,true);fetch(url,{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(e){throw new Error(e.detail||"Erreur")});return r.json();}).then(function(d){if(btnEl)_btnLoading(btnEl,false);cb(d);}).catch(function(e){if(btnEl)_btnLoading(btnEl,false);toast(e.message);});}
 function rhGet(url,cb){fetch(url).then(safeJson).then(function(d){return (d&&d.items&&typeof d.total==="number")?d.items:d;}).then(cb).catch(function(e){console.error("rhGet "+url,e);toast("Erreur chargement: "+e.message);});}
 
-function creerContrat(){var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);var nirEl=document.getElementById("rh-ctr-nir");if(nirEl)fd.append("nir",nirEl.value);
+function creerContrat(){var nom=document.getElementById("rh-ctr-nom").value;var prenom=document.getElementById("rh-ctr-prenom").value;if(!nom||!prenom){toast("Nom et prenom du salarie sont obligatoires.");return;}var fd=new FormData();fd.append("type_contrat",document.getElementById("rh-type-ctr").value);fd.append("nom_salarie",document.getElementById("rh-ctr-nom").value);fd.append("prenom_salarie",document.getElementById("rh-ctr-prenom").value);fd.append("poste",document.getElementById("rh-ctr-poste").value);fd.append("date_debut",document.getElementById("rh-ctr-debut").value);fd.append("date_fin",document.getElementById("rh-ctr-fin").value);fd.append("salaire_brut",document.getElementById("rh-ctr-salaire").value||"0");fd.append("temps_travail",document.getElementById("rh-ctr-temps").value);fd.append("duree_hebdo",document.getElementById("rh-ctr-heures").value);fd.append("convention_collective",document.getElementById("rh-ctr-ccn").value);fd.append("periode_essai_jours",document.getElementById("rh-ctr-essai").value);fd.append("motif_cdd",document.getElementById("rh-ctr-motif").value);var nirEl=document.getElementById("rh-ctr-nir");if(nirEl)fd.append("nir",nirEl.value);
 rhPost("/api/rh/contrats",fd,function(d){toast("Contrat genere.","ok");
 var h="";
 if(d.doublons_detectes&&d.doublons_detectes.length>0){h+="<div class='al warn' style='margin-bottom:10px'><span class='ai'>&#9888;</span><span><strong>Doublon potentiel detecte !</strong> "+d.alerte_doublon+"</span></div>";h+="<div style='background:var(--ol);border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:12px'><strong>Fiche(s) existante(s) :</strong><table style='margin-top:6px'><tr><th>Nom</th><th>Prenom</th><th>Poste</th><th>Contrat</th><th>Debut</th><th>NIR</th><th>Motif</th><th>Action</th></tr>";
@@ -15654,27 +15663,27 @@ function creerAvenant(){var fd=new FormData();fd.append("contrat_id",document.ge
 rhPost("/api/rh/avenants",fd,function(){toast("Avenant enregistre.","ok");loadRHAvenants();});}
 function loadRHAvenants(){rhGet("/api/rh/avenants",function(list){var el=document.getElementById("rh-av-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Contrat</th><th>Type</th><th>Date effet</th><th>Description</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.contrat_id+"</td><td><span class='badge badge-blue'>"+a.type_avenant+"</span></td><td>"+a.date_effet+"</td><td>"+a.description+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregConge(){var fd=new FormData();fd.append("nom_salarie",document.getElementById("rh-cg-sal").value);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
+function enregConge(){var sal=document.getElementById("rh-cg-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("nom_salarie",sal);fd.append("type_conge",document.getElementById("rh-cg-type").value);fd.append("date_debut",document.getElementById("rh-cg-dd").value);fd.append("date_fin",document.getElementById("rh-cg-df").value);fd.append("nb_jours",document.getElementById("rh-cg-jours").value);fd.append("statut",document.getElementById("rh-cg-stat").value);
 rhPost("/api/rh/conges",fd,function(){toast("Conge enregistre.","ok");loadRHConges();});}
 function loadRHConges(){rhGet("/api/rh/conges",function(list){var el=document.getElementById("rh-cg-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun conge enregistre.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Jours</th><th>Statut</th></tr>";for(var i=0;i<list.length;i++){var c=list[i];var cls=c.statut==="valide"?"badge-green":(c.statut==="refuse"?"badge-red":"badge-amber");h+="<tr><td>"+c.salarie_id+"</td><td>"+c.type_conge+"</td><td>"+c.date_debut+"</td><td>"+c.date_fin+"</td><td class='num'>"+c.nb_jours+"</td><td><span class='badge "+cls+"'>"+c.statut+"</span></td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregArret(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ar-sal").value);fd.append("type_arret",document.getElementById("rh-ar-type").value);fd.append("date_debut",document.getElementById("rh-ar-dd").value);fd.append("date_fin",document.getElementById("rh-ar-df").value);fd.append("prolongation",document.getElementById("rh-ar-prol").value);fd.append("subrogation",document.getElementById("rh-ar-sub").value);
+function enregArret(){var sal=document.getElementById("rh-ar-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("salarie_id",sal);fd.append("type_arret",document.getElementById("rh-ar-type").value);fd.append("date_debut",document.getElementById("rh-ar-dd").value);fd.append("date_fin",document.getElementById("rh-ar-df").value);fd.append("prolongation",document.getElementById("rh-ar-prol").value);fd.append("subrogation",document.getElementById("rh-ar-sub").value);
 rhPost("/api/rh/arrets",fd,function(){toast("Arret enregistre.","ok");loadRHArrets();});}
 function loadRHArrets(){rhGet("/api/rh/arrets",function(list){var el=document.getElementById("rh-ar-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun arret.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Debut</th><th>Fin</th><th>Subrogation</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-amber'>"+a.type_arret+"</span></td><td>"+a.date_debut+"</td><td>"+a.date_fin+"</td><td>"+(a.subrogation===true||a.subrogation==="true"?"Oui":"Non")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregSanction(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-sa-sal").value);fd.append("type_sanction",document.getElementById("rh-sa-type").value);fd.append("date_sanction",document.getElementById("rh-sa-date").value);fd.append("motif",document.getElementById("rh-sa-motif").value);fd.append("description",document.getElementById("rh-sa-desc").value);fd.append("date_entretien_prealable",document.getElementById("rh-sa-epr").value);
+function enregSanction(){var sal=document.getElementById("rh-sa-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("salarie_id",sal);fd.append("type_sanction",document.getElementById("rh-sa-type").value);fd.append("date_sanction",document.getElementById("rh-sa-date").value);fd.append("motif",document.getElementById("rh-sa-motif").value);fd.append("description",document.getElementById("rh-sa-desc").value);fd.append("date_entretien_prealable",document.getElementById("rh-sa-epr").value);
 rhPost("/api/rh/sanctions",fd,function(){toast("Sanction enregistree.","ok");loadRHSanctions();});}
 function loadRHSanctions(){rhGet("/api/rh/sanctions",function(list){var el=document.getElementById("rh-sa-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune sanction.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Motif</th></tr>";for(var i=0;i<list.length;i++){var s=list[i];h+="<tr><td>"+s.salarie_id+"</td><td><span class='badge badge-red'>"+s.type_sanction+"</span></td><td>"+s.date_sanction+"</td><td>"+s.motif+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregEntretien(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-en-sal").value);fd.append("type_entretien",document.getElementById("rh-en-type").value);fd.append("date_entretien",document.getElementById("rh-en-date").value);fd.append("compte_rendu",document.getElementById("rh-en-cr").value);fd.append("date_prochain",document.getElementById("rh-en-next").value);
+function enregEntretien(){var sal=document.getElementById("rh-en-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("salarie_id",sal);fd.append("type_entretien",document.getElementById("rh-en-type").value);fd.append("date_entretien",document.getElementById("rh-en-date").value);fd.append("compte_rendu",document.getElementById("rh-en-cr").value);fd.append("date_prochain",document.getElementById("rh-en-next").value);
 rhPost("/api/rh/entretiens",fd,function(){toast("Entretien enregistre.","ok");loadRHEntretiens();});}
 function loadRHEntretiens(){rhGet("/api/rh/entretiens",function(list){var el=document.getElementById("rh-en-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun entretien.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Prochain</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_entretien+"</span></td><td>"+e.date_entretien+"</td><td>"+(e.date_prochain||"-")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function enregVisite(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-vm-sal").value);fd.append("type_visite",document.getElementById("rh-vm-type").value);fd.append("date_visite",document.getElementById("rh-vm-date").value);fd.append("resultat",document.getElementById("rh-vm-res").value);fd.append("remarques",document.getElementById("rh-vm-rem").value);fd.append("date_prochaine",document.getElementById("rh-vm-next").value);
+function enregVisite(){var sal=document.getElementById("rh-vm-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("salarie_id",sal);fd.append("type_visite",document.getElementById("rh-vm-type").value);fd.append("date_visite",document.getElementById("rh-vm-date").value);fd.append("resultat",document.getElementById("rh-vm-res").value);fd.append("remarques",document.getElementById("rh-vm-rem").value);fd.append("date_prochaine",document.getElementById("rh-vm-next").value);
 rhPost("/api/rh/visites-medicales",fd,function(){toast("Visite enregistree.","ok");loadRHVisites();});}
 function loadRHVisites(){rhGet("/api/rh/visites-medicales",function(list){var el=document.getElementById("rh-vm-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucune visite.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Resultat</th><th>Prochaine</th></tr>";for(var i=0;i<list.length;i++){var v=list[i];var cls=v.resultat==="apte"?"badge-green":(v.resultat==="inapte"?"badge-red":"badge-amber");h+="<tr><td>"+v.salarie_id+"</td><td>"+v.type_visite+"</td><td>"+v.date_visite+"</td><td><span class='badge "+cls+"'>"+v.resultat+"</span></td><td>"+(v.date_prochaine||"-")+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
-function genererAttestation(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-at-sal").value);fd.append("type_attestation",document.getElementById("rh-at-type").value);fd.append("date_generation",new Date().toISOString().substring(0,10));
+function genererAttestation(){var sal=document.getElementById("rh-at-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("salarie_id",sal);fd.append("type_attestation",document.getElementById("rh-at-type").value);fd.append("date_generation",new Date().toISOString().substring(0,10));var btn=event&&event.target?event.target.closest(".btn"):null;
 rhPost("/api/rh/attestations/generer",fd,function(d){document.getElementById("rh-at-res").innerHTML="<div class='card' style='background:var(--pl);margin-top:8px'><pre style='white-space:pre-wrap;font-size:.82em;line-height:1.6'>"+(d.texte||d.contenu||"Erreur generation")+"</pre><button class='btn btn-s btn-sm' onclick='window.print()'>Imprimer</button></div>";toast("Attestation generee.","ok");loadRHAttestations();});}
 function loadRHAttestations(){rhGet("/api/rh/attestations",function(list){var el=document.getElementById("rh-at-list");if(!list.length){el.innerHTML="";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th></tr>";for(var i=0;i<list.length;i++){var a=list[i];h+="<tr><td>"+a.salarie_id+"</td><td><span class='badge badge-blue'>"+a.type_attestation+"</span></td><td>"+a.date_generation+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
@@ -15700,7 +15709,8 @@ function planningGoToday(){_planningDate=new Date();document.getElementById("rh-
 
 function renderPlanningView(){
 var semInput=document.getElementById("rh-pl-sem");
-if(semInput&&semInput.value){_planningDate=new Date(semInput.value+"T12:00:00");}
+if(semInput&&semInput.value){var parsed=new Date(semInput.value+"T12:00:00");if(!isNaN(parsed.getTime()))_planningDate=parsed;}
+if(!semInput.value){semInput.value=_planningDate.toISOString().substring(0,10);}
 if(_planningView==="jour")renderPlanningJour();
 else if(_planningView==="semaine")renderPlanningHebdo();
 else if(_planningView==="mois")renderPlanningMois();
@@ -15841,7 +15851,7 @@ toast(d.nb_entrees_creees+" creneaux crees","ok");renderPlanningView();});}
 
 function ajouterPlanning(){var fd=new FormData();var sal=document.getElementById("rh-pl-sal").value;if(!sal){toast("Veuillez saisir un salarie.");return;}fd.append("salarie_id",sal);fd.append("date",document.getElementById("rh-pl-date").value);var dateFin=document.getElementById("rh-pl-date-fin").value;if(dateFin)fd.append("date_fin",dateFin);fd.append("heure_debut",document.getElementById("rh-pl-hd").value);fd.append("heure_fin",document.getElementById("rh-pl-hf").value);fd.append("type_poste",document.getElementById("rh-pl-type").value);var statut=(document.getElementById("rh-pl-statut")||{}).value;if(statut)fd.append("statut",statut);var jours=(document.getElementById("rh-pl-jours")||{}).value;if(jours)fd.append("jours_semaine",jours);
 rhPost("/api/rh/planning",fd,function(d){if(d.nb_creneaux_crees){toast(d.nb_creneaux_crees+" creneaux crees sur la periode.","ok");}else{toast("Planning mis a jour.","ok");}renderPlanningView();});}
-function loadRHPlanning(){renderPlanningView();}
+function loadRHPlanning(){var semInput=document.getElementById("rh-pl-sem");if(semInput&&!semInput.value){semInput.value=new Date().toISOString().substring(0,10);}renderPlanningView();}
 function renderCalendar(){renderPlanningView();}
 /* Interactive planning: click on slot to edit, drag to extend */
 document.addEventListener("click",function(ev){
@@ -15853,7 +15863,7 @@ if(action==="edit-statut"){var newSt=target.getAttribute("data-pl-statut");var f
 function voirContrat(id){window.open("/api/rh/contrats/"+id+"/document","_blank");}
 function voirBulletinDoc(el){var bid=el.dataset.bid;if(bid)window.open("/api/rh/bulletins/"+bid+"/document","_blank");}
 
-function enregEchange(){var fd=new FormData();fd.append("salarie_id",document.getElementById("rh-ec-sal").value);fd.append("objet",document.getElementById("rh-ec-obj").value);fd.append("contenu",document.getElementById("rh-ec-txt").value);fd.append("type_echange",document.getElementById("rh-ec-type").value);fd.append("date_echange",document.getElementById("rh-ec-date").value);
+function enregEchange(){var sal=document.getElementById("rh-ec-sal").value;if(!sal){toast("Veuillez saisir le nom du salarie.");return;}var fd=new FormData();fd.append("salarie_id",sal);fd.append("objet",document.getElementById("rh-ec-obj").value);fd.append("contenu",document.getElementById("rh-ec-txt").value);fd.append("type_echange",document.getElementById("rh-ec-type").value);fd.append("date_echange",document.getElementById("rh-ec-date").value);
 rhPost("/api/rh/echanges",fd,function(){toast("Echange enregistre.","ok");loadRHEchanges();});}
 function loadRHEchanges(){rhGet("/api/rh/echanges",function(list){var el=document.getElementById("rh-ec-list");if(!list.length){el.innerHTML="<p style='color:var(--tx2)'>Aucun echange.</p>";return;}var h="<table><tr><th>Salarie</th><th>Type</th><th>Date</th><th>Objet</th></tr>";for(var i=0;i<list.length;i++){var e=list[i];h+="<tr><td>"+e.salarie_id+"</td><td><span class='badge badge-blue'>"+e.type_echange+"</span></td><td>"+e.date_echange+"</td><td>"+e.objet+"</td></tr>";}h+="</table>";el.innerHTML=h;});}
 
@@ -15923,7 +15933,7 @@ function archiverAlerteLibre(id){var fd=new FormData();fd.append("statut","archi
 function supprimerAlerteLibre(id){if(!confirm("Supprimer cette alerte ?"))return;fetch("/api/rh/alertes/libres/"+id,{method:"DELETE",headers:{"Authorization":"Bearer "+(_ncUser&&_ncUser.token||"")}}).then(safeJson).then(function(){toast("Alerte supprimee.","ok");loadAlertesLibres();loadRHAlertes();}).catch(function(e){toast(e.message);});}
 function exportAlertes(){if(!_rhAlertesData||!_rhAlertesData.length)return;var csv="Urgence;Titre;Description;Reference;Action requise;Echeance\\n";for(var i=0;i<_rhAlertesData.length;i++){var a=_rhAlertesData[i];csv+='"'+(a.urgence||"")+'";"'+(a.titre||"")+'";"'+((a.description||"").replace(/"/g,"'"))+'";"'+(a.reference||"")+'";"'+(a.action_requise||"")+'";"'+(a.echeance||"")+'"'+"\\n";}var b=new Blob([csv],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var l=document.createElement("a");l.href=u;l.download="alertes_rh.csv";l.click();URL.revokeObjectURL(u);}
 function prefillBulletin(cid){if(!cid)return;rhGet("/api/rh/contrats",function(list){for(var i=0;i<list.length;i++){var c=list[i];if(c.id===cid){document.getElementById("rh-bp-nom").value=c.nom_salarie||c.nom||"";document.getElementById("rh-bp-prenom").value=c.prenom_salarie||c.prenom||"";document.getElementById("rh-bp-brut").value=c.salaire_brut||"";if(c.duree_hebdo)document.getElementById("rh-bp-heures").value=(parseFloat(c.duree_hebdo)/35*151.67).toFixed(2);break;}}});}
-function genererBulletin(){var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
+function genererBulletin(){var nom=document.getElementById("rh-bp-nom").value;var brut=document.getElementById("rh-bp-brut").value;if(!nom){toast("Veuillez saisir le nom du salarie.");return;}if(!brut||parseFloat(brut)<=0){toast("Veuillez saisir un salaire brut valide.");return;}var fd=new FormData();fd.append("contrat_id",document.getElementById("rh-bp-ctr").value);fd.append("nom_salarie",document.getElementById("rh-bp-nom").value);fd.append("prenom_salarie",document.getElementById("rh-bp-prenom").value);fd.append("mois",document.getElementById("rh-bp-mois").value);fd.append("salaire_brut",document.getElementById("rh-bp-brut").value||"0");fd.append("est_cadre",document.getElementById("rh-bp-cadre").value);fd.append("heures_supplementaires",document.getElementById("rh-bp-hs").value||"0");fd.append("primes",document.getElementById("rh-bp-primes").value||"0");fd.append("avantages_nature",document.getElementById("rh-bp-avantages").value||"0");fd.append("absences_jours",document.getElementById("rh-bp-abs").value||"0");fd.append("heures_travaillees",document.getElementById("rh-bp-heures").value||"151.67");
 rhPost("/api/rh/bulletins/generer",fd,function(d){
 var h="";
 if(d.alertes&&d.alertes.length){for(var a=0;a<d.alertes.length;a++){h+="<div class='al "+(d.alertes[a].niveau==="haute"?"err":"warn")+"'><span class='ai'>&#9888;</span><span>"+d.alertes[a].message+"</span></div>";}}
@@ -16031,10 +16041,122 @@ if(idx<sections.length){e.preventDefault();showS(sections[idx]);}
 }
 });
 
+/* === NAVIGATION AUDIT SYSTEM === */
+function auditNavigation(){
+var report={ok:[],warn:[],err:[],timestamp:new Date().toISOString()};
+
+/* 1. Check all sidebar navigation links */
+var sidebarLinks=document.querySelectorAll(".sidebar .nl[onclick]");
+sidebarLinks.forEach(function(link){
+var match=link.getAttribute("onclick").match(/showS\(['"](\w+)['"]/);
+if(!match){report.warn.push("Sidebar link sans section: "+link.textContent.trim());return;}
+var secId="s-"+match[1];
+var sec=document.getElementById(secId);
+if(sec){report.ok.push("Section '"+match[1]+"' ("+secId+") existe");}
+else{report.err.push("Section MANQUANTE: "+secId+" (lien: "+link.textContent.trim()+")");}
+});
+
+/* 2. Check all tab panels have matching content divs */
+var tabSystems=[
+{tabs:"#compta-tabs .tab",prefix:"ct-",section:"Comptabilite"},
+{tabs:"#rh-tabs .tab",prefix:"rh-",section:"RH"},
+{tabs:"#s-simulation .tabs .tab",prefix:"sim-",section:"Simulation"},
+{tabs:"#fact-tabs .tab",prefix:"ft-",section:"Factures"}
+];
+tabSystems.forEach(function(ts){
+var tabs=document.querySelectorAll(ts.tabs);
+tabs.forEach(function(tab){
+var onclick=tab.getAttribute("onclick")||"";
+var match=onclick.match(/show\w+Tab\(['"](\w+)['"]/);
+if(!match)return;
+var tcId=ts.prefix+match[1];
+var tc=document.getElementById(tcId);
+if(tc){report.ok.push(ts.section+" tab '"+match[1]+"' -> #"+tcId+" existe");}
+else{report.err.push(ts.section+" tab '"+match[1]+"' -> #"+tcId+" MANQUANT");}
+});
+});
+
+/* 3. Check all blue buttons have valid onclick handlers */
+var blueButtons=document.querySelectorAll(".btn-blue[onclick]");
+blueButtons.forEach(function(btn){
+var onclick=btn.getAttribute("onclick");
+var funcMatch=onclick.match(/^(\w+)\(/);
+if(!funcMatch)return;
+var funcName=funcMatch[1];
+if(typeof window[funcName]==="function"){
+report.ok.push("Bouton '"+btn.textContent.trim().substring(0,30)+"' -> "+funcName+"() OK");
+}else{
+report.err.push("Bouton '"+btn.textContent.trim().substring(0,30)+"' -> "+funcName+"() FONCTION MANQUANTE");
+}
+});
+
+/* 4. Check all form inputs referenced by buttons exist */
+var criticalInputs=[
+{id:"rh-pl-sem",label:"Planning date"},
+{id:"gl-dd",label:"Compta date debut"},
+{id:"gl-df",label:"Compta date fin"},
+{id:"em-search",label:"Ecritures recherche"},
+{id:"rh-at-sal",label:"Attestation salarie"},
+{id:"rh-ctr-nom",label:"Contrat nom"},
+{id:"rh-bp-nom",label:"Bulletin nom"}
+];
+criticalInputs.forEach(function(inp){
+var el=document.getElementById(inp.id);
+if(el){report.ok.push("Input '"+inp.label+"' (#"+inp.id+") present");}
+else{report.err.push("Input MANQUANT: '"+inp.label+"' (#"+inp.id+")");}
+});
+
+/* 5. Check disabled buttons have proper visual styling */
+var disabledBtns=document.querySelectorAll(".btn-blue:disabled");
+disabledBtns.forEach(function(btn){
+report.warn.push("Bouton desactive: '"+btn.textContent.trim().substring(0,30)+"' (ID: "+(btn.id||"sans id")+")");
+});
+
+/* Summary */
+var summary="Navigation Audit - "+report.timestamp+"\n";
+summary+="OK: "+report.ok.length+" | Warnings: "+report.warn.length+" | Erreurs: "+report.err.length+"\n\n";
+if(report.err.length){summary+="=== ERREURS ===\n";report.err.forEach(function(e){summary+="  [ERR] "+e+"\n";});}
+if(report.warn.length){summary+="\n=== AVERTISSEMENTS ===\n";report.warn.forEach(function(w){summary+="  [WARN] "+w+"\n";});}
+
+console.log("%c[Navigation Audit]","color:#2563eb;font-weight:bold","\n"+summary);
+
+/* Show results in toast */
+if(report.err.length){toast(report.err.length+" erreur(s) de navigation detectee(s). Voir la console (F12).");}
+else if(report.warn.length){toast(report.warn.length+" avertissement(s). Navigation globalement OK.","warn");}
+else{toast("Audit navigation : tout est OK ("+report.ok.length+" verifications).","ok");}
+
+return report;
+}
+
+function runNavAuditUI(){
+var r=auditNavigation();
+var el=document.getElementById("cfg-nav-audit");if(!el)return;
+var h="<div style='margin-top:10px'>";
+h+="<div class='g3'><div class='sc green'><div class='val'>"+r.ok.length+"</div><div class='lab'>OK</div></div>";
+h+="<div class='sc amber'><div class='val'>"+r.warn.length+"</div><div class='lab'>Avertissements</div></div>";
+h+="<div class='sc "+(r.err.length?"red":"green")+"'><div class='val'>"+r.err.length+"</div><div class='lab'>Erreurs</div></div></div>";
+if(r.err.length){h+="<h3 style='color:var(--r);margin-top:14px'>Erreurs</h3>";for(var i=0;i<r.err.length;i++){h+="<div class='al err' style='margin:4px 0'><span class='ai'>&#9888;</span><span>"+_esc(r.err[i])+"</span></div>";}}
+if(r.warn.length){h+="<h3 style='color:var(--o);margin-top:14px'>Avertissements</h3>";for(var i=0;i<r.warn.length;i++){h+="<div class='al warn' style='margin:4px 0'><span class='ai'>&#128161;</span><span>"+_esc(r.warn[i])+"</span></div>";}}
+h+="<details style='margin-top:14px'><summary style='cursor:pointer;font-weight:600;color:var(--p2)'>Voir les "+r.ok.length+" verifications reussies</summary><div style='margin-top:8px'>";
+for(var i=0;i<r.ok.length;i++){h+="<div style='font-size:.82em;color:var(--g);padding:2px 0'>&#10004; "+_esc(r.ok[i])+"</div>";}
+h+="</div></details></div>";
+el.innerHTML=h;
+}
+
+/* Run audit automatically on load (results in console) */
+function _autoAuditNav(){
+try{
+var r=auditNavigation();
+if(r.err.length>0){console.warn("[Nav Audit] "+r.err.length+" erreur(s) detectee(s)");}
+}catch(e){console.error("[Nav Audit] Erreur audit:",e);}
+}
+
 /* === INITIALIZATION === */
 (function initApp(){
 loadDash();
 loadDashServer();
+/* Delayed navigation audit (after DOM fully rendered) */
+setTimeout(_autoAuditNav,2000);
 })();
 </script>
 </body>
