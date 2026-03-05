@@ -18,31 +18,79 @@ from urssaf_analyzer.utils.number_utils import parser_montant
 
 # Mapping flexible des noms de colonnes vers les champs internes
 COLONNES_MAPPING = {
-    # Employe
+    # Employe - NIR
     "nir": "nir", "numero_ss": "nir", "securite_sociale": "nir",
+    "n_ss": "nir", "nss": "nir", "n_secu": "nir", "num_secu": "nir",
+    "no_ss": "nir", "no_securite_sociale": "nir",
+    "numero_securite_sociale": "nir", "n_securite_sociale": "nir",
+    "social_security_number": "nir", "ssn": "nir",
+    # Employe - nom/prenom
     "nom": "nom", "nom_salarie": "nom", "salarie": "nom", "employe": "nom",
-    "prenom": "prenom", "prenom_salarie": "prenom",
+    "nom_du_salarie": "nom", "nom_employe": "nom", "nom_agent": "nom",
+    "nom_de_famille": "nom", "nom_famille": "nom", "patronyme": "nom",
+    "nom_usage": "nom", "nom_naissance": "nom",
+    "last_name": "nom", "family_name": "nom", "employee_last_name": "nom",
+    "collaborateur_nom": "nom",
+    "prenom": "prenom", "prenom_salarie": "prenom", "prenom_employe": "prenom",
+    "first_name": "prenom", "given_name": "prenom", "employee_first_name": "prenom",
+    "collaborateur_prenom": "prenom",
+    # Employe - identite combinee
+    "nom_prenom": "nom", "nom_et_prenom": "nom", "prenom_nom": "nom",
+    "identite": "nom", "nom_complet": "nom", "intitule_salarie": "nom",
+    "designation_salarie": "nom", "nom_sal": "nom", "intitule": "nom",
+    "nom_collaborateur": "nom", "collaborateur": "nom",
+    "identite_salarie": "nom", "libelle_salarie": "nom",
+    # Employe - matricule
+    "matricule": "matricule", "num_matricule": "matricule",
+    "numero_matricule": "matricule", "n_mat": "matricule",
+    "code_salarie": "matricule", "ref_salarie": "matricule",
+    "no_salarie": "matricule", "code_employe": "matricule",
+    "ref_employe": "matricule", "numero_salarie": "matricule",
+    "identifiant": "matricule", "employee_id": "matricule",
+    "worker_id": "matricule", "file_number": "matricule",
     "statut": "statut", "categorie": "statut",
+    "cat_professionnelle": "statut", "classification": "statut",
+    "college": "statut", "employee_category": "statut",
     # Cotisations - base
     "base": "base_brute", "base_brute": "base_brute", "assiette": "assiette",
     "salaire_brut": "base_brute", "brut": "base_brute", "salaire": "base_brute",
     "salaire_de_base": "base_brute", "remuneration": "base_brute",
     "remuneration_brute": "base_brute",
+    "brut_soumis": "base_brute", "brut_fiscal": "base_brute",
+    "base_ss": "base_brute", "base_securite_sociale": "base_brute",
+    "assiette_brute": "base_brute", "base_cotisations": "base_brute",
+    "montant_brut": "base_brute", "total_brut": "base_brute",
+    "brut_mensuel": "base_brute", "brut_total": "base_brute",
+    "gross_pay": "base_brute", "gross_salary": "base_brute",
+    "total_gross": "base_brute", "salaire_brut_mensuel": "base_brute",
+    "brut_contractuel": "base_brute", "remuneration_totale": "base_brute",
     # Cotisations - taux
     "taux_patronal": "taux_patronal", "taux_employeur": "taux_patronal",
     "taux_pat.": "taux_patronal", "taux_pat": "taux_patronal",
+    "tx_pat": "taux_patronal", "tx_patronal": "taux_patronal",
+    "pct_patronal": "taux_patronal",
     "taux_salarial": "taux_salarial", "taux_salarie": "taux_salarial",
     "taux_sal.": "taux_salarial", "taux_sal": "taux_salarial",
+    "tx_sal": "taux_salarial", "tx_salarial": "taux_salarial",
+    "pct_salarial": "taux_salarial",
     # Cotisations - montants patronaux
     "montant_patronal": "montant_patronal", "cotisation_employeur": "montant_patronal",
     "part_patronale": "montant_patronal", "part_patronal": "montant_patronal",
     "part_employeur": "montant_patronal", "charges_patronales": "montant_patronal",
     "cotisations_patronales": "montant_patronal", "patronal": "montant_patronal",
+    "mt_patronal": "montant_patronal", "montant_part_employeur": "montant_patronal",
+    "contribution_employeur": "montant_patronal", "charge_employeur": "montant_patronal",
+    "employer_contribution": "montant_patronal", "employer_share": "montant_patronal",
+    "total_patronal": "montant_patronal",
     # Cotisations - montants salariaux
     "montant_salarial": "montant_salarial", "cotisation_salarie": "montant_salarial",
     "part_salariale": "montant_salarial", "part_salarie": "montant_salarial",
     "charges_salariales": "montant_salarial", "cotisations_salariales": "montant_salarial",
     "retenues": "montant_salarial", "salarial": "montant_salarial",
+    "mt_salarial": "montant_salarial", "montant_part_salarie": "montant_salarial",
+    "retenue_salariale": "montant_salarial", "contribution_salarie": "montant_salarial",
+    "retenue_salarie": "montant_salarial", "employee_contribution": "montant_salarial",
+    "employee_deduction": "montant_salarial", "total_salarial": "montant_salarial",
     # Cotisations - total (recapitulatifs)
     "cotisations": "total_cotisations", "charges": "total_cotisations",
     "total_cotisations": "total_cotisations", "total_charges": "total_cotisations",
@@ -50,6 +98,11 @@ COLONNES_MAPPING = {
     # Net a payer
     "net_a_payer": "net_a_payer", "net_à_payer": "net_a_payer",
     "net": "net_a_payer", "net_paye": "net_a_payer", "salaire_net": "net_a_payer",
+    "montant_net": "net_a_payer", "net_verse": "net_a_payer",
+    "net_mensuel": "net_a_payer", "net_fiscal": "net_a_payer",
+    "net_imposable": "net_a_payer", "net_avant_impot": "net_a_payer",
+    "net_pay": "net_a_payer", "take_home_pay": "net_a_payer",
+    "net_a_payer_avant_impot": "net_a_payer", "net_apres_retenues": "net_a_payer",
     # Avantages en nature
     "avantage": "avantage_nature", "avantages": "avantage_nature",
     "avantage_nature": "avantage_nature", "avantages_en_nature": "avantage_nature",
@@ -58,6 +111,17 @@ COLONNES_MAPPING = {
     "type_cotisation": "type_cotisation", "code_cotisation": "type_cotisation",
     "rubrique": "type_cotisation", "libelle": "type_cotisation",
     "libelle_cotisation": "type_cotisation", "nature_cotisation": "type_cotisation",
+    "code_rubrique": "type_cotisation", "libelle_rubrique": "type_cotisation",
+    "intitule_rubrique": "type_cotisation", "designation": "type_cotisation",
+    "code_caisse": "type_cotisation", "nature": "type_cotisation",
+    "libelle_charge": "type_cotisation", "type_charge": "type_cotisation",
+    "code_organisme": "type_cotisation", "libelle_organisme": "type_cotisation",
+    "deduction_code": "type_cotisation", "deduction_description": "type_cotisation",
+    # Heures
+    "heures": "heures", "heures_travaillees": "heures", "nb_heures": "heures",
+    "h_travaillees": "heures", "horaire": "heures", "heures_mensuelles": "heures",
+    "heures_remunerees": "heures", "heures_payees": "heures", "nbre_heures": "heures",
+    "hours_worked": "heures", "total_hours": "heures",
     # Factures / documents comptables
     "type": "type_document_ligne", "numero": "numero_piece",
     "tiers": "tiers", "fournisseur": "tiers", "client": "tiers",
@@ -74,6 +138,9 @@ COLONNES_MAPPING = {
     "idcc": "idcc", "code_idcc": "idcc", "numero_idcc": "idcc",
     "code_naf": "code_naf", "naf": "code_naf", "ape": "code_naf",
     "code_ape": "code_naf",
+    # Employeur
+    "siret": "siret", "siren": "siren", "raison_sociale": "raison_sociale",
+    "entreprise": "raison_sociale", "societe": "raison_sociale",
 }
 
 # Mots-cles pour detection du type de document CSV
@@ -439,35 +506,107 @@ class CSVParser(BaseParser):
     def _mapper_type_cotisation(valeur: str) -> ContributionType:
         """Mappe une valeur textuelle vers un ContributionType."""
         v = valeur.lower().strip()
-        mapping = {
-            "maladie": ContributionType.MALADIE,
-            "vieillesse plafonnee": ContributionType.VIEILLESSE_PLAFONNEE,
-            "vieillesse deplafonnee": ContributionType.VIEILLESSE_DEPLAFONNEE,
-            "allocations familiales": ContributionType.ALLOCATIONS_FAMILIALES,
-            "af": ContributionType.ALLOCATIONS_FAMILIALES,
-            "at": ContributionType.ACCIDENT_TRAVAIL,
-            "accident travail": ContributionType.ACCIDENT_TRAVAIL,
-            "at/mp": ContributionType.ACCIDENT_TRAVAIL,
-            "csg non deductible": ContributionType.CSG_NON_DEDUCTIBLE,
-            "csg": ContributionType.CSG_DEDUCTIBLE,
-            "crds": ContributionType.CRDS,
-            "chomage": ContributionType.ASSURANCE_CHOMAGE,
-            "ags": ContributionType.AGS,
-            "fnal": ContributionType.FNAL,
-            "formation": ContributionType.FORMATION_PROFESSIONNELLE,
-            "taxe apprentissage": ContributionType.TAXE_APPRENTISSAGE,
-            "prevoyance cadre": ContributionType.PREVOYANCE_CADRE,
-            "prevoyance": ContributionType.PREVOYANCE_NON_CADRE,
-            "mutuelle": ContributionType.MUTUELLE_OBLIGATOIRE,
-            "complementaire sante": ContributionType.MUTUELLE_OBLIGATOIRE,
-            "retraite complementaire": ContributionType.RETRAITE_COMPLEMENTAIRE_T1,
-            "agirc": ContributionType.RETRAITE_COMPLEMENTAIRE_T2,
-            "arrco": ContributionType.RETRAITE_COMPLEMENTAIRE_T1,
-            "apec": ContributionType.APEC,
-            "ceg": ContributionType.CEG_T1,
-            "cet": ContributionType.CET,
-        }
-        for pattern, ct in mapping.items():
+        # Remove accents for matching
+        for a, b in [("é", "e"), ("è", "e"), ("ê", "e"), ("ë", "e"),
+                      ("à", "a"), ("â", "a"), ("ô", "o"), ("î", "i"),
+                      ("ù", "u"), ("û", "u"), ("ç", "c"), ("ï", "i")]:
+            v = v.replace(a, b)
+        # Order matters: more specific patterns first
+        mapping = [
+            # Vieillesse (before maladie to avoid false match)
+            ("vieillesse plafonnee", ContributionType.VIEILLESSE_PLAFONNEE),
+            ("vieillesse plaf", ContributionType.VIEILLESSE_PLAFONNEE),
+            ("vieil. plaf", ContributionType.VIEILLESSE_PLAFONNEE),
+            ("vieillesse deplafonnee", ContributionType.VIEILLESSE_DEPLAFONNEE),
+            ("vieillesse deplaf", ContributionType.VIEILLESSE_DEPLAFONNEE),
+            ("vieil. deplaf", ContributionType.VIEILLESSE_DEPLAFONNEE),
+            ("vieillesse tot", ContributionType.VIEILLESSE_DEPLAFONNEE),
+            # CSG / CRDS (before generic patterns)
+            ("csg non deductible", ContributionType.CSG_NON_DEDUCTIBLE),
+            ("csg non ded", ContributionType.CSG_NON_DEDUCTIBLE),
+            ("csg imposable", ContributionType.CSG_NON_DEDUCTIBLE),
+            ("csg deductible", ContributionType.CSG_DEDUCTIBLE),
+            ("csg ded", ContributionType.CSG_DEDUCTIBLE),
+            ("csg", ContributionType.CSG_DEDUCTIBLE),
+            ("crds", ContributionType.CRDS),
+            # Maladie
+            ("maladie", ContributionType.MALADIE),
+            ("mal.", ContributionType.MALADIE),
+            ("mmid", ContributionType.MALADIE),
+            ("invalidite deces", ContributionType.MALADIE),
+            # Allocations familiales
+            ("allocations familiales", ContributionType.ALLOCATIONS_FAMILIALES),
+            ("alloc. fam", ContributionType.ALLOCATIONS_FAMILIALES),
+            ("alloc fam", ContributionType.ALLOCATIONS_FAMILIALES),
+            ("af ", ContributionType.ALLOCATIONS_FAMILIALES),
+            # AT/MP
+            ("accident travail", ContributionType.ACCIDENT_TRAVAIL),
+            ("accident du travail", ContributionType.ACCIDENT_TRAVAIL),
+            ("at/mp", ContributionType.ACCIDENT_TRAVAIL),
+            ("at mp", ContributionType.ACCIDENT_TRAVAIL),
+            ("risque professionnel", ContributionType.ACCIDENT_TRAVAIL),
+            # Chomage / AGS
+            ("assurance chomage", ContributionType.ASSURANCE_CHOMAGE),
+            ("chomage", ContributionType.ASSURANCE_CHOMAGE),
+            ("pole emploi", ContributionType.ASSURANCE_CHOMAGE),
+            ("france travail", ContributionType.ASSURANCE_CHOMAGE),
+            ("ags", ContributionType.AGS),
+            ("garantie salaires", ContributionType.AGS),
+            # FNAL
+            ("fnal", ContributionType.FNAL),
+            ("aide au logement", ContributionType.FNAL),
+            # Formation / Apprentissage
+            ("formation professionnelle", ContributionType.FORMATION_PROFESSIONNELLE),
+            ("formation pro", ContributionType.FORMATION_PROFESSIONNELLE),
+            ("contribution formation", ContributionType.FORMATION_PROFESSIONNELLE),
+            ("taxe apprentissage", ContributionType.TAXE_APPRENTISSAGE),
+            ("taxe d'apprentissage", ContributionType.TAXE_APPRENTISSAGE),
+            ("contribution suppl", ContributionType.TAXE_APPRENTISSAGE),
+            ("csa", ContributionType.TAXE_APPRENTISSAGE),
+            # Retraite complementaire
+            ("agirc-arrco t2", ContributionType.RETRAITE_COMPLEMENTAIRE_T2),
+            ("agirc-arrco tranche 2", ContributionType.RETRAITE_COMPLEMENTAIRE_T2),
+            ("agirc arrco t2", ContributionType.RETRAITE_COMPLEMENTAIRE_T2),
+            ("retraite compl t2", ContributionType.RETRAITE_COMPLEMENTAIRE_T2),
+            ("tranche 2", ContributionType.RETRAITE_COMPLEMENTAIRE_T2),
+            ("agirc-arrco t1", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("agirc-arrco tranche 1", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("agirc arrco t1", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("retraite compl t1", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("tranche 1", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("retraite complementaire", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("ret. compl", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            ("agirc", ContributionType.RETRAITE_COMPLEMENTAIRE_T2),
+            ("arrco", ContributionType.RETRAITE_COMPLEMENTAIRE_T1),
+            # CEG / CET
+            ("ceg t2", ContributionType.CEG_T2),
+            ("ceg t1", ContributionType.CEG_T1),
+            ("ceg", ContributionType.CEG_T1),
+            ("cet 2", ContributionType.CET),
+            ("cet", ContributionType.CET),
+            # APEC
+            ("apec", ContributionType.APEC),
+            # Prevoyance / Mutuelle
+            ("prevoyance cadre", ContributionType.PREVOYANCE_CADRE),
+            ("prevoyance art 7", ContributionType.PREVOYANCE_CADRE),
+            ("deces cadre", ContributionType.PREVOYANCE_CADRE),
+            ("prevoyance", ContributionType.PREVOYANCE_NON_CADRE),
+            ("incapacite", ContributionType.PREVOYANCE_NON_CADRE),
+            ("mutuelle", ContributionType.MUTUELLE_OBLIGATOIRE),
+            ("complementaire sante", ContributionType.MUTUELLE_OBLIGATOIRE),
+            ("frais de sante", ContributionType.MUTUELLE_OBLIGATOIRE),
+            ("sante", ContributionType.MUTUELLE_OBLIGATOIRE),
+            # Transport
+            ("versement mobilite", ContributionType.VERSEMENT_MOBILITE),
+            ("versement transport", ContributionType.VERSEMENT_MOBILITE),
+            ("mobilite", ContributionType.VERSEMENT_MOBILITE),
+            # Reduction
+            ("reduction generale", ContributionType.LOI_FILLON),
+            ("reduction fillon", ContributionType.LOI_FILLON),
+            ("allègement", ContributionType.LOI_FILLON),
+            ("allegement", ContributionType.LOI_FILLON),
+        ]
+        for pattern, ct in mapping:
             if pattern in v:
                 return ct
         return ContributionType.MALADIE  # fallback

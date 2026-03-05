@@ -40,72 +40,162 @@ _COLUMN_KEYWORDS = {
     "nom": [
         "nom", "nom_salarie", "nom_du_salarie", "nom_employe",
         "nom_de_l_employe", "nom_agent", "nom_famille", "patronyme",
+        # SAGE / CEGID
+        "nom_de_famille", "nom_usage", "nom_naissance",
+        # ADP
+        "last_name", "family_name", "employee_last_name",
+        # PayFit
+        "collaborateur_nom",
     ],
     "prenom": [
         "prenom", "prenom_salarie", "prenom_du_salarie", "prenom_employe",
+        # ADP
+        "first_name", "given_name", "employee_first_name",
+        # PayFit
+        "collaborateur_prenom",
     ],
     "nom_prenom": [
         "nom_prenom", "nom_et_prenom", "prenom_nom", "identite",
         "salarie_nom_prenom", "nom_complet", "salarie", "employe",
         "intitule_salarie", "agent", "designation_salarie",
+        # SAGE
+        "nom_sal", "intitule",
+        # EBP
+        "nom_collaborateur", "collaborateur",
+        # Silae
+        "identite_salarie",
+        # CEGID
+        "libelle_salarie",
     ],
     "nir": [
         "nir", "numero_ss", "securite_sociale", "n_ss", "nss",
         "numero_securite_sociale", "n_securite_sociale",
+        # SAGE / CIEL
+        "n_secu", "num_secu", "no_ss", "no_securite_sociale",
+        # ADP
+        "social_security_number", "ssn",
     ],
     "matricule": [
         "matricule", "num_matricule", "numero_matricule", "mat",
         "n_mat", "id_salarie", "id_employe", "n_salarie",
+        # SAGE
+        "code_salarie", "ref_salarie", "no_salarie",
+        # EBP
+        "code_employe", "ref_employe",
+        # Silae / CEGID
+        "numero_salarie", "identifiant",
+        # ADP
+        "employee_id", "worker_id", "file_number",
     ],
     "base_brute": [
         "base_brute", "salaire_brut", "brut", "base",
         "remuneration_brute", "remuneration", "montant_brut",
         "sal_brut", "total_brut", "brut_mensuel",
         "brut_total", "salaire", "remuneration_totale",
+        # SAGE
+        "brut_soumis", "brut_fiscal", "brut_abattu",
+        "base_ss", "base_securite_sociale", "assiette_brute",
+        # EBP
+        "salaire_de_base", "base_cotisations",
+        # ADP
+        "gross_pay", "gross_salary", "total_gross",
+        # PayFit
+        "salaire_brut_mensuel", "brut_contractuel",
     ],
     "net": [
         "net", "net_a_payer", "salaire_net", "montant_net",
         "net_paye", "net_verse", "net_mensuel", "a_payer",
+        # SAGE
+        "net_fiscal", "net_imposable", "net_avant_impot",
+        # ADP
+        "net_pay", "take_home_pay",
+        # PayFit
+        "net_a_payer_avant_impot", "net_apres_retenues",
     ],
     "taux_patronal": [
         "taux_patronal", "taux_employeur", "tx_patronal",
         "taux_part_employeur",
+        # SAGE / CIEL
+        "tx_pat", "taux_pat", "pct_patronal",
     ],
     "taux_salarial": [
         "taux_salarial", "taux_salarie", "tx_salarial",
         "taux_part_salarie",
+        # SAGE / CIEL
+        "tx_sal", "pct_salarial",
     ],
     "montant_patronal": [
         "montant_patronal", "cotisation_employeur",
         "part_employeur", "charges_patronales",
         "cotisations_patronales", "patronal",
         "total_patronal",
+        # SAGE
+        "mt_patronal", "montant_part_employeur", "pat",
+        # EBP / CIEL
+        "contribution_employeur", "charge_employeur",
+        # ADP
+        "employer_contribution", "employer_share",
     ],
     "montant_salarial": [
         "montant_salarial", "cotisation_salarie",
         "part_salarie", "charges_salariales",
         "cotisations_salariales", "retenues", "salarial",
         "total_salarial", "part_salariale",
+        # SAGE
+        "mt_salarial", "montant_part_salarie", "sal",
+        "retenue_salariale",
+        # EBP / CIEL
+        "contribution_salarie", "retenue_salarie",
+        # ADP
+        "employee_contribution", "employee_deduction",
     ],
     "type_cotisation": [
         "type_cotisation", "code_cotisation", "libelle_cotisation",
         "nature_cotisation", "rubrique",
+        # SAGE
+        "code_rubrique", "libelle_rubrique", "intitule_rubrique",
+        "designation", "code_caisse",
+        # EBP / CIEL
+        "nature", "libelle_charge", "type_charge",
+        # Silae
+        "code_organisme", "libelle_organisme",
+        # ADP
+        "deduction_code", "deduction_description",
     ],
     "heures": [
         "heures", "heures_travaillees", "nb_heures", "h_travaillees",
         "horaire", "heures_mensuelles",
+        # SAGE
+        "heures_remunerees", "heures_payees", "nbre_heures",
+        # ADP
+        "hours_worked", "total_hours",
     ],
     "statut": [
         "statut", "categorie", "classification", "coefficient",
+        # SAGE / CEGID
+        "cat_professionnelle", "categorie_socioprofessionnelle",
+        "collège", "college",
+        # ADP
+        "employee_category", "worker_category",
     ],
     "poste": [
         "poste", "emploi", "fonction", "qualification", "metier",
+        # SAGE
+        "intitule_poste", "libelle_emploi",
+        # ADP
+        "job_title", "position",
     ],
     "service": [
         "service", "departement", "direction", "unite",
+        # ADP
+        "department", "cost_center", "business_unit",
     ],
     "date_entree": [
         "date_entree", "date_embauche", "date_debut", "anciennete",
+        # SAGE
+        "date_entree_societe", "date_embauche_societe",
+        # ADP
+        "hire_date", "start_date", "original_hire_date",
     ],
 }
 

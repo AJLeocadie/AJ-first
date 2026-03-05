@@ -37,17 +37,50 @@ from urssaf_analyzer.utils.number_utils import parser_montant
 # Mapping des codes DSN vers les types de cotisations
 # Codes CTP (Codes Types de Personnel) les plus courants
 CTP_MAPPING = {
+    # Maladie / Maternite / Invalidite / Deces
     "100": ContributionType.MALADIE,                    # RG cas general
+    "110": ContributionType.MALADIE,                    # Maladie Alsace-Moselle
+    "430": ContributionType.MALADIE,                    # Maladie artistes
+    # Vieillesse
     "260": ContributionType.VIEILLESSE_PLAFONNEE,       # Vieillesse plafonnee
     "262": ContributionType.VIEILLESSE_DEPLAFONNEE,     # Vieillesse deplafonnee
+    # Allocations familiales
     "332": ContributionType.ALLOCATIONS_FAMILIALES,     # Alloc. familiales
+    "430": ContributionType.ALLOCATIONS_FAMILIALES,     # AF taux reduit
+    # AT/MP
     "452": ContributionType.ACCIDENT_TRAVAIL,           # AT/MP
-    "012": ContributionType.CSG_DEDUCTIBLE,             # CSG
+    # CSG / CRDS
+    "012": ContributionType.CSG_DEDUCTIBLE,             # CSG deductible
     "018": ContributionType.CRDS,                       # CRDS
+    "004": ContributionType.CSG_NON_DEDUCTIBLE,         # CSG non deductible
+    # Chomage / AGS
     "772": ContributionType.ASSURANCE_CHOMAGE,          # Chomage
     "937": ContributionType.AGS,                        # AGS
-    "236": ContributionType.FNAL,                       # FNAL
+    # FNAL
+    "236": ContributionType.FNAL,                       # FNAL <= 50 salaries
+    "238": ContributionType.FNAL,                       # FNAL > 50 salaries
+    # Formation professionnelle / Apprentissage
     "971": ContributionType.FORMATION_PROFESSIONNELLE,  # Formation pro
+    "951": ContributionType.TAXE_APPRENTISSAGE,         # Taxe apprentissage
+    "959": ContributionType.TAXE_APPRENTISSAGE,         # Contribution suppl. apprentissage
+    # Retraite complementaire
+    "063": ContributionType.RETRAITE_COMPLEMENTAIRE_T1, # Agirc-Arrco T1
+    "065": ContributionType.RETRAITE_COMPLEMENTAIRE_T2, # Agirc-Arrco T2
+    # CEG / CET
+    "067": ContributionType.CEG_T1,                     # CEG T1
+    "069": ContributionType.CEG_T2,                     # CEG T2
+    "071": ContributionType.CET,                        # CET
+    # APEC
+    "073": ContributionType.APEC,                       # APEC cadres
+    # Prevoyance / Mutuelle
+    "090": ContributionType.PREVOYANCE_CADRE,           # Prevoyance cadres
+    "092": ContributionType.PREVOYANCE_NON_CADRE,       # Prevoyance non-cadres
+    "094": ContributionType.MUTUELLE_OBLIGATOIRE,       # Complementaire sante
+    # Transport
+    "900": ContributionType.VERSEMENT_MOBILITE,        # Versement mobilite
+    # Reduction / Exonerations
+    "668": ContributionType.LOI_FILLON,         # Reduction Fillon
+    "671": ContributionType.LOI_FILLON,         # Reduction generale
 }
 
 # Pattern pour les lignes DSN en format texte structure

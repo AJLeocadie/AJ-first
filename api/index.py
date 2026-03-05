@@ -11328,116 +11328,175 @@ LANDING_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="NormaCheck - Plateforme professionnelle de conformite sociale et fiscale. Analysez vos documents, detectez les anomalies, gerez votre comptabilite et generez vos DSN.">
-<meta name="theme-color" content="#0f172a">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9878;</text></svg>">
+<meta name="theme-color" content="#000091">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%23000091'/><path d='M16 5l6.5 3.5v5c0 5-3.2 9-6.5 10.5-3.3-1.5-6.5-5.5-6.5-10.5v-5L16 5z' fill='none' stroke='%23fff' stroke-width='1.5'/><path d='M12 16l3 3 5-5' fill='none' stroke='%23E1000F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <title>NormaCheck - Conformite sociale et fiscale intelligente</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b;-webkit-font-smoothing:antialiased}
-.nav{background:rgba(15,23,42,.97);backdrop-filter:blur(12px);color:#fff;display:flex;justify-content:space-between;align-items:center;padding:14px 40px;position:sticky;top:0;z-index:100}
-.nav .logo{font-size:1.6em;font-weight:800;letter-spacing:-.5px}
-.nav .logo em{font-style:normal;color:#60a5fa}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@700&display=swap');
+body{font-family:'Inter',-apple-system,'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b;-webkit-font-smoothing:antialiased}
+.nav{background:#000091;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:0 40px;position:sticky;top:0;z-index:100;height:64px;border-bottom:3px solid #E1000F}
+.nav .logo-wrap{display:flex;align-items:center;gap:14px;height:100%}
+.nav .logo-mark{display:flex;align-items:center;gap:10px}
+.nav .logo-mark svg{width:36px;height:36px;flex-shrink:0}
+.nav .logo-text{font-size:1.4em;font-weight:800;letter-spacing:-.5px;color:#fff}
+.nav .logo-sub{font-size:.62em;color:rgba(255,255,255,.6);font-weight:500;letter-spacing:.5px;text-transform:uppercase;margin-top:2px}
 .nav .links{display:flex;gap:24px;align-items:center}
-.nav a{color:#fff;text-decoration:none;font-size:.9em;opacity:.75;transition:opacity .2s,transform .2s}
+.nav a{color:#fff;text-decoration:none;font-size:.88em;opacity:.75;transition:opacity .2s,transform .2s;font-weight:500}
 .nav a:hover{opacity:1;transform:translateY(-1px)}
-.nav a:focus-visible{outline:2px solid #60a5fa;outline-offset:2px;border-radius:4px}
-.nav .bl{background:rgba(96,165,250,.2);padding:8px 22px;border-radius:8px;font-weight:600;opacity:1;border:1px solid rgba(96,165,250,.3);transition:background .3s,transform .2s}
-.nav .bl:hover{background:rgba(96,165,250,.35);transform:translateY(-1px)}
-.hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 40%,#1e40af 70%,#3b82f6 100%);color:#fff;text-align:center;padding:100px 20px 80px;position:relative;overflow:hidden}
-.hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 30% 50%,rgba(96,165,250,.15) 0%,transparent 50%),radial-gradient(circle at 70% 80%,rgba(59,130,246,.1) 0%,transparent 40%);pointer-events:none}
-.hero h1{font-size:3.2em;font-weight:800;margin-bottom:18px;line-height:1.1;position:relative;animation:fadeInUp .8s ease-out}
-.hero h1 em{font-style:normal;background:linear-gradient(135deg,#60a5fa,#93c5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero p{font-size:1.18em;opacity:.85;max-width:700px;margin:0 auto 35px;line-height:1.7;position:relative;animation:fadeInUp .8s ease-out .1s both}
-.hero-btns{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .2s both}
-.cta-main{display:inline-block;background:#3b82f6;color:#fff;padding:16px 44px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 24px rgba(59,130,246,.4);transition:all .3s}
-.cta-main:hover{background:#2563eb;transform:translateY(-3px);box-shadow:0 8px 32px rgba(59,130,246,.5)}
+.nav a:focus-visible{outline:2px solid #fff;outline-offset:2px;border-radius:4px}
+.nav .bl{background:rgba(255,255,255,.15);padding:8px 22px;border-radius:6px;font-weight:600;opacity:1;border:1px solid rgba(255,255,255,.25);transition:background .3s,transform .2s}
+.nav .bl:hover{background:rgba(255,255,255,.25);transform:translateY(-1px)}
+/* Hero with tricolor accent */
+.hero{background:#000091;color:#fff;text-align:center;padding:90px 20px 70px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;top:0;left:0;right:0;height:4px;background:linear-gradient(90deg,#000091 33%,#fff 33% 66%,#E1000F 66%)}
+.hero::after{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 50% 120%,rgba(0,0,145,.3) 0%,transparent 60%);pointer-events:none}
+.hero-logo{margin-bottom:28px;position:relative;animation:fadeInUp .7s ease-out}
+.hero-logo svg{width:80px;height:80px;filter:drop-shadow(0 4px 24px rgba(0,0,0,.3))}
+.hero h1{font-size:2.8em;font-weight:800;margin-bottom:18px;line-height:1.15;position:relative;animation:fadeInUp .8s ease-out .1s both;max-width:800px;margin-left:auto;margin-right:auto}
+.hero h1 em{font-style:normal;color:#E1000F}
+.hero p{font-size:1.1em;opacity:.8;max-width:680px;margin:0 auto 32px;line-height:1.7;position:relative;animation:fadeInUp .8s ease-out .2s both}
+.hero-btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .3s both}
+.cta-main{display:inline-block;background:#E1000F;color:#fff;padding:14px 40px;border-radius:8px;font-size:1.05em;font-weight:700;cursor:pointer;border:none;box-shadow:0 4px 20px rgba(225,0,15,.35);transition:all .3s;letter-spacing:.01em}
+.cta-main:hover{background:#c5000d;transform:translateY(-2px);box-shadow:0 8px 28px rgba(225,0,15,.4)}
 .cta-main:focus-visible{outline:2px solid #fff;outline-offset:3px}
-.cta-main:active{transform:translateY(-1px)}
-.cta-sec{display:inline-block;background:rgba(255,255,255,.12);color:#fff;padding:16px 44px;border-radius:12px;font-size:1.1em;font-weight:700;cursor:pointer;border:1px solid rgba(255,255,255,.25);transition:all .3s;backdrop-filter:blur(4px)}
-.cta-sec:hover{background:rgba(255,255,255,.22);transform:translateY(-3px)}
-.cta-sec:focus-visible{outline:2px solid #fff;outline-offset:3px}
-.limits{display:flex;gap:24px;justify-content:center;margin-top:35px;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .3s both}
-.limit{background:rgba(255,255,255,.08);padding:12px 20px;border-radius:10px;font-size:.85em;border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(4px);transition:background .3s}
-.limit:hover{background:rgba(255,255,255,.14)}
-.limit strong{color:#60a5fa}
+.cta-sec{display:inline-block;background:rgba(255,255,255,.1);color:#fff;padding:14px 40px;border-radius:8px;font-size:1.05em;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.25);transition:all .3s}
+.cta-sec:hover{background:rgba(255,255,255,.18);transform:translateY(-2px)}
+/* Institutions bar */
+.inst-bar{display:flex;justify-content:center;gap:32px;margin-top:36px;flex-wrap:wrap;position:relative;animation:fadeInUp .8s ease-out .4s both}
+.inst-badge{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.08);padding:10px 18px;border-radius:8px;font-size:.82em;font-weight:600;border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.85)}
+.inst-badge svg{width:20px;height:20px;flex-shrink:0}
 @keyframes fadeInUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+/* Formats */
+.formats-bar{background:#fff;border-bottom:1px solid #e2e8f0;padding:20px;text-align:center}
+.formats-bar .inner{max-width:900px;margin:0 auto;display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;font-size:.82em;color:#64748b}
+.formats-bar .tag{background:#f1f5f9;padding:5px 12px;border-radius:6px;font-weight:600;color:#475569;font-size:.9em}
 .pricing{max-width:1000px;margin:70px auto;padding:0 20px}
-.pricing h2{text-align:center;font-size:1.8em;color:#0f172a;margin-bottom:10px}
+.pricing h2{text-align:center;font-size:1.8em;color:#1e293b;margin-bottom:10px;font-weight:800}
 .pricing .sub{text-align:center;color:#64748b;font-size:.95em;margin-bottom:35px}
 .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-.plan{background:#fff;border-radius:16px;padding:30px 24px;border:1px solid #e2e8f0;text-align:center;transition:all .3s;position:relative}
+.plan{background:#fff;border-radius:14px;padding:30px 24px;border:1px solid #e2e8f0;text-align:center;transition:all .3s;position:relative}
 .plan:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08)}
-.plan.pop{border-color:#3b82f6;box-shadow:0 8px 30px rgba(59,130,246,.12)}
-.plan.pop::before{content:"Populaire";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;padding:4px 18px;border-radius:20px;font-size:.72em;font-weight:700;box-shadow:0 2px 8px rgba(59,130,246,.3)}
-.plan h3{font-size:1.15em;color:#0f172a;margin-bottom:6px}
-.plan .price{font-size:2.2em;font-weight:800;color:#0f172a;margin:10px 0}
+.plan.pop{border-color:#000091;box-shadow:0 8px 30px rgba(0,0,145,.1)}
+.plan.pop::before{content:"Populaire";position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:#000091;color:#fff;padding:4px 18px;border-radius:20px;font-size:.72em;font-weight:700;box-shadow:0 2px 8px rgba(0,0,145,.3)}
+.plan h3{font-size:1.15em;color:#1e293b;margin-bottom:6px}
+.plan .price{font-size:2.2em;font-weight:800;color:#1e293b;margin:10px 0}
 .plan .price em{font-size:.38em;font-weight:400;color:#64748b;font-style:normal}
-.plan .profiles{font-size:.82em;color:#3b82f6;font-weight:600;margin-bottom:12px}
+.plan .profiles{font-size:.82em;color:#000091;font-weight:600;margin-bottom:12px}
 .plan ul{list-style:none;text-align:left;margin:12px 0}
 .plan li{padding:6px 0;font-size:.84em;color:#475569}
-.plan li::before{content:"\\2713 ";color:#22c55e;font-weight:700}
-.plan-btn{width:100%;padding:12px;border-radius:10px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid #e2e8f0;background:#fff;color:#0f172a}
-.plan-btn:hover{border-color:#3b82f6;color:#3b82f6;transform:translateY(-1px);box-shadow:0 4px 12px rgba(59,130,246,.1)}
-.plan-btn:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
-.plan.pop .plan-btn{background:#0f172a;color:#fff;border-color:#0f172a}
-.plan.pop .plan-btn:hover{background:#1e293b;box-shadow:0 4px 16px rgba(15,23,42,.2)}
+.plan li::before{content:"\\2713 ";color:#059669;font-weight:700}
+.plan-btn{width:100%;padding:12px;border-radius:8px;font-size:.92em;font-weight:700;cursor:pointer;transition:all .25s;border:1.5px solid #e2e8f0;background:#fff;color:#1e293b}
+.plan-btn:hover{border-color:#000091;color:#000091;transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,145,.08)}
+.plan-btn:focus-visible{outline:2px solid #000091;outline-offset:2px}
+.plan.pop .plan-btn{background:#000091;color:#fff;border-color:#000091}
+.plan.pop .plan-btn:hover{background:#00006e;box-shadow:0 4px 16px rgba(0,0,145,.25)}
 .feat{max-width:1100px;margin:80px auto;padding:0 20px}
-.feat h2{text-align:center;font-size:1.9em;font-weight:700;color:#0f172a;margin-bottom:45px}
+.feat h2{text-align:center;font-size:1.9em;font-weight:800;color:#1e293b;margin-bottom:45px}
 .fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
-.fc{background:#fff;border-radius:14px;padding:26px;border:1px solid #e2e8f0;transition:all .3s}
-.fc:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(0,0,0,.07);border-color:#bfdbfe}
-.fc .ic{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.4em;margin-bottom:14px;transition:transform .3s}
+.fc{background:#fff;border-radius:12px;padding:26px;border:1px solid #e2e8f0;transition:all .3s}
+.fc:hover{transform:translateY(-4px);box-shadow:0 12px 32px rgba(0,0,0,.07);border-color:#000091}
+.fc .ic{width:48px;height:48px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.4em;margin-bottom:14px;transition:transform .3s}
 .fc:hover .ic{transform:scale(1.1)}
-.fc .ic.bl{background:#eff6ff}.fc .ic.gr{background:#f0fdf4}.fc .ic.pu{background:#faf5ff}.fc .ic.am{background:#fffbeb}
-.fc h3{color:#0f172a;margin-bottom:8px;font-size:1em}
+.fc .ic.bl{background:#eef2ff;color:#000091}.fc .ic.gr{background:#f0fdf4}.fc .ic.pu{background:#faf5ff}.fc .ic.am{background:#fffbeb}.fc .ic.rd{background:#fef2f2}
+.fc h3{color:#1e293b;margin-bottom:8px;font-size:1em}
 .fc p{color:#64748b;font-size:.85em;line-height:1.6}
-.guarantee{max-width:800px;margin:50px auto;padding:26px 32px;background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fde68a;border-radius:14px;text-align:center}
-.guarantee h3{color:#92400e;margin-bottom:10px}.guarantee p{color:#92400e;font-size:.88em;line-height:1.6}
+.guarantee{max-width:800px;margin:50px auto;padding:26px 32px;background:#fff;border:1px solid #e2e8f0;border-left:4px solid #000091;border-radius:8px}
+.guarantee h3{color:#1e293b;margin-bottom:10px}.guarantee p{color:#64748b;font-size:.88em;line-height:1.6}
 .tgt{background:#fff;padding:70px 20px;text-align:center;border-top:1px solid #e2e8f0}
-.tgt h2{font-size:1.7em;color:#0f172a;margin-bottom:35px}
+.tgt h2{font-size:1.7em;color:#1e293b;margin-bottom:35px;font-weight:800}
 .tg{display:flex;justify-content:center;gap:24px;flex-wrap:wrap;max-width:800px;margin:0 auto}
-.ti{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:28px 20px;width:180px;transition:all .3s;cursor:default}
-.ti:hover{border-color:#3b82f6;transform:translateY(-3px);box-shadow:0 8px 24px rgba(59,130,246,.08)}.ti .ic2{font-size:1.8em;margin-bottom:8px}.ti h4{color:#0f172a;font-size:.95em;margin-bottom:4px}.ti p{font-size:.8em;color:#64748b}
+.ti{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:28px 20px;width:180px;transition:all .3s;cursor:default}
+.ti:hover{border-color:#000091;transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,145,.06)}.ti .ic2{font-size:1.8em;margin-bottom:8px}.ti h4{color:#1e293b;font-size:.95em;margin-bottom:4px}.ti p{font-size:.8em;color:#64748b}
 .auth-sec{max-width:420px;margin:70px auto;padding:0 20px}
-.auth-card{background:#fff;border-radius:20px;padding:40px;box-shadow:0 12px 40px rgba(0,0,0,.08);border:1px solid #e2e8f0}
-.auth-card h2{text-align:center;color:#0f172a;margin-bottom:24px;font-size:1.3em}
-.auth-tabs{display:flex;margin-bottom:24px;background:#f1f5f9;border-radius:10px;padding:4px}
-.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:#64748b;border-radius:8px;transition:all .25s;font-size:.9em}
-.auth-tab:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
-.auth-tab.active{color:#0f172a;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.auth-card{background:#fff;border-radius:16px;padding:40px;box-shadow:0 12px 40px rgba(0,0,0,.08);border:1px solid #e2e8f0;border-top:4px solid #000091}
+.auth-card h2{text-align:center;color:#1e293b;margin-bottom:24px;font-size:1.3em}
+.auth-tabs{display:flex;margin-bottom:24px;background:#f1f5f9;border-radius:8px;padding:4px}
+.auth-tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-weight:600;color:#64748b;border-radius:6px;transition:all .25s;font-size:.9em}
+.auth-tab:focus-visible{outline:2px solid #000091;outline-offset:-2px}
+.auth-tab.active{color:#000091;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .auth-form{display:none}.auth-form.active{display:block}
 .auth-form label{display:block;font-weight:600;font-size:.84em;color:#475569;margin-bottom:5px}
-.auth-form input{width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:10px;font-size:.95em;margin-bottom:14px;background:#f8fafc;transition:all .25s}
-.auth-form input:focus{border-color:#3b82f6;outline:none;background:#fff;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
-.submit-btn{width:100%;padding:14px;background:#0f172a;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s}
-.submit-btn:hover{background:#1e293b;transform:translateY(-1px);box-shadow:0 4px 12px rgba(15,23,42,.2)}
-.submit-btn:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.auth-form input{width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.95em;margin-bottom:14px;background:#f8fafc;transition:all .25s;font-family:inherit}
+.auth-form input:focus{border-color:#000091;outline:none;background:#fff;box-shadow:0 0 0 3px rgba(0,0,145,.08)}
+.submit-btn{width:100%;padding:14px;background:#000091;color:#fff;border:none;border-radius:8px;font-size:1em;font-weight:700;cursor:pointer;transition:all .25s;font-family:inherit}
+.submit-btn:hover{background:#00006e;transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,145,.2)}
+.submit-btn:focus-visible{outline:2px solid #E1000F;outline-offset:2px}
 .submit-btn:active{transform:translateY(0)}
-.msg{padding:12px 16px;border-radius:10px;margin:12px 0;font-size:.9em;display:none;animation:fadeInUp .3s ease-out}
+.msg{padding:12px 16px;border-radius:8px;margin:12px 0;font-size:.9em;display:none;animation:fadeInUp .3s ease-out}
 .msg.ok{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}
 .msg.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
 .rgpd{font-size:.78em;color:#94a3b8;margin-top:14px;line-height:1.4;text-align:center}
-footer{text-align:center;padding:45px 20px;color:#94a3b8;font-size:.82em;background:#0f172a}
-footer a{color:#60a5fa;text-decoration:none;transition:color .2s}footer a:hover{text-decoration:underline;color:#93c5fd}
+footer{text-align:center;padding:45px 20px;color:rgba(255,255,255,.6);font-size:.82em;background:#000091;border-top:3px solid #E1000F}
+footer a{color:rgba(255,255,255,.75);text-decoration:none;transition:color .2s}footer a:hover{text-decoration:underline;color:#fff}
 footer .links{margin-bottom:14px;display:flex;gap:20px;justify-content:center}
-@media(max-width:768px){.hero h1{font-size:2.1em}.hero{padding:70px 16px 55px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:12px 16px}.nav .links{gap:12px}.nav a:not(.bl){display:none}.limits{gap:10px}.limit{padding:8px 14px;font-size:.78em}.auth-card{padding:28px 20px}.tg{gap:12px}.ti{width:calc(50% - 12px)}}
+@media(max-width:768px){.hero h1{font-size:2em}.hero{padding:60px 16px 50px}.fg{grid-template-columns:1fr}.plans{grid-template-columns:1fr}.nav{padding:0 16px;height:56px}.nav .links{gap:12px}.nav a:not(.bl){display:none}.inst-bar{gap:10px}.inst-badge{padding:8px 12px;font-size:.75em}.auth-card{padding:28px 20px}.tg{gap:12px}.ti{width:calc(50% - 12px)}.nav .logo-sub{display:none}.hero-logo svg{width:60px;height:60px}.formats-bar .inner{font-size:.75em}}
 </style>
 </head>
 <body>
-<nav class="nav" aria-label="Navigation principale"><div class="logo"><em>NormaCheck</em></div><div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div></nav>
-<main class="hero" role="banner">
-<h1>La conformite sociale et fiscale<br>enfin <em>simplifiee</em>.</h1>
-<p>Analysez vos documents sociaux et fiscaux, detectez les anomalies en euros, gerez votre comptabilite, generez vos DSN et pilotez vos obligations. Pour dirigeants, comptables et experts.</p>
-<div class="hero-btns">
-<button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})" aria-label="Commencer maintenant - aller au formulaire de connexion">Commencer maintenant</button>
-<button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})" aria-label="Voir les tarifs disponibles">Voir les tarifs</button>
+<!-- NAVIGATION - Bleu institutionnel + liseré tricolore -->
+<nav class="nav" aria-label="Navigation principale">
+<div class="logo-wrap">
+<div class="logo-mark">
+<!-- Logo: Bouclier de conformite avec check tricolore -->
+<svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M20 3L34 10v8c0 10-6 18-14 22C12 36 6 28 6 18v-8L20 3z" fill="rgba(255,255,255,.1)" stroke="rgba(255,255,255,.8)" stroke-width="1.5"/>
+<path d="M20 7l10 5v6c0 8-4.5 14-10 17-5.5-3-10-9-10-17v-6L20 7z" fill="rgba(255,255,255,.06)"/>
+<!-- Double C - Cour des comptes inspired -->
+<path d="M18 14a6 6 0 00-4.5 8.5" stroke="rgba(255,255,255,.5)" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+<path d="M22 14a6 6 0 014.5 8.5" stroke="rgba(255,255,255,.5)" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+<!-- Check mark in red -->
+<path d="M14 21l4 4 8-8" stroke="#E1000F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
+<div>
+<div class="logo-text">NormaCheck</div>
+<div class="logo-sub">Conformite sociale et fiscale</div>
 </div>
-<div class="limits">
-<div class="limit"><strong>50 fichiers</strong> par analyse</div>
-<div class="limit"><strong>2 Go</strong> max par analyse</div>
-<div class="limit"><strong>PDF, Excel, CSV, DSN, Images</strong></div>
+</div>
+</div>
+<div class="links"><a href="#features">Fonctionnalites</a><a href="#pricing">Tarifs</a><a href="#auth" class="bl">Connexion</a></div>
+</nav>
+
+<!-- HERO -->
+<main class="hero" role="banner">
+<div class="hero-logo">
+<svg viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- Shield -->
+<path d="M40 6L68 20v14c0 18-12 32-28 38C24 66 12 52 12 34V20L40 6z" fill="rgba(255,255,255,.07)" stroke="rgba(255,255,255,.4)" stroke-width="1.5"/>
+<path d="M40 12l20 10v10c0 14-9 26-20 31-11-5-20-17-20-31V22L40 12z" fill="rgba(255,255,255,.04)"/>
+<!-- Double C arcs - Cour des comptes -->
+<path d="M34 28a12 12 0 00-6 16" stroke="rgba(255,255,255,.35)" stroke-width="2" stroke-linecap="round" fill="none"/>
+<path d="M46 28a12 12 0 016 16" stroke="rgba(255,255,255,.35)" stroke-width="2" stroke-linecap="round" fill="none"/>
+<!-- Tricolor check -->
+<path d="M28 40l8 8 16-16" stroke="#E1000F" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<!-- Scales of justice (small) - DGFIP -->
+<line x1="40" y1="50" x2="40" y2="58" stroke="rgba(255,255,255,.25)" stroke-width="1.5"/>
+<line x1="34" y1="58" x2="46" y2="58" stroke="rgba(255,255,255,.25)" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
+</div>
+<h1>La conformite sociale et fiscale<br>enfin <em>maitrisee</em>.</h1>
+<p>Analysez bulletins de paie, DSN, bordereaux URSSAF et documents fiscaux. Detectez chaque ecart en euros. Generez vos declarations. Pour dirigeants, comptables et experts.</p>
+<div class="hero-btns">
+<button class="cta-main" onclick="document.getElementById('auth').scrollIntoView({behavior:'smooth'})">Commencer maintenant</button>
+<button class="cta-sec" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Voir les tarifs</button>
+</div>
+<div class="inst-bar">
+<div class="inst-badge"><svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8" stroke="rgba(255,255,255,.5)" stroke-width="1.2"/><path d="M7 10h6M10 7v6" stroke="rgba(255,255,255,.5)" stroke-width="1.2" stroke-linecap="round"/></svg>URSSAF / CSS</div>
+<div class="inst-badge"><svg viewBox="0 0 20 20" fill="none"><rect x="4" y="4" width="12" height="12" rx="2" stroke="rgba(255,255,255,.5)" stroke-width="1.2"/><path d="M7 8h6M7 12h4" stroke="rgba(255,255,255,.5)" stroke-width="1.2" stroke-linecap="round"/></svg>DGFIP / CGI</div>
+<div class="inst-badge"><svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="rgba(255,255,255,.5)" stroke-width="1.2"/><path d="M8 8a3 3 0 014 4M12 8a3 3 0 01-4 4" stroke="rgba(255,255,255,.5)" stroke-width="1" fill="none"/></svg>Cour des comptes</div>
+<div class="inst-badge"><svg viewBox="0 0 20 20" fill="none"><path d="M10 3v14M5 10h10" stroke="rgba(255,255,255,.5)" stroke-width="1.2" stroke-linecap="round"/><circle cx="10" cy="10" r="7" stroke="rgba(255,255,255,.5)" stroke-width="1.2"/></svg>France Travail</div>
 </div>
 </main>
+
+<!-- Formats banner -->
+<div class="formats-bar">
+<div class="inner">
+<span>Formats compatibles :</span>
+<span class="tag">PDF</span><span class="tag">Excel</span><span class="tag">CSV</span><span class="tag">DSN</span><span class="tag">XML</span><span class="tag">FEC</span><span class="tag">Images</span><span class="tag">DOCX</span>
+<span style="color:#94a3b8">|</span>
+<span>Compatible SAGE, CIEL, EBP, ADP, Silae, PayFit, CEGID</span>
+</div>
+</div>
 
 <div class="pricing" id="pricing">
 <h2>Tarification adaptative</h2>
