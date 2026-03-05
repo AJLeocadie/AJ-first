@@ -12185,7 +12185,7 @@ var sec=document.getElementById("s-"+n);if(sec)sec.classList.add("active");
 if(el){el.classList.add("active");}else{document.querySelectorAll(".sidebar .nl").forEach(function(l){if(l.getAttribute("onclick")&&l.getAttribute("onclick").indexOf("'"+n+"'")>=0)l.classList.add("active");});}
 var pt=document.getElementById("page-title");if(pt)pt.textContent=titles[n]||n;
 if(typeof loadCompta==="function"&&n==="compta"){resetTabs("#compta-tabs","#s-compta","ct-journal");loadCompta();}
-if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();}
+if(typeof rechEnt==="function"&&n==="portefeuille"){rechEnt();if(typeof rechTI==="function")rechTI();if(typeof loadPortVue==="function")loadPortVue();}
 if(typeof loadDash==="function"&&n==="dashboard")loadDash();
 if(typeof loadBiblio==="function"&&n==="biblio"){loadBiblio();if(typeof loadKnowledge==="function")loadKnowledge();}
 if(typeof loadEquipe==="function"&&n==="equipe")loadEquipe();
