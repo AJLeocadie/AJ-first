@@ -152,7 +152,7 @@ class ContributionRules:
 
         # Taxe sur les salaires
         if type_cotisation == ContributionType.TAXE_SUR_SALAIRES:
-            return taux.get("taux_normal", Decimal("0.0420"))
+            return taux.get("taux_normal", Decimal("0.0425"))
 
         return taux.get("patronal", taux.get("taux"))
 
@@ -288,11 +288,22 @@ class ContributionRules:
             if ligne:
                 lignes.append(ligne)
 
-        # --- CSG/CRDS ---
+        # --- Prevoyance cadre (calculee en amont pour CSG/CRDS) ---
+        prevoyance_patronale = Decimal("0")
+        if est_cadre:
+            taux_prev = TAUX_COTISATIONS_2026.get(
+                ContributionType.PREVOYANCE_CADRE, {}
+            ).get("patronal_minimum", Decimal("0.015"))
+            assiette_prev = min(brut_mensuel, PASS_MENSUEL)
+            prevoyance_patronale = (assiette_prev * taux_prev).quantize(
+                Decimal("0.01"), ROUND_HALF_UP
+            )
+
+        # --- CSG/CRDS (assiette inclut prevoyance/mutuelle patronale) ---
         for ct in [ContributionType.CSG_DEDUCTIBLE,
                     ContributionType.CSG_NON_DEDUCTIBLE,
                     ContributionType.CRDS]:
-            ligne = self._calculer_ligne(ct, brut_mensuel)
+            ligne = self._calculer_ligne(ct, brut_mensuel, prevoyance_patronale)
             if ligne:
                 lignes.append(ligne)
 
@@ -377,9 +388,10 @@ class ContributionRules:
 
     def _calculer_ligne(
         self, ct: ContributionType, brut_mensuel: Decimal,
+        prevoyance_patronale: Decimal = Decimal("0"),
     ) -> Optional[dict]:
         """Calcule une ligne de cotisation."""
-        assiette = self.calculer_assiette(ct, brut_mensuel)
+        assiette = self.calculer_assiette(ct, brut_mensuel, prevoyance_patronale)
         taux_p = self.get_taux_attendu_patronal(ct, brut_mensuel) or Decimal("0")
         taux_s = self.get_taux_attendu_salarial(ct) or Decimal("0")
         montant_p = (assiette * taux_p).quantize(Decimal("0.01"), ROUND_HALF_UP)
@@ -463,7 +475,8 @@ class ContributionRules:
         maladie et allocations familiales en une seule reduction
         degressive. Seuil porte a 3 SMIC.
 
-        Formule: C = (T / 0.6) * ((3 * SMIC * 1820.04h / remuneration) - 1)
+        Formule: C = (T / 2.0) * ((3 * SMIC_annuel / remuneration) - 1)
+        Le diviseur 2.0 = seuil_multiple - 1 = 3.0 - 1.0
         Le coefficient C est plafonne a T.
         """
         seuil = SMIC_ANNUEL_BRUT * RGDU_SEUIL_SMIC_MULTIPLE
@@ -474,7 +487,9 @@ class ContributionRules:
         t_max = RGDU_TAUX_MAX_50_PLUS if self.effectif >= SEUIL_EFFECTIF_50 else RGDU_TAUX_MAX_MOINS_50
 
         # Coefficient de reduction
-        coeff = (t_max / Decimal("0.6")) * ((seuil / salaire_brut_annuel) - 1)
+        # Diviseur = seuil_multiple - 1 (pour RGDU 2026: 3.0 - 1.0 = 2.0)
+        diviseur = RGDU_SEUIL_SMIC_MULTIPLE - 1
+        coeff = (t_max / diviseur) * ((seuil / salaire_brut_annuel) - 1)
         coeff = min(coeff, t_max)
         coeff = max(coeff, Decimal("0"))
 
@@ -496,7 +511,8 @@ class ContributionRules:
 
         coeff = Decimal("0")
         if eligible and salaire_brut_annuel > 0:
-            coeff = (t_max / Decimal("0.6")) * ((seuil / salaire_brut_annuel) - 1)
+            diviseur = RGDU_SEUIL_SMIC_MULTIPLE - 1
+            coeff = (t_max / diviseur) * ((seuil / salaire_brut_annuel) - 1)
             coeff = min(coeff, t_max)
             coeff = max(coeff, Decimal("0"))
 
@@ -521,7 +537,7 @@ class ContributionRules:
         taux = TAUX_COTISATIONS_2026.get(ContributionType.TAXE_SUR_SALAIRES, {})
         s1 = taux.get("seuil_1", Decimal("8573"))
         s2 = taux.get("seuil_2", Decimal("17114"))
-        t1 = taux.get("taux_normal", Decimal("0.0420"))
+        t1 = taux.get("taux_normal", Decimal("0.0425"))
         t2 = taux.get("taux_majore_1", Decimal("0.0850"))
         t3 = taux.get("taux_majore_2", Decimal("0.1360"))
 
@@ -648,7 +664,8 @@ class ContributionRules:
             return Decimal("0")
 
         t_max = RGDU_TAUX_MAX_50_PLUS if self.effectif >= SEUIL_EFFECTIF_50 else RGDU_TAUX_MAX_MOINS_50
-        coeff = (t_max / Decimal("0.6")) * ((seuil / salaire_brut_annuel) - 1)
+        diviseur = RGDU_SEUIL_SMIC_MULTIPLE - 1
+        coeff = (t_max / diviseur) * ((seuil / salaire_brut_annuel) - 1)
         coeff = min(coeff, t_max)
         coeff = max(coeff, Decimal("0"))
 

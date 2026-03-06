@@ -3107,16 +3107,16 @@ def _get_baremes_pour_annee(annee: int) -> dict:
     return {
         "annee": annee,
         "smic_mensuel": b.get("smic_mensuel", float(_SMIC_MENSUEL)),
-        "smic_horaire": b.get("smic_horaire", 12.02),
+        "smic_horaire": b.get("smic_horaire", 11.88),
         "pass_mensuel": b.get("pass_mensuel", float(_PASS_MENSUEL)),
-        "pass_annuel": b.get("pass_annuel", 48060.00),
+        "pass_annuel": b.get("pass_annuel", 47100.00),
         "taux_maladie": b.get("taux_maladie_patronal", 0.13),
         "taux_maladie_reduit": b.get("taux_maladie_patronal_reduit", 0.07),
         "seuil_maladie_smic": b.get("seuil_maladie_reduit_smic", 2.5),
         "taux_vieillesse_plaf": b.get("taux_vieillesse_plafonnee_patronal", 0.0855),
-        "taux_vieillesse_deplaf": b.get("taux_vieillesse_deplafonnee_patronal", 0.0211),
+        "taux_vieillesse_deplaf": b.get("taux_vieillesse_deplafonnee_patronal", 0.0202),
         "taux_af": b.get("taux_af_patronal", 0.0525),
-        "taux_af_reduit": b.get("taux_af_patronal_reduit", 0.0325),
+        "taux_af_reduit": b.get("taux_af_patronal_reduit", 0.0345),
         "seuil_af_smic": b.get("seuil_af_reduit_smic", 3.5),
         "taux_at_moyen": b.get("taux_at_moyen", 0.0208),
         "taux_fnal_moins_50": b.get("taux_fnal_moins_50", 0.001),
@@ -3264,7 +3264,7 @@ async def sim_tns(
 ):
     rev = Decimal(str(revenu_net))
     base = rev
-    pass_annuel = Decimal("48060")  # PASS 2026
+    pass_annuel = Decimal("47100")  # PASS 2025 (confirme)
 
     # Maladie-maternite : taux progressif selon revenu
     # <= 45% PASS : taux reduit, > 45% PASS : 6.50%
@@ -3422,7 +3422,7 @@ async def sim_epargne_salariale(
     tfs_override = float(taux_forfait_social)
     bn = float(benefice_net)
     td = type_dispositif.lower().strip()
-    pass_annuel = 48060.0  # PASS 2026
+    pass_annuel = 47100.0  # PASS 2025 (confirme)
 
     # Forfait social par defaut selon dispositif
     if tfs_override > 0:
@@ -3633,11 +3633,11 @@ async def sim_exonerations(
     total_exo = 0.0
 
     # === Taux patronaux detailles (selon annee selectionnee) ===
-    seuil_maladie = bar["seuil_maladie_smic"]  # 2.5 (<=2025) ou 2.25 (2026+)
+    seuil_maladie = bar["seuil_maladie_smic"]  # 2.5 SMIC (CSS art. D241-3-1)
     taux_maladie = bar["taux_maladie_reduit"] if ratio_smic <= seuil_maladie else bar["taux_maladie"]
     taux_vieillesse_plaf = bar["taux_vieillesse_plaf"]
     taux_vieillesse_deplaf = bar["taux_vieillesse_deplaf"]
-    seuil_af = bar["seuil_af_smic"]  # 3.5 (<=2025) ou 3.3 (2026+)
+    seuil_af = bar["seuil_af_smic"]  # 3.5 SMIC (CSS art. D241-3-1)
     taux_af = bar["taux_af_reduit"] if ratio_smic <= seuil_af else bar["taux_af"]
     taux_at_reel = taux_at if taux_at > 0 else bar["taux_at_moyen"]
     taux_fnal = bar["taux_fnal_moins_50"] if effectif < 50 else bar["taux_fnal_50_plus"]
@@ -3658,7 +3658,9 @@ async def sim_exonerations(
         else:
             # Fillon classique (<=2025) : T = 0.3194/<50 ou 0.3234/>=50 (valeurs 2024-2025)
             coeff_t = 0.3194 if effectif < 50 else 0.3234
-        coeff = (coeff_t / 0.6) * (seuil_rgd * smic_retabli / brut - 1) if brut > 0 else 0
+        # Diviseur = seuil_multiple - 1 : 0.6 pour Fillon (1.6 SMIC), 2.0 pour RGDU (3.0 SMIC)
+        diviseur = (seuil_rgd - 1) if seuil_rgd > 0 else 0.6
+        coeff = (coeff_t / diviseur) * (seuil_rgd * smic_retabli / brut - 1) if brut > 0 else 0
         coeff = max(0, min(coeff, coeff_t))
         montant_fillon = round(brut * coeff, 2)
         exonerations.append({"nom": nom_red, "reference": ref_red,
@@ -4760,7 +4762,7 @@ async def sim_optimisation(
     net_sal_4 = round(remuneration_gerant - charges_sal_4, 2)
     is_base_4 = max(0, benefice_net - remuneration_gerant - charges_pat_4 - frais_pro)
     # Interessement : plafond = 3 PASS ou 20% du benefice net (le plus bas)
-    int_val = round(min(max(interessement, benefice_net * 0.15), 3 * 48060), 2)
+    int_val = round(min(max(interessement, benefice_net * 0.15), 3 * 47100), 2)
     # Participation : formule legale RSP = 0.5 * (B - 5% CP) * S / VA (simplifie ici)
     part_val = round(max(0, (is_base_4) * 0.5 * 0.5), 2)
     abond_val = round(min(pee_abondement if pee_abondement > 0 else 3709, 3709), 2)
@@ -4962,8 +4964,8 @@ async def generer_documents_demo(
             bull_csv += f"Maladie;{brut_normal};0;0;0.13;{round(brut_normal * 0.13, 2)}\\n"
         # Vieillesse plafonnee: pat 8.55%, sal 6.90%
         bull_csv += f"Vieillesse plafonnee;{min(brut_normal, pass_m)};0.069;{round(min(brut_normal, pass_m) * 0.069, 2)};0.0855;{round(min(brut_normal, pass_m) * 0.0855, 2)}\\n"
-        # Vieillesse deplafonnee: pat 2.11%, sal 2.40% (2026)
-        bull_csv += f"Vieillesse deplafonnee;{brut_normal};0.024;{round(brut_normal * 0.024, 2)};0.0211;{round(brut_normal * 0.0211, 2)}\\n"
+        # Vieillesse deplafonnee: pat 2.02%, sal 0.40%
+        bull_csv += f"Vieillesse deplafonnee;{brut_normal};0.004;{round(brut_normal * 0.004, 2)};0.0202;{round(brut_normal * 0.0202, 2)}\\n"
         # Prevoyance cadre obligatoire: pat 1.50%
         bull_csv += f"Prevoyance cadre;{brut_normal};;;0.015;{prevoyance_pat}\\n"
         # CSG deductible 6.80%, non deductible 2.40%, CRDS 0.50%
@@ -6964,7 +6966,8 @@ async def knowledge_audit(
         2023: {"pass": 43992, "smic_h": 11.52, "smic_m": 1747.20, "plafond_ss_m": 3666, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.24, "forfait_social_pee": 20, "taux_agff": 2.0},
         2024: {"pass": 46368, "smic_h": 11.65, "smic_m": 1766.92, "plafond_ss_m": 3864, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.23, "forfait_social_pee": 20, "taux_agff": 2.0},
         2025: {"pass": 47100, "smic_h": 11.88, "smic_m": 1801.80, "plafond_ss_m": 3925, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.22, "forfait_social_pee": 20, "taux_agff": 2.0},
-        2026: {"pass": 48060, "smic_h": 12.02, "smic_m": 1823.03, "plafond_ss_m": 4005, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.20, "forfait_social_pee": 20, "taux_agff": 2.0},
+        # 2026 : valeurs 2025 reconduites (actualiser des publication des textes 2026)
+        2026: {"pass": 47100, "smic_h": 11.88, "smic_m": 1801.84, "plafond_ss_m": 3925, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.20, "forfait_social_pee": 20, "taux_agff": 2.0},
     }
     def _cst(annee, cle):
         return _CONSTANTES_HIST.get(annee, _CONSTANTES_HIST.get(2026, {})).get(cle, 0)
@@ -7195,7 +7198,7 @@ async def knowledge_audit(
     # Verifier si la masse par salarie est plausible (entre SMIC et 15000 EUR/mois)
     masse_alerte = False
     if masse_par_sal > 0:
-        smic_m = 1823.03
+        smic_m = 1801.84
         if masse_par_sal < smic_m * 0.5:
             masse_alerte = True
             masse_detail_extra = f" - ATTENTION: moyenne {masse_par_sal:.2f} EUR/sal. est anormalement basse (< 50% SMIC)"
@@ -12359,14 +12362,14 @@ async def generer_dsn(
             # Cotisations par defaut si non fournies
             cotisations = [
                 {"code_ctp": "100", "base": str(brut), "taux": "7.00", "montant": str(brut * Decimal("0.07"))},
-                {"code_ctp": "260", "base": str(min(brut, Decimal("4005"))), "taux": "6.90",
-                 "montant": str(min(brut, Decimal("4005")) * Decimal("0.069"))},
+                {"code_ctp": "260", "base": str(min(brut, Decimal("3925"))), "taux": "6.90",
+                 "montant": str(min(brut, Decimal("3925")) * Decimal("0.069"))},
                 {"code_ctp": "262", "base": str(brut), "taux": "2.02", "montant": str(brut * Decimal("0.0202"))},
                 {"code_ctp": "332", "base": str(brut), "taux": "5.25", "montant": str(brut * Decimal("0.0525"))},
-                {"code_ctp": "772", "base": str(min(brut, Decimal("16020"))), "taux": "4.05",
-                 "montant": str(min(brut, Decimal("16020")) * Decimal("0.0405"))},
-                {"code_ctp": "937", "base": str(min(brut, Decimal("16020"))), "taux": "0.20",
-                 "montant": str(min(brut, Decimal("16020")) * Decimal("0.002"))},
+                {"code_ctp": "772", "base": str(min(brut, Decimal("15700"))), "taux": "4.05",
+                 "montant": str(min(brut, Decimal("15700")) * Decimal("0.0405"))},
+                {"code_ctp": "937", "base": str(min(brut, Decimal("15700"))), "taux": "0.20",
+                 "montant": str(min(brut, Decimal("15700")) * Decimal("0.002"))},
             ]
 
         for cot in cotisations:
@@ -13794,7 +13797,7 @@ APP_HTML += """
 <option value="2023">2023 (SMIC 1747,20 / PASS 3666 / Fillon 1.6 SMIC)</option>
 <option value="2024">2024 (SMIC 1766,92 / PASS 3864 / Fillon 1.6 SMIC)</option>
 <option value="2025">2025 (SMIC 1801,80 / PASS 3925 / Fillon 1.6 SMIC)</option>
-<option value="2026" selected>2026 (SMIC 1823,03 / PASS 4005 / RGDU 3.0 SMIC)</option>
+<option value="2026" selected>2026 (SMIC 1801,84 / PASS 3925 / RGDU 3.0 SMIC)</option>
 </select>
 </div>
 

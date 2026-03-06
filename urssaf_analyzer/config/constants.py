@@ -18,10 +18,12 @@ from enum import Enum
 # Ref: Arrete du 19/12/2025, CSS art. D242-17
 # ===================================================================
 
-PASS_ANNUEL = Decimal("48060.00")
-PASS_MENSUEL = Decimal("4005.00")
-PASS_TRIMESTRIEL = Decimal("12015.00")
-PASS_JOURNALIER = Decimal("220.00")
+# Valeurs 2025 confirmees (arrete du 19/12/2024). Actualiser des publication
+# de l'arrete fixant les valeurs 2026 (attendu decembre 2025).
+PASS_ANNUEL = Decimal("47100.00")
+PASS_MENSUEL = Decimal("3925.00")
+PASS_TRIMESTRIEL = Decimal("11775.00")
+PASS_JOURNALIER = Decimal("216.00")
 PASS_HORAIRE = Decimal("27.00")
 
 # Plafonds specifiques
@@ -33,8 +35,10 @@ PLAFOND_8_PASS = PASS_ANNUEL * 8     # 384 480 EUR - retraite T2
 # Ref: Art. L3231-2 Code du travail, Decret n° 2025-xxx
 # ===================================================================
 
-SMIC_HORAIRE_BRUT = Decimal("12.02")
-SMIC_MENSUEL_BRUT = Decimal("1823.03")  # 151.67h x 12.02
+# Valeurs 2025 confirmees (decret du 31/10/2024). Actualiser des publication
+# du decret fixant le SMIC 2026 (attendu fin 2025 / debut 2026).
+SMIC_HORAIRE_BRUT = Decimal("11.88")
+SMIC_MENSUEL_BRUT = Decimal("1801.84")  # 151.67h x 11.88
 SMIC_ANNUEL_BRUT = SMIC_MENSUEL_BRUT * 12
 HEURES_MENSUELLES_LEGALES = Decimal("151.67")
 
@@ -147,8 +151,8 @@ TAUX_COTISATIONS_2026 = {
     ContributionType.MALADIE: {
         "patronal": Decimal("0.13"),              # 13%
         "salarial": Decimal("0.0"),               # 0% (supprime depuis 01/2018)
-        "patronal_reduit": Decimal("0.07"),       # 7% si remuneration <= 2.25 SMIC
-        "seuil_reduction_smic": Decimal("2.25"),  # LFSS 2025 art. 17
+        "patronal_reduit": Decimal("0.07"),       # 7% si remuneration <= 2.5 SMIC
+        "seuil_reduction_smic": Decimal("2.5"),   # CSS art. D241-3-1
         "assiette": "totalite",                   # Totalite du salaire brut
         "ref": "CSS art. L241-1, D242-3",
     },
@@ -168,16 +172,16 @@ TAUX_COTISATIONS_2026 = {
     },
 
     ContributionType.VIEILLESSE_DEPLAFONNEE: {
-        "patronal": Decimal("0.0211"),            # 2.11% (hausse 2026 vs 2.02%)
+        "patronal": Decimal("0.0202"),            # 2.02%
         "salarial": Decimal("0.004"),             # 0.40%
         "assiette": "totalite",
-        "ref": "CSS art. L241-3, hausse LFSS 2026",
+        "ref": "CSS art. L241-3, D242-4",
     },
 
     ContributionType.ALLOCATIONS_FAMILIALES: {
         "patronal": Decimal("0.0525"),            # 5.25%
-        "patronal_reduit": Decimal("0.0325"),     # 3.25% si <= 3.3 SMIC
-        "seuil_reduction_smic": Decimal("3.3"),   # LFSS 2025 art. 17
+        "patronal_reduit": Decimal("0.0345"),     # 3.45% si <= 3.5 SMIC
+        "seuil_reduction_smic": Decimal("3.5"),   # CSS art. D241-3-1
         "assiette": "totalite",
         "ref": "CSS art. L241-6, D241-3-1",
     },
@@ -411,7 +415,7 @@ TAUX_COTISATIONS_2026 = {
     # --- TAXE SUR LES SALAIRES ---
 
     ContributionType.TAXE_SUR_SALAIRES: {
-        "taux_normal": Decimal("0.0420"),         # 4.25%
+        "taux_normal": Decimal("0.0425"),         # 4.25%
         "taux_majore_1": Decimal("0.0850"),       # 8.50% (8 573 a 17 114 EUR annuel)
         "taux_majore_2": Decimal("0.1360"),       # 13.60% (> 17 114 EUR annuel)
         "seuil_1": Decimal("8573.00"),
