@@ -12218,7 +12218,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div class="plans">
 <div class="plan">
 <h3>Solo</h3>
-<div class="price">5 EUR <em>HT / mois</em></div>
+<div class="price">59,99 EUR <em>HT / mois</em></div>
 <div class="profiles">1 profil utilisateur</div>
 <ul>
 <li>Toutes les fonctionnalites</li>
@@ -12232,7 +12232,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 </div>
 <div class="plan pop">
 <h3>Equipe</h3>
-<div class="price">8.33 EUR <em>HT / mois</em></div>
+<div class="price">119,99 EUR <em>HT / mois</em></div>
 <div class="profiles">Jusqu'a 3 profils</div>
 <ul>
 <li>Toutes les fonctionnalites</li>
@@ -12245,7 +12245,7 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 </div>
 <div class="plan">
 <h3>Cabinet</h3>
-<div class="price">15 EUR <em>HT / mois</em></div>
+<div class="price">249,99 EUR <em>HT / mois</em></div>
 <div class="profiles">Jusqu'a 10 profils</div>
 <ul>
 <li>Toutes les fonctionnalites</li>
@@ -12299,9 +12299,9 @@ footer .links{margin-bottom:12px;display:flex;gap:18px;justify-content:center}
 <div id="reg-step-1">
 <label for="r-offre">Offre choisie</label>
 <div class="offer-selector" id="offer-selector">
-<label class="offer-opt selected" data-offer="solo"><input type="radio" name="offre" value="solo" checked style="display:none"><strong>Solo</strong><span>1 profil - 5 EUR/mois</span></label>
-<label class="offer-opt" data-offer="equipe"><input type="radio" name="offre" value="equipe" style="display:none"><strong>Equipe</strong><span>3 profils - 8.33 EUR/mois</span></label>
-<label class="offer-opt" data-offer="cabinet"><input type="radio" name="offre" value="cabinet" style="display:none"><strong>Cabinet</strong><span>10 profils - 15 EUR/mois</span></label>
+<label class="offer-opt selected" data-offer="solo"><input type="radio" name="offre" value="solo" checked style="display:none"><strong>Solo</strong><span>1 profil - 59,99 EUR/mois</span></label>
+<label class="offer-opt" data-offer="equipe"><input type="radio" name="offre" value="equipe" style="display:none"><strong>Equipe</strong><span>3 profils - 119,99 EUR/mois</span></label>
+<label class="offer-opt" data-offer="cabinet"><input type="radio" name="offre" value="cabinet" style="display:none"><strong>Cabinet</strong><span>10 profils - 249,99 EUR/mois</span></label>
 </div>
 <label for="r-role">Votre role</label>
 <select id="r-role" style="width:100%;padding:11px 14px;border:1.5px solid var(--slate-200);border-radius:8px;font-size:.93em;margin-bottom:12px;background:var(--slate-50);font-family:inherit">
@@ -12553,9 +12553,9 @@ footer{text-align:center;padding:30px;color:#94a3b8;font-size:.82em;margin-top:4
 <h2>Article 1 - Offres et tarifs</h2>
 <p>NormaCheck propose une tarification adaptative basee sur le nombre de profils utilisateurs :</p>
 <ul>
-<li><strong>Solo (5 EUR HT/mois, soit 60 EUR HT/an) :</strong> 1 profil utilisateur - Analyses illimitees, comptabilite, generation DSN, gestion factures, simulations, veille juridique 2020-2026, export CSV</li>
-<li><strong>Equipe (8,33 EUR HT/mois, soit 100 EUR HT/an) :</strong> Jusqu'a 3 profils - Tout Solo + collaboration multi-profils, profil decisionnaire, tracabilite, bibliotheque partagee, audit trail, support prioritaire</li>
-<li><strong>Cabinet (15 EUR HT/mois, soit 180 EUR HT/an) :</strong> Jusqu'a 10 profils - Tout Equipe + multi-dossiers (portefeuille), DSN multi-etablissements, veille personnalisee, accompagnement demarrage, support dedie</li>
+<li><strong>Solo (59,99 EUR HT/mois, soit 719,88 EUR HT/an) :</strong> 1 profil utilisateur - Analyses illimitees, comptabilite, generation DSN, gestion factures, simulations, veille juridique 2020-2026, export CSV</li>
+<li><strong>Equipe (119,99 EUR HT/mois, soit 1 439,88 EUR HT/an) :</strong> Jusqu'a 3 profils - Tout Solo + collaboration multi-profils, profil decisionnaire, tracabilite, bibliotheque partagee, audit trail, support prioritaire</li>
+<li><strong>Cabinet (249,99 EUR HT/mois, soit 2 999,88 EUR HT/an) :</strong> Jusqu'a 10 profils - Tout Equipe + multi-dossiers (portefeuille), DSN multi-etablissements, veille personnalisee, accompagnement demarrage, support dedie</li>
 </ul>
 <p>Les prix sont indiques hors taxes. TVA applicable en sus au taux en vigueur. L'editeur se reserve le droit de modifier ses tarifs, les modifications ne s'appliquant pas aux licences en cours.</p>
 
