@@ -35,9 +35,9 @@ logger = logging.getLogger("urssaf_analyzer.timestamp")
 # TSA publics gratuits (non qualifies eIDAS mais conformes RFC 3161)
 # En production, utiliser un TSA qualifie eIDAS (ex: CertEurope, DocuSign)
 DEFAULT_TSA_URLS = [
-    "http://timestamp.digicert.com",
-    "http://time.certum.pl",
-    "http://timestamp.sectigo.com",
+    "https://timestamp.digicert.com",
+    "https://time.certum.pl",
+    "https://timestamp.sectigo.com",
 ]
 
 

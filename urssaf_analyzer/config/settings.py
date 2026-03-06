@@ -10,9 +10,9 @@ class SecurityConfig:
     """Configuration securite."""
     encryption_algorithm: str = "AES-256-GCM"
     key_derivation: str = "pbkdf2"
-    pbkdf2_iterations: int = 100_000
+    pbkdf2_iterations: int = 310_000  # OWASP 2024+ pour PBKDF2-HMAC-SHA256
     salt_length: int = 32
-    iv_length: int = 16
+    iv_length: int = 12  # 96 bits recommande pour GCM (NIST SP 800-38D)
     secure_delete_passes: int = 3
 
 

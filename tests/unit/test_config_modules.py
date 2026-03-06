@@ -193,9 +193,9 @@ class TestSettings:
         config = SecurityConfig()
         assert config.encryption_algorithm == "AES-256-GCM"
         assert config.key_derivation == "pbkdf2"
-        assert config.pbkdf2_iterations == 100_000
+        assert config.pbkdf2_iterations == 310_000
         assert config.salt_length == 32
-        assert config.iv_length == 16
+        assert config.iv_length == 12
         assert config.secure_delete_passes == 3
 
     def test_analysis_config_defaults(self):
