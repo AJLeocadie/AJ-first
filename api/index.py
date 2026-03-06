@@ -12307,22 +12307,28 @@ async def generer_dsn(
     def add(bloc, valeur):
         lignes.append(f"{bloc},'{valeur}'")
 
-    # --- S10 : Emetteur ---
-    add("S10.G00.00.001", siren_emetteur)
-    add("S10.G00.00.002", nic_emetteur)
-    add("S10.G00.00.003", nom_logiciel)
-    add("S10.G00.00.004", "NormaCheck v3.8")
-    add("S10.G00.00.005", "01")  # Nature de la declaration: DSN mensuelle
-    add("S10.G00.00.006", "11")  # Type: normale
-    add("S10.G00.00.007", "01")  # Numero de fraction
-    add("S10.G00.00.008", datetime.now().strftime("%d%m%Y"))
+    # --- S10 : Envoi (Cahier technique NEODeS) ---
+    add("S10.G00.00.001", "01")   # Nature: DSN mensuelle
+    add("S10.G00.00.002", "11")   # Type: normale
+    add("S10.G00.00.003", "01")   # Numero de fraction
+    add("S10.G00.00.004", "01")   # Ordre (1er envoi)
+    add("S10.G00.00.005", datetime.now().strftime("%d%m%Y"))
+    # S10.G00.01 : Emetteur
+    add("S10.G00.01.001", siren_emetteur)
+    add("S10.G00.01.002", nic_emetteur)
+    add("S10.G00.01.005", nom_logiciel)
+    add("S10.G00.01.006", "NormaCheck v3.8")
 
     # --- S20 : Entreprise ---
     add("S20.G00.05.001", siren_entreprise)
     add("S20.G00.05.002", nic_etablissement)
     add("S20.G00.05.003", raison_sociale)
+    add("S20.G00.05.004", "")     # Adresse (a renseigner)
+    add("S20.G00.05.008", "")     # Code postal (a renseigner)
+    add("S20.G00.05.009", "")     # Commune (a renseigner)
+    add("S20.G00.05.011", "")     # Code APE/NAF (a renseigner)
 
-    # --- S21 : Etablissement ---
+    # --- S21.G00.06 : Etablissement ---
     add("S21.G00.06.001", nic_etablissement)
     add("S21.G00.06.003", mois_declaration)
     add("S21.G00.11.001", effectif)
@@ -12347,24 +12353,29 @@ async def generer_dsn(
 
         total_brut += brut
 
-        # S30 : Identification salarie
-        add("S30.G00.30.001", nir)
-        add("S30.G00.30.002", nom)
-        add("S30.G00.30.004", prenom)
-        add("S30.G00.30.006", ddn)
+        # S21.G00.30 : Identification salarie
+        add("S21.G00.30.001", nir)
+        add("S21.G00.30.002", nom)
+        add("S21.G00.30.004", prenom)
+        add("S21.G00.30.006", ddn)
 
-        # S40 : Contrat
-        add("S40.G00.40.001", num_contrat)
-        add("S40.G00.40.002", date_debut)
-        add("S40.G00.40.003", "01")  # Nature du contrat: CDI
-        add("S40.G00.40.004", statut_conv)
-        add("S40.G00.40.009", "01")  # Unite de mesure: heure
+        # S21.G00.40 : Contrat
+        add("S21.G00.40.001", num_contrat)
+        add("S21.G00.40.002", date_debut)
+        add("S21.G00.40.003", "01")  # Nature du contrat: CDI
+        add("S21.G00.40.004", statut_conv)
+        add("S21.G00.40.009", "01")  # Unite de mesure: heure
 
-        # S51 : Remuneration
-        add("S51.G00.51.001", mois_declaration + "01")
-        add("S51.G00.51.002", mois_declaration + "31")
-        add("S51.G00.51.011", str(brut))
-        add("S51.G00.51.013", str(heures))
+        # S21.G00.51 : Remuneration
+        # Date debut/fin de periode au format JJMMAAAA
+        annee_m = mois_declaration[:4]
+        mois_m = mois_declaration[4:6]
+        import calendar
+        dernier_jour = calendar.monthrange(int(annee_m), int(mois_m))[1]
+        add("S21.G00.51.001", f"01{mois_m}{annee_m}")
+        add("S21.G00.51.002", f"{dernier_jour:02d}{mois_m}{annee_m}")
+        add("S21.G00.51.011", str(brut))
+        add("S21.G00.51.013", str(heures))
 
         # S78/S81 : Cotisations
         cotisations = sal.get("cotisations", [])
@@ -12383,15 +12394,15 @@ async def generer_dsn(
             ]
 
         for cot in cotisations:
-            add("S81.G00.81.001", cot.get("code_ctp", "100"))
-            add("S81.G00.81.003", cot.get("base", str(brut)))
-            add("S81.G00.81.004", cot.get("taux", "0"))
-            add("S81.G00.81.005", cot.get("montant", "0"))
+            add("S21.G00.81.001", cot.get("code_ctp", "100"))
+            add("S21.G00.81.003", cot.get("base", str(brut)))
+            add("S21.G00.81.004", cot.get("taux", "0"))
+            add("S21.G00.81.005", cot.get("montant", "0"))
             total_cotisations += Decimal(str(cot.get("montant", "0")))
 
-    # --- S89 : Total versement OPS ---
-    add("S89.G00.89.001", str(total_cotisations.quantize(Decimal("0.01"))))
-    add("S89.G00.89.002", str(total_brut.quantize(Decimal("0.01"))))
+    # --- S21.G00.89 : Total versement OPS ---
+    add("S21.G00.89.001", str(total_cotisations.quantize(Decimal("0.01"))))
+    add("S21.G00.89.002", str(total_brut.quantize(Decimal("0.01"))))
 
     # Construire le fichier DSN
     dsn_content = "\n".join(lignes) + "\n"

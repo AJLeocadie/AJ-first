@@ -36,7 +36,7 @@ COLONNES_FEC = [
     "EcritureLib",
     "Debit",
     "Credit",
-    "EcrtureLet",
+    "EcritureLet",
     "DateLet",
     "ValidDate",
     "Montantdevise",
@@ -132,7 +132,7 @@ def exporter_fec(
                 _fmt_montant(ligne.debit),
                 _fmt_montant(ligne.credit),
                 ligne.lettrage,
-                "",  # DateLet
+                _fmt_date(ecriture.date_ecriture) if ligne.lettrage else "",  # DateLet
                 valid_date,
                 "",  # Montantdevise
                 "",  # Idevise

@@ -343,7 +343,18 @@ def determiner_compte_charge(libelle_ligne: str, type_document: str) -> str:
     """Determine le compte de charge/produit a partir du libelle d'une ligne."""
     libelle = libelle_ligne.lower()
 
-    # Achats
+    # Ventes (classe 7) - tester en priorite pour les factures de vente
+    # afin d'eviter une imputation erronee en classe 6
+    if type_document in ("facture_vente", "avoir_vente"):
+        if any(m in libelle for m in ["prestation", "service", "conseil", "consulting"]):
+            return "706000"
+        if any(m in libelle for m in ["produit fini"]):
+            return "701000"
+        if any(m in libelle for m in ["marchandise"]):
+            return "707000"
+        return "707000"
+
+    # Achats (classe 6)
     if any(m in libelle for m in ["matiere", "composant", "ingredient"]):
         return "601000"
     if any(m in libelle for m in ["fourniture", "consommable"]):
@@ -374,14 +385,6 @@ def determiner_compte_charge(libelle_ligne: str, type_document: str) -> str:
         return "627000"
     if any(m in libelle for m in ["marchandise"]):
         return "607000"
-
-    # Ventes
-    if type_document in ("facture_vente", "avoir_vente"):
-        if any(m in libelle for m in ["prestation", "service"]):
-            return "706000"
-        if any(m in libelle for m in ["produit fini"]):
-            return "701000"
-        return "707000"
 
     # Paie
     if any(m in libelle for m in ["salaire", "remuneration", "paie"]):
