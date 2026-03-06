@@ -161,6 +161,10 @@ def create_user(email: str, password: str, nom: str, prenom: str,
         raise ValueError(f"Mot de passe trop court (min. {MIN_PASSWORD_LENGTH} caracteres)")
     if password.lower() == password or password.upper() == password:
         raise ValueError("Le mot de passe doit contenir majuscules et minuscules")
+    if not any(c.isdigit() for c in password):
+        raise ValueError("Le mot de passe doit contenir au moins un chiffre")
+    if all(c.isalnum() for c in password):
+        raise ValueError("Le mot de passe doit contenir au moins un caractere special")
     if offre not in VALID_OFFERS:
         raise ValueError(f"Offre invalide. Choisissez parmi : {', '.join(VALID_OFFERS)}")
     if role not in VALID_ROLES and role != "admin":
@@ -355,13 +359,12 @@ def require_role(*allowed_roles):
 # EMAIL VERIFICATION
 # =========================================
 
-import random
-import string
+import secrets as _secrets
 
 def generate_verification_code(email: str) -> str:
-    """Genere un code de verification a 6 chiffres pour l'email."""
+    """Genere un code de verification a 6 chiffres pour l'email (CSPRNG)."""
     email = email.strip().lower()
-    code = ''.join(random.choices(string.digits, k=6))
+    code = ''.join(_secrets.choice('0123456789') for _ in range(6))
     _verification_codes[email] = {
         "code": code,
         "expires": time.time() + VERIFICATION_CODE_EXPIRY,
@@ -383,7 +386,7 @@ def verify_email_code(email: str, code: str) -> bool:
     if entry["attempts"] > VERIFICATION_MAX_ATTEMPTS:
         del _verification_codes[email]
         return False
-    if entry["code"] != code:
+    if not hmac.compare_digest(entry["code"], code):
         return False
     # Code valide: marquer l'email comme verifie et nettoyer
     del _verification_codes[email]

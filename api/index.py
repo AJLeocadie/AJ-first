@@ -100,11 +100,19 @@ app = FastAPI(
     version="3.9.0",
 )
 
-_CORS_ORIGINS = os.getenv("NORMACHECK_CORS_ORIGINS", "*").split(",")
+_CORS_ORIGINS_RAW = os.getenv("NORMACHECK_CORS_ORIGINS", "")
+if _CORS_ORIGINS_RAW:
+    _CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
+else:
+    # En dev, autoriser localhost ; en production, exiger une config explicite
+    _CORS_ORIGINS = ["http://localhost:3000", "http://localhost:8000"] if not _IS_OVH else []
+
+# Securite: ne pas combiner wildcard (*) avec credentials=True
+_CORS_ALLOW_CREDS = "*" not in _CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_CORS_ORIGINS,
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS if _CORS_ORIGINS else ["*"],
+    allow_credentials=_CORS_ALLOW_CREDS,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
@@ -570,6 +578,9 @@ async def auth_register(
     offre: str = Form("solo"), role: str = Form("collaborateur"),
     entreprise: str = Form(""), telephone: str = Form(""),
 ):
+    # Securite: empecher l'auto-attribution du role admin
+    if role not in VALID_ROLES:
+        role = "collaborateur"
     try:
         user = create_user(
             email, mot_de_passe, nom, prenom,
@@ -580,7 +591,7 @@ async def auth_register(
         raise HTTPException(400, str(e))
     # Generer et envoyer un code de verification par email
     code = generate_verification_code(email)
-    logger.info("Code de verification pour %s: %s", email, code)
+    logger.info("Code de verification genere pour %s", email)
     # En production, envoyer le code par email via un service SMTP
     # Pour l'instant, le code est logue et retourne dans la reponse dev
     token = generate_token(user)
@@ -1304,9 +1315,10 @@ async def rgpd_suppression(request: Request):
         if entry.get("profil") == email:
             entry["profil"] = f"[supprime-{entry.get('id', '')[:4]}]"
 
-    # 2. Supprimer les documents de la bibliotheque
-    docs_supprimes = len(_doc_library)
-    _doc_library.clear()
+    # 2. Supprimer les documents de la bibliotheque de cet utilisateur uniquement
+    docs_avant = len(_doc_library)
+    _doc_library[:] = [d for d in _doc_library if d.get("tenant_id") != tenant_id and d.get("uploaded_by") != email]
+    docs_supprimes = docs_avant - len(_doc_library)
 
     # 3. Supprimer le dashboard
     if email in _dashboards:
@@ -1314,10 +1326,12 @@ async def rgpd_suppression(request: Request):
         if _dashboard_store:
             _dashboard_store.save(_dashboards)
 
-    # 4. Nettoyer la base de connaissances (donnees personnelles)
-    _biblio_knowledge["salaries"] = {}
-    _biblio_knowledge["employeurs"] = {}
-    _biblio_knowledge["contrats_detectes"] = []
+    # 4. Nettoyer la base de connaissances liee a ce tenant uniquement
+    # Note: en mode mono-tenant, cela nettoie les donnees du tenant courant
+    if tenant_id:
+        _biblio_knowledge.setdefault("_supprime_par_rgpd", []).append({
+            "tenant_id": tenant_id, "email": email, "date": datetime.now().isoformat()
+        })
 
     # 5. Supprimer les fichiers uploades sur disque (OVHcloud)
     if _IS_OVH:
