@@ -527,15 +527,14 @@ class TestParserElementEmploye:
         e = parser._parser_element_employe(elem, "doc1")
         assert e is None
 
-    def test_prenom_tag_matches_nom_branch(self, parser):
-        """The tag 'prenom' contains substring 'nom', so it hits the nom branch."""
+    def test_prenom_tag_parsed_correctly(self, parser):
+        """The tag 'prenom' is now tested before 'nom' to avoid substring collision."""
         elem = Element("salarie")
         SubElement(elem, "prenom").text = "Jean"
         e = parser._parser_element_employe(elem, "doc1")
         assert e is not None
-        # Because "nom" in "prenom" is True, the value goes to e.nom
-        assert e.nom == "Jean"
-        assert e.prenom == ""
+        assert e.prenom == "Jean"
+        assert e.nom == ""
 
     def test_nom_only(self, parser):
         elem = Element("employe")

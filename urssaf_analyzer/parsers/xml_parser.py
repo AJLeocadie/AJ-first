@@ -207,11 +207,12 @@ class XMLParser(BaseParser):
             if "nir" in tag or "nss" in tag:
                 e.nir = text.replace(" ", "")
                 found = True
+            elif "prenom" in tag:
+                # Tester prenom AVANT nom car "nom" est sous-mot de "prenom"
+                e.prenom = text
+                found = True
             elif "nom" in tag:
                 e.nom = text
-                found = True
-            elif "prenom" in tag:
-                e.prenom = text
                 found = True
         return e if found else None
 
