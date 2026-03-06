@@ -92,12 +92,13 @@ class XMLParser(BaseParser):
                         c = self._parser_element_cotisation(child, doc_id)
                         if c:
                             cotisations.append(c)
+                    elif "employeur" in tag or "entreprise" in tag:
+                        # Tester employeur AVANT employe car "employe" est sous-mot de "employeur"
+                        employeur = self._parser_element_employeur(child, doc_id)
                     elif "salarie" in tag or "employe" in tag or "individu" in tag:
                         e = self._parser_element_employe(child, doc_id)
                         if e:
                             employes.append(e)
-                    elif "employeur" in tag or "entreprise" in tag:
-                        employeur = self._parser_element_employeur(child, doc_id)
 
                 if cotisations or employes:
                     d = Declaration(
