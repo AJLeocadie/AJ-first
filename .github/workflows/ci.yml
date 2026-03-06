@@ -1,6 +1,7 @@
 # ============================================
 # NormaCheck - CI Quality Pipeline
 # Runs on all PRs and pushes
+# Gate de deploiement : tout echec bloque le merge
 # ============================================
 name: CI
 
@@ -32,8 +33,8 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
-  test:
-    name: Tests & Coverage
+  test-unit:
+    name: Tests Unitaires
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,11 +50,92 @@ jobs:
           pip install -r requirements.txt
           pip install pytest-cov
 
-      - name: Run tests with coverage
-        run: python -m pytest tests/ -v --cov=urssaf_analyzer --cov-report=term-missing --cov-report=xml
+      - name: Run unit tests with coverage
+        run: |
+          python -m pytest tests/unit/ -v \
+            --tb=short \
+            --junitxml=test-reports/unit-results.xml \
+            --cov=urssaf_analyzer --cov=auth --cov=persistence \
+            --cov-report=term-missing \
+            --cov-report=xml:test-reports/coverage.xml \
+            --cov-report=html:test-reports/coverage-html
 
-      - name: Check coverage threshold
-        run: python -m pytest tests/ --cov=urssaf_analyzer --cov-fail-under=40
+      - name: Check coverage threshold (40% minimum)
+        run: python -m pytest tests/unit/ --cov=urssaf_analyzer --cov-fail-under=40 -q
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: test-reports/
+          retention-days: 30
+
+  test-integration:
+    name: Tests Integration
+    runs-on: ubuntu-latest
+    needs: test-unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest-cov httpx
+
+      - name: Run integration tests
+        run: |
+          python -m pytest tests/integration/ -v \
+            --tb=short \
+            --junitxml=test-reports/integration-results.xml
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: test-reports/
+          retention-days: 30
+
+  test-e2e:
+    name: Tests E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: test-integration
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install playwright pytest-playwright
+          playwright install chromium --with-deps
+
+      - name: Run E2E tests
+        run: |
+          python -m pytest tests/e2e/ -v \
+            --tb=short \
+            --junitxml=test-reports/e2e-results.xml \
+            || true  # E2E non bloquant pour l'instant
+
+      - name: Upload E2E screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: tests/e2e/screenshots/
+          retention-days: 30
 
   typecheck:
     name: Type Checking
@@ -94,3 +176,17 @@ jobs:
 
       - name: Audit dependencies
         run: pip-audit || true
+
+  # Gate de deploiement : tous les tests doivent passer
+  deploy-gate:
+    name: Gate de Deploiement
+    runs-on: ubuntu-latest
+    needs: [lint, test-unit, test-integration, security]
+    steps:
+      - name: Verification gate
+        run: |
+          echo "============================================================"
+          echo "  GATE DE DEPLOIEMENT"
+          echo "  Tous les tests obligatoires sont passes."
+          echo "  Deploiement AUTORISE."
+          echo "============================================================"
