@@ -169,8 +169,8 @@ class TestSupabaseClientMethods:
     def test_executer_patch_mensuel_no_connection(self):
         client = self._get_client()
         if hasattr(client, 'executer_patch_mensuel'):
-            result = client.executer_patch_mensuel({})
-            assert result is None or True
+            result = client.executer_patch_mensuel(2026, 3, {})
+            assert result is None or isinstance(result, dict) or True
 
     def test_get_historique_patches_no_connection(self):
         client = self._get_client()

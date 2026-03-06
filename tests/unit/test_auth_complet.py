@@ -307,7 +307,11 @@ class TestJWTAdvanced:
     def test_token_signature_tampered(self):
         token = jwt_encode({"sub": "user1", "exp": time.time() + 3600})
         parts = token.split(".")
-        bad_sig = parts[2][:-1] + ("A" if parts[2][-1] != "A" else "B")
+        # Invert multiple characters to ensure the decoded bytes actually change
+        sig_chars = list(parts[2])
+        for i in range(min(3, len(sig_chars))):
+            sig_chars[i] = "A" if sig_chars[i] != "A" else "B"
+        bad_sig = "".join(sig_chars)
         tampered = f"{parts[0]}.{parts[1]}.{bad_sig}"
         assert jwt_decode(tampered) is None
 

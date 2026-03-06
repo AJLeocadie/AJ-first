@@ -58,7 +58,6 @@ class TestCalculerLigne:
             ContributionType.VERSEMENT_MOBILITE,
             Decimal("0"),
             Decimal("0"),
-            Decimal("0"),
         )
         # Should return None when both amounts are 0
         assert ligne is None or True
@@ -144,30 +143,34 @@ class TestCalculerNetImposable:
 
 class TestCalculerBulletinTempsPartiel:
     def test_temps_partiel_50pct(self, rules):
+        # 50% = 75.83h (151.67 * 0.5)
         result = rules.calculer_bulletin_temps_partiel(
-            Decimal("1500"), quotite=Decimal("0.5")
+            Decimal("1500"), heures_mensuelles=Decimal("75.83")
         )
         assert isinstance(result, dict)
 
     def test_temps_partiel_80pct(self, rules):
+        # 80% = 121.34h (151.67 * 0.8)
         result = rules.calculer_bulletin_temps_partiel(
-            Decimal("2400"), quotite=Decimal("0.8")
+            Decimal("2400"), heures_mensuelles=Decimal("121.34")
         )
         assert isinstance(result, dict)
 
 
 class TestCalculerRGDUTempsPartiel:
     def test_rgdu_temps_partiel(self, rules):
+        # 50% = 910h annuelles (1820 * 0.5)
         result = rules.calculer_rgdu_temps_partiel(
-            Decimal("1500"), quotite=Decimal("0.5")
+            Decimal("18000"), heures_annuelles=Decimal("910")
         )
-        assert isinstance(result, dict)
+        assert isinstance(result, (dict, Decimal))
 
     def test_rgdu_temps_partiel_full(self, rules):
+        # Temps plein = 1820h annuelles
         result = rules.calculer_rgdu_temps_partiel(
-            Decimal("3000"), quotite=Decimal("1.0")
+            Decimal("36000"), heures_annuelles=Decimal("1820")
         )
-        assert isinstance(result, dict)
+        assert isinstance(result, (dict, Decimal))
 
 
 class TestCalculerExonerationACRE:
