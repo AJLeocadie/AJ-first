@@ -3094,12 +3094,69 @@ async def reset_ecritures():
 # SIMULATION
 # ==============================
 
+
+def _get_baremes_pour_annee(annee: int) -> dict:
+    """Retourne les baremes applicables pour une annee donnee.
+
+    Permet aux simulations d'appliquer les regles de la bonne periode :
+    un document 2024 utilise les taux 2024, un document 2025 les taux 2025, etc.
+    """
+    b = get_baremes_annee(annee)
+    if not b:
+        b = get_baremes_annee(2026)  # fallback
+    return {
+        "annee": annee,
+        "smic_mensuel": b.get("smic_mensuel", float(_SMIC_MENSUEL)),
+        "smic_horaire": b.get("smic_horaire", 12.02),
+        "pass_mensuel": b.get("pass_mensuel", float(_PASS_MENSUEL)),
+        "pass_annuel": b.get("pass_annuel", 48060.00),
+        "taux_maladie": b.get("taux_maladie_patronal", 0.13),
+        "taux_maladie_reduit": b.get("taux_maladie_patronal_reduit", 0.07),
+        "seuil_maladie_smic": b.get("seuil_maladie_reduit_smic", 2.5),
+        "taux_vieillesse_plaf": b.get("taux_vieillesse_plafonnee_patronal", 0.0855),
+        "taux_vieillesse_deplaf": b.get("taux_vieillesse_deplafonnee_patronal", 0.0211),
+        "taux_af": b.get("taux_af_patronal", 0.0525),
+        "taux_af_reduit": b.get("taux_af_patronal_reduit", 0.0325),
+        "seuil_af_smic": b.get("seuil_af_reduit_smic", 3.5),
+        "taux_at_moyen": b.get("taux_at_moyen", 0.0208),
+        "taux_fnal_moins_50": b.get("taux_fnal_moins_50", 0.001),
+        "taux_fnal_50_plus": b.get("taux_fnal_50_plus", 0.005),
+        "taux_csa": b.get("taux_csa", 0.003),
+        "taux_chomage": b.get("taux_chomage_patronal", 0.0405),
+        "taux_ags": b.get("taux_ags", 0.0015),
+        "taux_dialogue_social": b.get("taux_dialogue_social", 0.00016),
+        "taux_rc_t1_patronal": b.get("taux_rc_t1_patronal", 0.0472),
+        "taux_rc_t1_salarial": b.get("taux_rc_t1_salarial", 0.0315),
+        "taux_rc_t2_patronal": b.get("taux_rc_t2_patronal", 0.1229),
+        "taux_rc_t2_salarial": b.get("taux_rc_t2_salarial", 0.0864),
+        "taux_ceg_t1_patronal": b.get("taux_ceg_t1_patronal", 0.0129),
+        "taux_ceg_t1_salarial": b.get("taux_ceg_t1_salarial", 0.0086),
+        "taux_ceg_t2_patronal": b.get("taux_ceg_t2_patronal", 0.0162),
+        "taux_ceg_t2_salarial": b.get("taux_ceg_t2_salarial", 0.0108),
+        "taux_cet_patronal": b.get("taux_cet_patronal", 0.0021),
+        "taux_cet_salarial": b.get("taux_cet_salarial", 0.0014),
+        "taux_formation_moins_11": b.get("taux_formation_moins_11", 0.0055),
+        "taux_formation_11_plus": b.get("taux_formation_11_plus", 0.01),
+        "taux_taxe_apprentissage": b.get("taux_taxe_apprentissage", 0.0068),
+        "taux_prevoyance_cadre_min": b.get("taux_prevoyance_cadre_min", 0.015),
+        # Reduction generale : Fillon (<=2024: 1.6 SMIC) ou RGDU (2026: 3.0 SMIC)
+        "seuil_rgd_smic": b.get("seuil_rgdu_smic", b.get("seuil_rgd_smic", 1.6)),
+        "rgdu_taux_max_moins_50": b.get("rgdu_taux_max_moins_50", 0.3194),
+        "rgdu_taux_max_50_plus": b.get("rgdu_taux_max_50_plus", 0.3234),
+        # Nom de la reduction selon l'epoque
+        "nom_reduction": "Reduction generale (RGDU 2026)" if annee >= 2026 else f"Reduction generale Fillon ({annee})",
+        "ref_reduction": "Art. L.241-13 CSS (refonte LFSS 2026)" if annee >= 2026 else "Art. L.241-13 CSS",
+    }
+
+
 @app.get("/api/simulation/bulletin")
 async def sim_bulletin(
     brut_mensuel: float = Query(2500, description="Salaire brut mensuel du salarie simule (EUR)"),
     effectif: int = Query(10, description="Effectif total de l entreprise (pour seuils FNAL, versement mobilite)"),
     est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
+    annee: int = Query(2026, description="Annee de reference pour les baremes (2020-2026)"),
 ):
+    bar = _get_baremes_pour_annee(annee)
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
     calc = ContributionRules(effectif_entreprise=effectif)
     res = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
@@ -3111,6 +3168,9 @@ async def sim_bulletin(
             "montant_salarial": float(l["montant_salarial"]),
         })
     return {
+        "annee_baremes": annee,
+        "smic_mensuel_ref": bar["smic_mensuel"],
+        "pass_mensuel_ref": bar["pass_mensuel"],
         "brut_mensuel": float(res["brut_mensuel"]),
         "net_a_payer": float(res["net_avant_impot"]),
         "cout_total_employeur": float(res["cout_total_employeur"]),
@@ -3497,10 +3557,16 @@ async def sim_exonerations(
     est_cadre: bool = Query(False),
     taux_at: float = Query(0),
     nb_salaries_simules: int = Query(1),
+    annee: int = Query(2026, description="Annee de reference pour les baremes (2020-2026). Un document 2024 doit utiliser annee=2024."),
 ):
-    """Simulation exhaustive des exonerations avec tous parametres de calcul."""
-    smic_mensuel_ref = float(_SMIC_MENSUEL)
-    smic_horaire = round(smic_mensuel_ref / 151.67, 2)
+    """Simulation exhaustive des exonerations avec tous parametres de calcul.
+
+    Le parametre 'annee' permet d'appliquer les baremes de la bonne periode :
+    un bulletin 2024 utilise les taux 2024, un bulletin 2026 les taux 2026.
+    """
+    bar = _get_baremes_pour_annee(annee)
+    smic_mensuel_ref = bar["smic_mensuel"]
+    smic_horaire = bar["smic_horaire"]
 
     # Prorata temps partiel
     coeff_tp = max(0.01, min(temps_partiel_pct / 100.0, 1.0))
@@ -3518,40 +3584,45 @@ async def sim_exonerations(
     exonerations = []
     total_exo = 0.0
 
-    # === Taux patronaux detailles (2026, LFSS 2025 art.17 + LFSS 2026) ===
-    taux_maladie = 0.07 if ratio_smic <= 2.25 else 0.13   # Seuil 2.25 SMIC (LFSS 2025 art.17)
-    taux_vieillesse_plaf = 0.0855
-    taux_vieillesse_deplaf = 0.0211  # 2.11% (hausse LFSS 2026, ex-2.02%)
-    taux_af = 0.0325 if ratio_smic <= 3.3 else 0.0525     # Seuil 3.3 SMIC (LFSS 2025 art.17)
-    taux_at_reel = taux_at if taux_at > 0 else 0.0208
-    taux_fnal = 0.001 if effectif < 50 else 0.005
-    taux_csa = 0.003
-    taux_chom = 0.0405
-    taux_ags = 0.0015
+    # === Taux patronaux detailles (selon annee selectionnee) ===
+    seuil_maladie = bar["seuil_maladie_smic"]  # 2.5 (<=2025) ou 2.25 (2026+)
+    taux_maladie = bar["taux_maladie_reduit"] if ratio_smic <= seuil_maladie else bar["taux_maladie"]
+    taux_vieillesse_plaf = bar["taux_vieillesse_plaf"]
+    taux_vieillesse_deplaf = bar["taux_vieillesse_deplaf"]
+    seuil_af = bar["seuil_af_smic"]  # 3.5 (<=2025) ou 3.3 (2026+)
+    taux_af = bar["taux_af_reduit"] if ratio_smic <= seuil_af else bar["taux_af"]
+    taux_at_reel = taux_at if taux_at > 0 else bar["taux_at_moyen"]
+    taux_fnal = bar["taux_fnal_moins_50"] if effectif < 50 else bar["taux_fnal_50_plus"]
+    taux_csa = bar["taux_csa"]
+    taux_chom = bar["taux_chomage"]
+    taux_ags = bar["taux_ags"]
     taux_agirc = 0.1292 if est_cadre else 0.0786
     taux_pat_total = round(taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_at_reel + taux_fnal + taux_csa + taux_chom + taux_ags + taux_agirc, 4)
     charges_normales = round(brut * taux_pat_total, 2)
 
-    # 1. RGDU / Reduction generale (ex-Fillon) - formule 2026 (CSS art. L241-13 refonte)
-    # Seuil: 3 SMIC (RGDU 2026), formule: C = (T/0.6) * (3 * SMIC_retabli / brut - 1)
-    if ratio_smic <= 3.0:
-        coeff_t = 0.3194 if effectif < 50 else 0.3234
-        # Formule RGDU 2026 avec SMIC reconstitue (Art. L.241-13 CSS refonte)
-        coeff = (coeff_t / 0.6) * (3.0 * smic_retabli / brut - 1) if brut > 0 else 0
+    # 1. Reduction generale (Fillon <=2025 / RGDU 2026+) - baremes selon annee
+    seuil_rgd = bar["seuil_rgd_smic"]  # 1.6 (<=2025) ou 3.0 (2026+)
+    nom_red = bar["nom_reduction"]
+    ref_red = bar["ref_reduction"]
+    if ratio_smic <= seuil_rgd:
+        if annee >= 2026:
+            coeff_t = bar["rgdu_taux_max_moins_50"] if effectif < 50 else bar["rgdu_taux_max_50_plus"]
+        else:
+            # Fillon classique (<=2025) : T = 0.3194/<50 ou 0.3234/>=50 (valeurs 2024-2025)
+            coeff_t = 0.3194 if effectif < 50 else 0.3234
+        coeff = (coeff_t / 0.6) * (seuil_rgd * smic_retabli / brut - 1) if brut > 0 else 0
         coeff = max(0, min(coeff, coeff_t))
-        # Plafonnement : la reduction ne peut exceder les cotisations ecretes
         montant_fillon = round(brut * coeff, 2)
-        # Regularisation progressive annuelle (Art. D.241-13 CSS)
-        exonerations.append({"nom": "Reduction generale (RGDU 2026)", "reference": "Art. L.241-13 CSS (refonte LFSS 2026)",
+        exonerations.append({"nom": nom_red, "reference": ref_red,
             "montant_mensuel": montant_fillon, "montant_annuel": round(montant_fillon * 12, 2),
-            "conditions": f"Ratio SMIC: {ratio_smic:.3f} (seuil 3.0). Coeff T={coeff_t}, coeff calcule={coeff:.5f}. "
+            "conditions": f"Annee {annee}. Ratio SMIC: {ratio_smic:.3f} (seuil {seuil_rgd}). Coeff T={coeff_t}, coeff calcule={coeff:.5f}. "
                           f"SMIC retabli: {smic_retabli:.2f} EUR (presence {coeff_presence*100:.0f}%, TP {temps_partiel_pct:.0f}%). "
                           f"Heures contrat: {heures_contrat:.2f}h.", "applicable": True})
         total_exo += montant_fillon
     else:
-        exonerations.append({"nom": "Reduction generale (RGDU 2026)", "reference": "Art. L.241-13 CSS (refonte LFSS 2026)",
+        exonerations.append({"nom": nom_red, "reference": ref_red,
             "montant_mensuel": 0, "montant_annuel": 0,
-            "conditions": f"Non applicable: ratio SMIC {ratio_smic:.3f} > 3.0", "applicable": False})
+            "conditions": f"Non applicable: ratio SMIC {ratio_smic:.3f} > {seuil_rgd} (annee {annee})", "applicable": False})
 
     # 2. Exoneration apprenti
     if statut_salarie == "apprenti":
@@ -3668,7 +3739,7 @@ async def sim_exonerations(
     # 10. JEI (Jeune Entreprise Innovante)
     if statut_salarie == "jei":
         # Plafond: exoneration patronale SS hors AT/MP, plafond 5 PASS mensuel
-        pass_mensuel = float(_PASS_MENSUEL)  # 4005 EUR en 2026
+        pass_mensuel = bar["pass_mensuel"]
         plafond_jei = pass_mensuel * 5
         base_jei = min(brut, plafond_jei)
         taux_jei = taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa
@@ -3781,9 +3852,9 @@ async def sim_exonerations(
     _NON_CUMUL_GROUPS = {
         "zone": ["Exoneration ZRR", "Exoneration ZFU-TE", "Exoneration QPV",
                  "Exoneration BER", "Exoneration AFR", "Exoneration ZRD"],
-        "generale_vs_zone": ["Reduction generale (RGDU 2026)"],
+        "generale_vs_zone": [nom_red],
     }
-    # La RGDU n'est pas cumulable avec les exo de zone, JEI, LODEOM, ACRE (Art. L.241-13 IX CSS)
+    # La reduction generale n'est pas cumulable avec les exo de zone, JEI, LODEOM, ACRE (Art. L.241-13 IX CSS)
     _INCOMPATIBLES_FILLON = [
         "Exoneration ZRR", "Exoneration ZFU-TE", "Exoneration QPV",
         "Exoneration BER", "Exoneration ZRD", "Exoneration AFR",
@@ -3811,13 +3882,13 @@ async def sim_exonerations(
             exo_desactivees.add(e["nom"])
 
     # 2. Reduction generale vs exonerations specifiques
-    has_fillon = any(e["nom"] == "Reduction generale (RGDU 2026)" and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
+    has_fillon = any(e["nom"] == nom_red and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
     exos_specifiques = [e for e in exonerations if e["nom"] in _INCOMPATIBLES_FILLON and e.get("applicable") and e.get("montant_mensuel", 0) > 0]
     if has_fillon and exos_specifiques:
-        fillon = next((e for e in exonerations if e["nom"] == "Reduction generale (RGDU 2026)"), None)
+        fillon = next((e for e in exonerations if e["nom"] == nom_red), None)
         best_specific = max(exos_specifiques, key=lambda e: e.get("montant_mensuel", 0))
         if fillon and best_specific["montant_mensuel"] >= fillon["montant_mensuel"]:
-            exo_desactivees.add("Reduction generale (RGDU 2026)")
+            exo_desactivees.add(nom_red)
         else:
             for e in exos_specifiques:
                 exo_desactivees.add(e["nom"])
@@ -3880,8 +3951,11 @@ async def sim_exonerations(
         charges_apres_exo_multi = charges_apres_exo
 
     return {
+        "annee_baremes": annee,
+        "baremes_appliques": f"Baremes {annee} (SMIC {smic_mensuel_ref:.2f} EUR, PASS {bar['pass_mensuel']:.2f} EUR)",
         "brut_mensuel": brut, "effectif": effectif, "zone": zone, "statut_salarie": statut_salarie,
         "ratio_smic": round(ratio_smic, 3), "smic_retabli": smic_retabli,
+        "smic_mensuel_ref": smic_mensuel_ref,
         "heures_contrat": round(heures_contrat, 2),
         "temps_partiel_pct": temps_partiel_pct,
         "jours_absence": jours_absence, "type_absence": type_absence,
@@ -3895,6 +3969,8 @@ async def sim_exonerations(
             "at_mp": taux_at_reel, "fnal": taux_fnal, "csa": taux_csa,
             "chomage": taux_chom, "ags": taux_ags,
             "retraite_complementaire": taux_agirc, "total": taux_pat_total,
+            "seuil_maladie_reduit": f"{seuil_maladie} SMIC",
+            "seuil_af_reduit": f"{seuil_af} SMIC",
         },
         "exonerations": exonerations,
         "total_exonerations_mensuelles": round(total_exo, 2),
@@ -4176,7 +4252,9 @@ async def sim_cout_employeur(
     primes: float = Query(0, description="Primes mensuelles (EUR)"),
     tickets_restaurant: float = Query(0, description="Tickets restaurant mensuels (EUR)"),
     mutuelle_employeur: float = Query(40, description="Part employeur mutuelle mensuelle (EUR)"),
+    annee: int = Query(2026, description="Annee de reference pour les baremes (2020-2026)"),
 ):
+    bar = _get_baremes_pour_annee(annee)
     brut = brut_mensuel + primes
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
     calc = ContributionRules(effectif_entreprise=effectif)
@@ -4187,10 +4265,11 @@ async def sim_cout_employeur(
     sal = float(res["total_salarial"])
     net = float(res["net_avant_impot"])
 
-    # Contribution formation
-    formation = round(brut * (0.0055 if effectif < 11 else 0.01), 2)
+    # Contribution formation (taux selon annee)
+    taux_formation = bar["taux_formation_moins_11"] if effectif < 11 else bar["taux_formation_11_plus"]
+    formation = round(brut * taux_formation, 2)
     # Taxe apprentissage
-    taxe_apprentissage = round(brut * 0.0068, 2)
+    taxe_apprentissage = round(brut * bar["taux_taxe_apprentissage"], 2)
     # Effort construction (PEEC >= 20 salaries, art. L313-1 CCH)
     effort_construction = round(brut * 0.0045, 2) if effectif >= 20 else 0
     # Participation (>= 50)
@@ -4203,6 +4282,7 @@ async def sim_cout_employeur(
     ratio_cout = round(cout_total / net, 2) if net > 0 else 0
 
     return {
+        "annee_baremes": annee,
         "brut_mensuel": brut_mensuel, "primes": primes, "brut_total": brut,
         "charges_patronales_urssaf": pat, "charges_salariales": sal, "net_a_payer": net,
         "formation_professionnelle": formation, "taxe_apprentissage": taxe_apprentissage,
@@ -4521,7 +4601,8 @@ async def sim_optimisation(
     })
 
     # Scenario 3: Maximum dividendes
-    sal_min = float(_SMIC_MENSUEL) * 12  # SMIC annuel 2026
+    bar_opt = _get_baremes_pour_annee(2026)  # optimisation toujours sur annee courante
+    sal_min = bar_opt["smic_mensuel"] * 12  # SMIC annuel
     charges_min = sal_min * 0.42
     net_min = sal_min - sal_min * 0.22
     is_base_3 = max(0, benefice_net - sal_min - charges_min)
@@ -6732,7 +6813,7 @@ async def knowledge_audit(
     _CONSTANTES_HIST = {
         2021: {"pass": 41136, "smic_h": 10.25, "smic_m": 1554.58, "plafond_ss_m": 3428, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.28, "forfait_social_pee": 20, "taux_agff": 2.0},
         2022: {"pass": 41136, "smic_h": 10.57, "smic_m": 1603.12, "plafond_ss_m": 3428, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.28, "forfait_social_pee": 20, "taux_agff": 2.0},
-        2023: {"pass": 43992, "smic_h": 11.27, "smic_m": 1709.28, "plafond_ss_m": 3666, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.24, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2023: {"pass": 43992, "smic_h": 11.52, "smic_m": 1747.20, "plafond_ss_m": 3666, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.24, "forfait_social_pee": 20, "taux_agff": 2.0},
         2024: {"pass": 46368, "smic_h": 11.65, "smic_m": 1766.92, "plafond_ss_m": 3864, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.23, "forfait_social_pee": 20, "taux_agff": 2.0},
         2025: {"pass": 47100, "smic_h": 11.88, "smic_m": 1801.80, "plafond_ss_m": 3925, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.22, "forfait_social_pee": 20, "taux_agff": 2.0},
         2026: {"pass": 48060, "smic_h": 12.02, "smic_m": 1823.03, "plafond_ss_m": 4005, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.20, "forfait_social_pee": 20, "taux_agff": 2.0},
@@ -13490,6 +13571,20 @@ APP_HTML += """
 <div class="tc" id="sim-exo"><h2>Exonerations et aides a l emploi</h2>
 <p style="color:var(--tx2);font-size:.84em;margin-bottom:10px">Simulation pour <strong>un salarie</strong> (ou un groupe au meme profil). L effectif total determine les exonerations liees aux seuils. Tous les parametres sont modifiables.</p>
 
+<div style="background:#e8f4fd;border:2px solid #2196F3;border-radius:8px;padding:14px;margin-bottom:12px">
+<h3 style="margin:0 0 8px;font-size:.95em">&#128197; Annee de reference des baremes</h3>
+<p style="color:var(--tx2);font-size:.82em;margin:0 0 8px">Un document 2024 doit etre simule avec les baremes 2024. Les taux SMIC, PASS, cotisations et formules de reduction changent selon l annee.</p>
+<select id="exo-annee" style="font-size:1em;padding:6px 12px;border-radius:6px;border:2px solid #2196F3;font-weight:bold">
+<option value="2020">2020 (SMIC 1539,42 / PASS 3428 / Fillon 1.6 SMIC)</option>
+<option value="2021">2021 (SMIC 1554,58 / PASS 3428 / Fillon 1.6 SMIC)</option>
+<option value="2022">2022 (SMIC 1603,12 / PASS 3428 / Fillon 1.6 SMIC)</option>
+<option value="2023">2023 (SMIC 1747,20 / PASS 3666 / Fillon 1.6 SMIC)</option>
+<option value="2024">2024 (SMIC 1766,92 / PASS 3864 / Fillon 1.6 SMIC)</option>
+<option value="2025">2025 (SMIC 1801,80 / PASS 3925 / Fillon 1.6 SMIC)</option>
+<option value="2026" selected>2026 (SMIC 1823,03 / PASS 4005 / RGDU 3.0 SMIC)</option>
+</select>
+</div>
+
 <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
 <h3 style="margin:0 0 8px;font-size:.95em">&#128100; Salarie simule</h3>
 <div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="exo-eff" value="10"></div><div><label>Age du salarie simule</label><input type="number" id="exo-age" value="30"></div><div><label>Duree du contrat (mois, 0 = CDI)</label><input type="number" id="exo-duree" value="0" placeholder="0 = CDI"></div></div>
@@ -14995,9 +15090,10 @@ function loadContratsEpargne(){fetch("/api/epargne-salariale/contrats").then(saf
 function supprimerContratEpargne(id){if(!confirm("Supprimer ce contrat ?"))return;fetch("/api/epargne-salariale/contrats/"+id,{method:"DELETE"}).then(safeJson).then(function(r){if(r.ok){toast("Contrat supprime");loadContratsEpargne();}else{toast(r.error||"Erreur");}}).catch(function(e){toast(e.message);});}
 function simCout(){var p="brut_mensuel="+gv("ce-brut")+"&effectif="+gv("ce-eff")+"&est_cadre="+gv("ce-cadre")+"&primes="+gv("ce-primes")+"&avantages_nature="+gv("ce-avantages")+"&frais_km="+gv("ce-km")+"&tickets_restaurant="+gv("ce-tr")+"&mutuelle_employeur="+gv("ce-mut");fetch("/api/simulation/cout-employeur?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_total.toFixed(2)+"</div><div class='lab'>Brut total</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_mensuel.toFixed(2)+"</div><div class='lab'>Cout total/mois</div></div><div class='sc'><div class='val'>"+r.cout_total_annuel.toFixed(2)+"</div><div class='lab'>Cout total/an</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";h+="<tr><td>Charges patronales URSSAF</td><td class='num'>"+r.charges_patronales_urssaf.toFixed(2)+"</td></tr>";h+="<tr><td>Charges salariales</td><td class='num'>"+r.charges_salariales.toFixed(2)+"</td></tr>";h+="<tr><td>Formation professionnelle</td><td class='num'>"+r.formation_professionnelle.toFixed(2)+"</td></tr>";h+="<tr><td>Taxe apprentissage</td><td class='num'>"+r.taxe_apprentissage.toFixed(2)+"</td></tr>";h+="<tr><td>Effort construction</td><td class='num'>"+r.effort_construction.toFixed(2)+"</td></tr>";h+="<tr><td>Participation obligatoire</td><td class='num'>"+r.participation_obligatoire.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total charges annexes</td><td class='num'>"+r.total_charges_annexes.toFixed(2)+"</td></tr>";h+="<tr><td>Avantages nature</td><td class='num'>"+r.avantages_nature.toFixed(2)+"</td></tr>";h+="<tr><td>Frais km rembourses</td><td class='num'>"+r.frais_km_rembourses.toFixed(2)+"</td></tr>";h+="<tr><td>Tickets restaurant</td><td class='num'>"+r.tickets_restaurant.toFixed(2)+"</td></tr>";h+="<tr><td>Mutuelle employeur</td><td class='num'>"+r.mutuelle_employeur.toFixed(2)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total avantages</td><td class='num'>"+r.total_avantages.toFixed(2)+"</td></tr></table>";h+="<div class='g4' style='margin-top:12px'><div class='sc'><div class='val'>"+r.repartition.salaire_net+"%</div><div class='lab'>Salaire net</div></div><div class='sc'><div class='val'>"+r.repartition.charges_salariales+"%</div><div class='lab'>Charges sal.</div></div><div class='sc'><div class='val'>"+r.repartition.charges_patronales+"%</div><div class='lab'>Charges pat.</div></div><div class='sc'><div class='val'>"+r.repartition.annexes_avantages+"%</div><div class='lab'>Annexes+Avantages</div></div></div>";h+="<p style='margin-top:10px;color:var(--tx2);font-size:.84em'>Ratio cout/net : <b>"+r.ratio_cout_net+"x</b> - Pour 1 EUR net verse, l employeur depense "+r.ratio_cout_net+" EUR</p>";document.getElementById("sim-cout-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function toggleLodeom(){var z=gv("exo-zone");document.getElementById("lodeom-bareme-wrap").style.display=z==="outremer"?"block":"none";}
-function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"))+"&nb_heures_mensuelles="+(gv("exo-heures")||"151.67")+"&temps_partiel_pct="+(gv("exo-tp")||"100")+"&jours_absence="+(gv("exo-abs-jours")||"0")+"&type_absence="+gv("exo-abs-type")+"&bareme_lodeom="+gv("exo-lodeom")+"&est_cadre="+gv("exo-cadre")+"&taux_at="+(gv("exo-at")||"0")+"&nb_salaries_simules="+(gv("exo-nb")||"1");
+function simExo(){var p="brut_mensuel="+gv("exo-brut")+"&effectif="+gv("exo-eff")+"&age_salarie="+gv("exo-age")+"&duree_contrat_mois="+gv("exo-duree")+"&zone="+gv("exo-zone")+"&statut_salarie="+gv("exo-statut")+"&heures_supplementaires="+(gv("exo-hs")||"0")+"&ccn="+encodeURIComponent(gv("exo-ccn"))+"&nb_heures_mensuelles="+(gv("exo-heures")||"151.67")+"&temps_partiel_pct="+(gv("exo-tp")||"100")+"&jours_absence="+(gv("exo-abs-jours")||"0")+"&type_absence="+gv("exo-abs-type")+"&bareme_lodeom="+gv("exo-lodeom")+"&est_cadre="+gv("exo-cadre")+"&taux_at="+(gv("exo-at")||"0")+"&nb_salaries_simules="+(gv("exo-nb")||"1")+"&annee="+gv("exo-annee");
 fetch("/api/simulation/exonerations?"+p).then(safeJson).then(function(r){
-var h="<div class='g3'><div class='sc green'><div class='val'>"+fmtN(r.total_exonerations_mensuelles)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(r.total_exonerations_annuelles)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie charges</div></div></div>";
+var h="<div class='al ok' style='margin-bottom:10px'><span class='ai'>&#128197;</span><span><strong>Baremes "+r.annee_baremes+"</strong> - "+r.baremes_appliques+"</span></div>";
+h+="<div class='g3'><div class='sc green'><div class='val'>"+fmtN(r.total_exonerations_mensuelles)+"</div><div class='lab'>Exonerations/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(r.total_exonerations_annuelles)+"</div><div class='lab'>Exonerations/an</div></div><div class='sc amber'><div class='val'>"+r.economie_pct.toFixed(1)+"%</div><div class='lab'>Economie charges</div></div></div>";
 h+="<div class='g4' style='margin-top:10px'><div class='sc'><div class='val'>"+fmtN(r.charges_patronales_normales)+"</div><div class='lab'>Charges normales</div></div><div class='sc green'><div class='val'>"+fmtN(r.charges_patronales_apres_exo)+"</div><div class='lab'>Charges apres exo</div></div><div class='sc'><div class='val'>"+r.ratio_smic+"</div><div class='lab'>Ratio SMIC</div></div><div class='sc'><div class='val'>"+fmtN(r.smic_retabli)+"</div><div class='lab'>SMIC retabli</div></div></div>";
 // Multi-salaries
 if(r.multi_salaries){var m=r.multi_salaries;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--p)'><strong>&#128101; Simulation groupee ("+m.nb+" salaries identiques)</strong><div class='g3' style='margin-top:8px'><div class='sc green'><div class='val'>"+fmtN(m.total_exonerations_mensuelles)+"</div><div class='lab'>Exo totales/mois</div></div><div class='sc blue'><div class='val'>"+fmtN(m.total_exonerations_annuelles)+"</div><div class='lab'>Exo totales/an</div></div><div class='sc'><div class='val'>"+fmtN(m.charges_normales_totales-m.charges_apres_exo_totales)+"</div><div class='lab'>Economie totale/mois</div></div></div></div>";}

@@ -430,7 +430,7 @@ BAREMES_PAR_ANNEE = {
         # Cotisations SS
         "taux_maladie_patronal": 0.13,
         "taux_maladie_patronal_reduit": 0.07,
-        "seuil_maladie_reduit_smic": 2.5,
+        "seuil_maladie_reduit_smic": 2.25,  # LFSS 2025 art.17 : abaisse de 2.5 a 2.25 SMIC
         "taux_maladie_alsace_moselle_salarial": 0.013,
         "taux_vieillesse_plafonnee_patronal": 0.0855,
         "taux_vieillesse_plafonnee_salarial": 0.069,
@@ -438,7 +438,7 @@ BAREMES_PAR_ANNEE = {
         "taux_vieillesse_deplafonnee_salarial": 0.024,
         "taux_af_patronal": 0.0525,
         "taux_af_patronal_reduit": 0.0325,
-        "seuil_af_reduit_smic": 3.5,
+        "seuil_af_reduit_smic": 3.3,  # LFSS 2025 art.17 : abaisse de 3.5 a 3.3 SMIC
         "taux_at_moyen": 0.0208,
         "taux_at_min": 0.009,
         "taux_at_max": 0.06,
