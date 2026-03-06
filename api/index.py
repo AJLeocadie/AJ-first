@@ -3656,8 +3656,13 @@ async def sim_exonerations(
         if annee >= 2026:
             coeff_t = bar["rgdu_taux_max_moins_50"] if effectif < 50 else bar["rgdu_taux_max_50_plus"]
         else:
-            # Fillon classique (<=2025) : T = 0.3194/<50 ou 0.3234/>=50 (valeurs 2024-2025)
-            coeff_t = 0.3194 if effectif < 50 else 0.3234
+            # Fillon classique (<=2025) : T varie selon annee
+            # 2020-2023: T = 0.3206/<50 ou 0.3246/>=50 (vieillesse deplaf 1.90%)
+            # 2024-2025: T = 0.3194/<50 ou 0.3234/>=50 (vieillesse deplaf 2.02%)
+            if annee <= 2023:
+                coeff_t = 0.3206 if effectif < 50 else 0.3246
+            else:
+                coeff_t = 0.3194 if effectif < 50 else 0.3234
         # Diviseur = seuil_multiple - 1 : 0.6 pour Fillon (1.6 SMIC), 2.0 pour RGDU (3.0 SMIC)
         diviseur = (seuil_rgd - 1) if seuil_rgd > 0 else 0.6
         coeff = (coeff_t / diviseur) * (seuil_rgd * smic_retabli / brut - 1) if brut > 0 else 0
@@ -3687,12 +3692,13 @@ async def sim_exonerations(
             "applicable": True, "detail": detail_app})
         total_exo += exo_app
 
-    # 3. Aide embauche jeune (-26 ans)
-    if age_salarie < 26 and brut <= smic_mensuel_ref * 2:
+    # 3. Aide embauche jeune (-26 ans) - EXPIRE 31/05/2021 (Decret 2021-94)
+    if age_salarie < 26 and brut <= smic_mensuel_ref * 2 and annee == 2021:
         aide_jeune = 333.33
-        exonerations.append({"nom": "Aide embauche jeune (<26 ans)", "reference": "Decret 2021-94",
+        exonerations.append({"nom": "Aide embauche jeune (<26 ans)", "reference": "Decret 2021-94 (expire 31/05/2021)",
             "montant_mensuel": aide_jeune, "montant_annuel": round(aide_jeune * 12, 2),
-            "conditions": "Salarie < 26 ans, brut <= 2 SMIC", "applicable": True})
+            "conditions": "Salarie < 26 ans, brut <= 2 SMIC. Contrats conclus entre 01/08/2020 et 31/05/2021 uniquement.",
+            "applicable": True})
         total_exo += aide_jeune
 
     # 4. Aide senior (+55 ans)
@@ -3737,10 +3743,12 @@ async def sim_exonerations(
 
     # 9. Outre-mer (LODEOM) - 3 baremes distincts (Art. L.752-3-2 CSS)
     if zone == "outremer":
+        # Taux total exonerable LODEOM (inclut chomage/AGS, Art. L.752-3-2 CSS)
+        taux_lodeom_total = taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel + taux_chom + taux_ags
         if bareme_lodeom == "competitivite":
             # Bareme competitivite : exo totale <= 1.3 SMIC, degressive 1.3-2.2 SMIC
             if ratio_smic <= 1.3:
-                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                exo_om = round(brut * taux_lodeom_total, 2)
                 desc = "LODEOM competitivite - exoneration totale (<=1.3 SMIC)"
             elif ratio_smic <= 2.2:
                 taux_degr = (2.2 - ratio_smic) / (2.2 - 1.3)
@@ -3753,7 +3761,7 @@ async def sim_exonerations(
         elif bareme_lodeom == "competitivite_renforcee":
             # Bareme comp. renforcee : exo totale <= 1.7 SMIC, degressive 1.7-2.7 SMIC
             if ratio_smic <= 1.7:
-                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                exo_om = round(brut * taux_lodeom_total, 2)
                 desc = "LODEOM comp. renforcee - exoneration totale (<=1.7 SMIC)"
             elif ratio_smic <= 2.7:
                 taux_degr = (2.7 - ratio_smic) / (2.7 - 1.7)
@@ -3766,7 +3774,7 @@ async def sim_exonerations(
         elif bareme_lodeom == "innovation_croissance":
             # Bareme innovation et croissance : exo totale <= 2.0 SMIC, degressive 2.0-3.0 SMIC
             if ratio_smic <= 2.0:
-                exo_om = round(brut * (taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa + taux_at_reel), 2)
+                exo_om = round(brut * taux_lodeom_total, 2)
                 desc = "LODEOM innovation/croissance - exoneration totale (<=2.0 SMIC)"
             elif ratio_smic <= 3.0:
                 taux_degr = (3.0 - ratio_smic) / (3.0 - 2.0)
@@ -3788,16 +3796,17 @@ async def sim_exonerations(
 
     # 10. JEI (Jeune Entreprise Innovante)
     if statut_salarie == "jei":
-        # Plafond: exoneration patronale SS hors AT/MP, plafond 5 PASS mensuel
-        pass_mensuel = bar["pass_mensuel"]
-        plafond_jei = pass_mensuel * 5
+        # Plafond par salarie : 4.5 SMIC mensuel (Art. D.131-6-1 CSS, LFSS 2022)
+        # Plafond annuel par etablissement : 5 PASS annuel
+        smic_m_ref = bar["smic_mensuel"]
+        plafond_jei = smic_m_ref * 4.5
         base_jei = min(brut, plafond_jei)
         taux_jei = taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa
         exo_jei = round(base_jei * taux_jei, 2)
-        exonerations.append({"nom": "Exoneration JEI (Jeune Entreprise Innovante)", "reference": "Art. 44 sexies-0 A CGI",
+        exonerations.append({"nom": "Exoneration JEI (Jeune Entreprise Innovante)", "reference": "Art. 44 sexies-0 A CGI, Art. D.131-6-1 CSS",
             "montant_mensuel": exo_jei, "montant_annuel": round(exo_jei * 12, 2),
-            "conditions": f"Chercheurs, techniciens, mandataires - 8 ans max. Plafond 5 PASS ({plafond_jei:.0f} EUR). "
-                          f"Hors AT/MP. Base: {base_jei:.2f} EUR, taux: {taux_jei*100:.2f}%.",
+            "conditions": f"Chercheurs, techniciens, mandataires - 8 ans max. Plafond salarie: 4.5 SMIC ({plafond_jei:.0f} EUR). "
+                          f"Plafond etablissement: 5 PASS annuel. Hors AT/MP. Base: {base_jei:.2f} EUR, taux: {taux_jei*100:.2f}%.",
             "applicable": True})
         total_exo += exo_jei
 
@@ -3809,7 +3818,8 @@ async def sim_exonerations(
         hs_50 = max(0, heures_supplementaires - 8) * taux_horaire * 1.50
         montant_hs_total = round(hs_25 + hs_50, 2)
         exo_tepa_sal = round(montant_hs_total * 0.1131, 2)
-        deduc_pat_par_h = 1.50 if effectif < 250 else 0.50
+        # Art. L.241-18 CSS : 1.50 EUR/h si < 20 sal, 0.50 EUR/h si 20-249 sal, 0 si >= 250
+        deduc_pat_par_h = 1.50 if effectif < 20 else (0.50 if effectif < 250 else 0.0)
         exo_tepa_pat = round(heures_supplementaires * deduc_pat_par_h, 2)
         exo_ir_hs = round(min(montant_hs_total, 7500 / 12), 2)
         exonerations.append({

@@ -681,22 +681,21 @@ class ContributionRules:
     ) -> dict:
         """Calcule l'exoneration ACRE (Aide a la Creation/Reprise d'Entreprise).
 
-        L'ACRE permet une exoneration de cotisations patronales et salariales
-        pendant 12 mois. Taux reduit de ~50% sur les cotisations SS
-        pour les revenus <= 1.2 SMIC. Degressive entre 1.2 et 1.6 SMIC.
-        Au-dela de 1.6 SMIC : pas d'exoneration.
+        Depuis le Decret 2019-1215, l'ACRE pour salaries = exoneration de 50%
+        des cotisations patronales SS pendant 12 mois, si remuneration < 75% PASS.
+        Ref: CSS art. L131-6-4 / L241-17, Decret 2019-1215.
         """
-        seuil_bas = SMIC_MENSUEL_BRUT * Decimal("1.2")
-        seuil_haut = SMIC_MENSUEL_BRUT * Decimal("1.6")
+        # Seuil d'eligibilite : 75% du PASS mensuel
+        seuil_75_pass = PASS_MENSUEL * Decimal("0.75")
 
         if brut_mensuel <= 0:
             return {"eligible": False, "exoneration_mensuelle": 0.0, "motif": "brut nul"}
 
-        if brut_mensuel > seuil_haut:
+        if brut_mensuel > seuil_75_pass:
             return {
                 "eligible": False,
                 "exoneration_mensuelle": 0.0,
-                "motif": f"Salaire > 1.6 SMIC ({float(seuil_haut):.2f} EUR)",
+                "motif": f"Salaire > 75% PASS ({float(seuil_75_pass):.2f} EUR)",
             }
 
         # Cotisations exonerables : maladie, vieillesse, AF, AT/MP, CSA
@@ -712,23 +711,17 @@ class ContributionRules:
         for ct in cotisations_exonerables:
             total_exonerable += self.calculer_montant_patronal(ct, brut_mensuel)
 
-        if brut_mensuel <= seuil_bas:
-            taux_exo = Decimal("1")  # 100% exoneration
-        else:
-            # Degressif lineaire entre 1.2 SMIC et 1.6 SMIC
-            taux_exo = (seuil_haut - brut_mensuel) / (seuil_haut - seuil_bas)
-            taux_exo = max(taux_exo, Decimal("0"))
-
+        # Exoneration = 50% des cotisations patronales eligibles
+        taux_exo = Decimal("0.50")
         exoneration = (total_exonerable * taux_exo).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
         return {
             "eligible": True,
             "exoneration_mensuelle": float(exoneration),
             "taux_exoneration": float(taux_exo),
-            "seuil_bas_1_2_smic": float(seuil_bas),
-            "seuil_haut_1_6_smic": float(seuil_haut),
+            "seuil_75_pass": float(seuil_75_pass),
             "cotisations_exonerables": float(total_exonerable),
-            "ref": "CSS art. L131-6-4 / L241-17",
+            "ref": "CSS art. L131-6-4 / L241-17, Decret 2019-1215",
         }
 
     def calculer_exoneration_apprenti(
@@ -761,7 +754,7 @@ class ContributionRules:
             exo_salariale += (assiette_exoneree * taux_s).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
         # Pas de CSG/CRDS sur la part <= 79% SMIC
-        taux_csg_crds = Decimal("0.098")  # 6.8% + 2.4% - deduction + 0.5% CRDS = ~9.7%
+        taux_csg_crds = Decimal("0.097")  # 6.8% + 2.4% + 0.5% CRDS = 9.70%
         exo_csg_crds = (assiette_exoneree * Decimal("0.9825") * taux_csg_crds).quantize(
             Decimal("0.01"), ROUND_HALF_UP
         )
