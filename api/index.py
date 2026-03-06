@@ -7,6 +7,7 @@ Deploiement : OVHcloud VPS (Docker) ou Vercel (serverless).
 """
 
 import contextvars
+import html as html_mod
 import io
 import json
 import os
@@ -21,6 +22,11 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
+
+
+def _esc(val) -> str:
+    """Echappe une valeur pour insertion sure dans du HTML."""
+    return html_mod.escape(str(val)) if val else ""
 
 # Contexte de la requete courante pour tracabilite multi-utilisateur
 _current_request: contextvars.ContextVar[Optional["Request"]] = contextvars.ContextVar("_current_request", default=None)
@@ -477,24 +483,14 @@ def log_action(profil_email: str, action: str, details: str = "", user_override:
 @app.get("/api/health")
 async def health_check():
     """Endpoint de sante pour Docker HEALTHCHECK et monitoring OVH."""
-    checks = {"status": "ok", "version": "3.9.0", "env": "ovhcloud" if _IS_OVH else "vercel"}
+    checks = {"status": "ok", "version": "3.9.0"}
     try:
         db = get_db()
         checks["database"] = "ok"
     except Exception as e:
-        checks["database"] = f"error: {str(e)}"
+        checks["database"] = "error"
         checks["status"] = "degraded"
-    if _IS_OVH:
-        checks["persistence"] = "active" if _persist else "fallback_memory"
-        checks["data_dir"] = str(_DATA_DIR)
-        checks["data_writable"] = os.access(str(_DATA_DIR), os.W_OK)
-        try:
-            stats = get_data_stats()
-            checks["data_stats"] = stats
-        except Exception:
-            pass
-    checks["max_files"] = _MAX_FILES
-    checks["max_upload_mb"] = _MAX_UPLOAD_MB
+        logger.warning("Health check database error: %s", e)
     return checks
 
 
@@ -1832,6 +1828,10 @@ async def analyser_documents(
             safe_name = Path(raw_name).name if raw_name else ""
             if not safe_name or safe_name.startswith("."):
                 safe_name = f"upload_{len(chemins)}"
+            # Securite : valider l'extension du fichier
+            file_ext = Path(safe_name).suffix.lower()
+            if file_ext and file_ext not in SUPPORTED_EXTENSIONS:
+                raise HTTPException(400, f"Extension '{file_ext}' non supportee. Extensions acceptees: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
             # Eviter les collisions si deux fichiers ont le meme nom
             chemin = Path(td) / safe_name
             if chemin.exists():
@@ -6916,11 +6916,11 @@ td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
 .footer{{text-align:center;font-size:8pt;color:#94a3b8;margin-top:30px;border-top:1px solid #e2e8f0;padding-top:10px}}</style></head><body>"""
     if ent.get("nom_entreprise"):
         html += f"""<div style="text-align:center;border-bottom:2px solid #1e40af;padding-bottom:12px;margin-bottom:16px">
-<h1 style="margin:0">{ent.get("nom_entreprise","")}</h1>
-<p style="color:#64748b;font-size:9pt">{ent.get("forme_juridique","")} - {ent.get("adresse","")}</p>
-<p style="color:#64748b;font-size:9pt">SIRET: {ent.get("siret","")} | {ent.get("telephone","")}</p></div>"""
-    html += f"<h1>{titre}</h1>"
-    html += f'<p style="text-align:center;color:#64748b">Date: {date_str} | {nb_fichiers} fichier(s) | Operateur: {user.get("prenom","")} {user.get("nom","")}</p>'
+<h1 style="margin:0">{_esc(ent.get("nom_entreprise",""))}</h1>
+<p style="color:#64748b;font-size:9pt">{_esc(ent.get("forme_juridique",""))} - {_esc(ent.get("adresse",""))}</p>
+<p style="color:#64748b;font-size:9pt">SIRET: {_esc(ent.get("siret",""))} | {_esc(ent.get("telephone",""))}</p></div>"""
+    html += f"<h1>{_esc(titre)}</h1>"
+    html += f'<p style="text-align:center;color:#64748b">Date: {_esc(date_str)} | {nb_fichiers} fichier(s) | Operateur: {_esc(user.get("prenom",""))} {_esc(user.get("nom",""))}</p>'
     html += f'<div class="score"><div style="font-size:2.5em;font-weight:800;color:#1e40af">{conformite}%</div><div>Score de conformite</div></div>'
     html += f"<h2>Synthese</h2><table><tr><th>Indicateur</th><th>Valeur</th></tr>"
     html += f"<tr><td>Anomalies detectees</td><td>{len(constats)}</td></tr>"
@@ -6932,23 +6932,23 @@ td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:9pt}}
         for c in constats:
             sev = c.get("severite", "basse")
             cls = "high" if sev == "haute" else ("med" if sev == "moyenne" else "low")
-            html += f'<tr><td>{c.get("titre","")}</td><td><span class="badge {cls}">{sev}</span></td>'
-            html += f'<td style="text-align:right">{abs(c.get("montant_impact",0)):.2f} EUR</td><td>{c.get("categorie","")}</td></tr>'
+            html += f'<tr><td>{_esc(c.get("titre",""))}</td><td><span class="badge {cls}">{_esc(sev)}</span></td>'
+            html += f'<td style="text-align:right">{abs(c.get("montant_impact",0)):.2f} EUR</td><td>{_esc(c.get("categorie",""))}</td></tr>'
         html += "</table>"
         html += "<h2>Detail des anomalies</h2>"
         for i, c in enumerate(constats):
             html += f'<div style="border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin:8px 0">'
-            html += f'<strong>{i+1}. {c.get("titre","")}</strong>'
-            html += f'<p style="color:#64748b;margin:4px 0">{c.get("description","")}</p>'
+            html += f'<strong>{i+1}. {_esc(c.get("titre",""))}</strong>'
+            html += f'<p style="color:#64748b;margin:4px 0">{_esc(c.get("description",""))}</p>'
             if c.get("reference_legale"):
-                html += f'<p style="font-size:9pt;color:#64748b"><em>Ref: {c["reference_legale"]}</em></p>'
+                html += f'<p style="font-size:9pt;color:#64748b"><em>Ref: {_esc(c["reference_legale"])}</em></p>'
             if c.get("recommandation"):
-                html += f'<p style="color:#1e40af"><em>Action: {c["recommandation"]}</em></p>'
+                html += f'<p style="color:#1e40af"><em>Action: {_esc(c["recommandation"])}</em></p>'
             html += "</div>"
     if recommandations:
         html += "<h2>Recommandations</h2><ol>"
         for r in recommandations:
-            html += f'<li>{r.get("description", r.get("titre", ""))}</li>'
+            html += f'<li>{_esc(r.get("description", r.get("titre", "")))}</li>'
         html += "</ol>"
     html += f'<div class="footer">Document genere par NormaCheck v3.9.0 le {date_str} - Non opposable aux administrations (art. L.243-6-3 CSS)</div>'
     html += "</body></html>"
@@ -8279,9 +8279,9 @@ async def inviter_collaborateur(
     current = get_optional_user(request)
     inviter_email = current["email"] if current else "utilisateur"
     inviter_tenant = current.get("tenant_id", "") if current else ""
-    token = str(uuid.uuid4())[:12]
+    token = str(uuid.uuid4())
     inv = {
-        "id": str(uuid.uuid4())[:8],
+        "id": str(uuid.uuid4()),
         "email": email_invite,
         "role": role,
         "token": token,
@@ -8327,6 +8327,8 @@ async def finaliser_invitation(
     mot_de_passe: str = Form(...),
     confirm: str = Form(""),
 ):
+    if confirm and mot_de_passe != confirm:
+        return HTMLResponse("<h2>Les mots de passe ne correspondent pas.</h2>", 400)
     for inv in _invitations:
         if inv["token"] == token:
             if inv["statut"] == "active":
@@ -8847,16 +8849,16 @@ async def document_contrat(contrat_id: str):
     header_html = ""
     if ent.get("nom_entreprise"):
         header_html = f"""<div style="text-align:center;margin-bottom:30px;border-bottom:2px solid #1e40af;padding-bottom:20px">
-<h1 style="color:#1e40af;margin:0">{ent.get("nom_entreprise","")}</h1>
-<p style="color:#64748b;margin:4px 0">{ent.get("forme_juridique","")} - Capital: {ent.get("capital","")}</p>
-<p style="color:#64748b;margin:4px 0">{ent.get("adresse","")}</p>
-<p style="color:#64748b;margin:4px 0">SIRET: {ent.get("siret","")} - NAF: {ent.get("code_naf","")}</p>
-<p style="color:#64748b;margin:4px 0">Tel: {ent.get("telephone","")} - Email: {ent.get("email","")}</p>
+<h1 style="color:#1e40af;margin:0">{_esc(ent.get("nom_entreprise",""))}</h1>
+<p style="color:#64748b;margin:4px 0">{_esc(ent.get("forme_juridique",""))} - Capital: {_esc(ent.get("capital",""))}</p>
+<p style="color:#64748b;margin:4px 0">{_esc(ent.get("adresse",""))}</p>
+<p style="color:#64748b;margin:4px 0">SIRET: {_esc(ent.get("siret",""))} - NAF: {_esc(ent.get("code_naf",""))}</p>
+<p style="color:#64748b;margin:4px 0">Tel: {_esc(ent.get("telephone",""))} - Email: {_esc(ent.get("email",""))}</p>
 </div>"""
 
     mentions_html = ""
     for m in contrat.get("mentions_legales", []):
-        mentions_html += f"<li>{m}</li>"
+        mentions_html += f"<li>{_esc(m)}</li>"
 
     type_titre = contrat["type_contrat"]
     if type_titre == "CDI":
@@ -8865,7 +8867,7 @@ async def document_contrat(contrat_id: str):
         type_titre = "Contrat de travail a duree determinee"
 
     html = f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
-<title>Contrat de travail - {contrat["prenom_salarie"]} {contrat["nom_salarie"]}</title>
+<title>Contrat de travail - {_esc(contrat["prenom_salarie"])} {_esc(contrat["nom_salarie"])}</title>
 <style>
 body{{font-family:'Segoe UI',system-ui,sans-serif;max-width:800px;margin:0 auto;padding:40px;color:#1e293b;line-height:1.7}}
 h1{{color:#1e40af;text-align:center;font-size:1.4em}} h2{{color:#1e40af;font-size:1.1em;margin-top:24px;border-bottom:1px solid #e2e8f0;padding-bottom:6px}}
@@ -8881,21 +8883,21 @@ ul{{padding-left:20px}} li{{margin:6px 0}}
 </style></head><body>
 <button class="print-btn" onclick="window.print()">Imprimer / PDF</button>
 {header_html}
-<h1>{type_titre}</h1>
-<p style="text-align:center;color:#64748b">Fait le {contrat.get("date_creation","")[:10]}</p>
+<h1>{_esc(type_titre)}</h1>
+<p style="text-align:center;color:#64748b">Fait le {_esc(contrat.get("date_creation","")[:10])}</p>
 
 <h2>Article 1 - Parties</h2>
 <div class="info-grid">
-<div class="info-item"><label>Employeur</label><span>{ent.get("nom_entreprise","[A renseigner dans Configuration]")}</span></div>
-<div class="info-item"><label>Salarie(e)</label><span>{contrat["prenom_salarie"]} {contrat["nom_salarie"]}</span></div>
+<div class="info-item"><label>Employeur</label><span>{_esc(ent.get("nom_entreprise","[A renseigner dans Configuration]"))}</span></div>
+<div class="info-item"><label>Salarie(e)</label><span>{_esc(contrat["prenom_salarie"])} {_esc(contrat["nom_salarie"])}</span></div>
 </div>
 
 <h2>Article 2 - Engagement</h2>
 <div class="info-grid">
-<div class="info-item"><label>Poste</label><span>{contrat["poste"]}</span></div>
-<div class="info-item"><label>Type de contrat</label><span>{contrat["type_contrat"]}</span></div>
-<div class="info-item"><label>Date de debut</label><span>{contrat["date_debut"]}</span></div>
-<div class="info-item"><label>Date de fin</label><span>{contrat.get("date_fin") or "Indeterminee"}</span></div>
+<div class="info-item"><label>Poste</label><span>{_esc(contrat["poste"])}</span></div>
+<div class="info-item"><label>Type de contrat</label><span>{_esc(contrat["type_contrat"])}</span></div>
+<div class="info-item"><label>Date de debut</label><span>{_esc(contrat["date_debut"])}</span></div>
+<div class="info-item"><label>Date de fin</label><span>{_esc(contrat.get("date_fin") or "Indeterminee")}</span></div>
 </div>
 
 <h2>Article 3 - Remuneration</h2>
@@ -12227,7 +12229,7 @@ async def creer_signature(
     doc_hash = hashlib.sha256(doc_hash_input.encode()).hexdigest()
 
     sig = {
-        "id": str(uuid.uuid4())[:12],
+        "id": str(uuid.uuid4()),
         "document_id": document_id,
         "document_nom": document_nom,
         "signataire_nom": signataire_nom,
