@@ -5981,6 +5981,61 @@ async def rechercher_subventions(
     # Filtrage : ne garder que les aides eligible = True
     aides_eligibles = [a for a in toutes_aides if a.get("eligible")]
 
+    # ============================================================
+    # REGLES DE NON-CUMUL ENTRE SUBVENTIONS
+    # Certaines aides ne sont pas cumulables entre elles.
+    # On marque les incompatibilites et on calcule le montant max realiste.
+    # ============================================================
+    _NON_CUMUL_SUBVENTIONS = {
+        # CIR et CII : cumulables entre eux mais pas sur les memes depenses
+        "cir_cii": {
+            "ids": ["cir", "cii"],
+            "regle": "Le CIR et le CII sont cumulables, mais pas sur les memes depenses. Les depenses eligibles au CII ne doivent pas etre declarees au CIR.",
+        },
+        # JEI et ACRE : non cumulables
+        "jei_acre": {
+            "ids": ["jei", "jeic", "acre"],
+            "regle": "L'exoneration JEI/JEIC n'est pas cumulable avec l'ACRE. Seule l'aide la plus avantageuse s'applique.",
+            "exclusif": True,
+        },
+        # Aides de zone : mutuellement exclusives
+        "zones": {
+            "ids": ["zrr", "zfu", "qpv", "ber", "afr", "zrd"],
+            "regle": "Les exonerations de zone (ZRR, ZFU-TE, QPV, BER, AFR, ZRD) sont mutuellement exclusives. Une seule peut s'appliquer.",
+            "exclusif": True,
+        },
+        # Reduction generale (Fillon) vs exonerations specifiques
+        "fillon_vs_specifiques": {
+            "ids": ["fillon", "jei", "jeic", "acre", "zrr", "zfu", "qpv"],
+            "regle": "La reduction generale (ex-Fillon) n'est pas cumulable avec les exonerations specifiques (JEI, ACRE, exonerations de zone).",
+            "exclusif": True,
+        },
+    }
+
+    # Marquer les aides avec leurs incompatibilites
+    avertissements_non_cumul = []
+    ids_eligibles = {a["id"] for a in aides_eligibles}
+
+    for regle_nom, regle in _NON_CUMUL_SUBVENTIONS.items():
+        ids_concernes = [aid_id for aid_id in regle["ids"] if aid_id in ids_eligibles]
+        if len(ids_concernes) >= 2:
+            noms_concernes = [a["nom"] for a in aides_eligibles if a["id"] in ids_concernes]
+            avertissement = {
+                "type": "non_cumul",
+                "regle": regle["regle"],
+                "aides_concernees": noms_concernes,
+                "exclusif": regle.get("exclusif", False),
+            }
+            avertissements_non_cumul.append(avertissement)
+
+            # Marquer les aides individuellement
+            for a in aides_eligibles:
+                if a["id"] in ids_concernes:
+                    if "avertissements" not in a:
+                        a["avertissements"] = []
+                    a["avertissements"].append(regle["regle"])
+                    a["non_cumulable_avec"] = [n for n in noms_concernes if n != a["nom"]]
+
     # Calculer un score de correspondance aux criteres utilisateur
     criteres_actifs = []
     if innovation: criteres_actifs.append("innovation")
@@ -6021,14 +6076,68 @@ async def rechercher_subventions(
 
     aides_eligibles.sort(key=_sort_key)
 
-    # Statistiques
-    montant_total = 0
+    # ============================================================
+    # CALCUL DU MONTANT POTENTIEL MAX REALISTE
+    # Tient compte des regles de non-cumul pour ne pas additionner
+    # des aides mutuellement exclusives.
+    # ============================================================
+    montant_total_brut = 0  # Somme brute de tous les montants estimes
+    montant_total_realiste = 0  # Somme apres deduction des non-cumuls
     nb_aides_chiffrees = 0
+
+    # Calculer le montant brut
     for a in aides_eligibles:
         est = a.get("montant_estime")
         if est and isinstance(est, (int, float)):
-            montant_total += est
+            montant_total_brut += est
             nb_aides_chiffrees += 1
+
+    # Calculer le montant realiste : pour les groupes exclusifs, ne garder que le max
+    ids_deja_comptes = set()
+    for regle_nom, regle in _NON_CUMUL_SUBVENTIONS.items():
+        if not regle.get("exclusif"):
+            continue
+        ids_concernes = [aid_id for aid_id in regle["ids"] if aid_id in ids_eligibles]
+        if len(ids_concernes) >= 2:
+            # Trouver le montant max du groupe
+            montants_groupe = []
+            for a in aides_eligibles:
+                if a["id"] in ids_concernes:
+                    est = a.get("montant_estime")
+                    if est and isinstance(est, (int, float)):
+                        montants_groupe.append((a["id"], est))
+            if montants_groupe:
+                montants_groupe.sort(key=lambda x: x[1], reverse=True)
+                # Garder le meilleur, retrancher les autres
+                for aid_id, _ in montants_groupe:
+                    ids_deja_comptes.add(aid_id)
+
+    # Montant realiste = somme de toutes les aides - les doublons des groupes exclusifs
+    montant_total_realiste = 0
+    groupes_exclusifs_traites = set()
+    for a in aides_eligibles:
+        est = a.get("montant_estime")
+        if not est or not isinstance(est, (int, float)):
+            continue
+        # Verifier si l'aide est dans un groupe exclusif
+        in_exclusif = False
+        for regle_nom, regle in _NON_CUMUL_SUBVENTIONS.items():
+            if not regle.get("exclusif"):
+                continue
+            if a["id"] in regle["ids"]:
+                if regle_nom not in groupes_exclusifs_traites:
+                    # Premier du groupe : compter le max
+                    max_est = max(
+                        (aa.get("montant_estime", 0) for aa in aides_eligibles
+                         if aa["id"] in regle["ids"] and isinstance(aa.get("montant_estime"), (int, float))),
+                        default=0,
+                    )
+                    montant_total_realiste += max_est
+                    groupes_exclusifs_traites.add(regle_nom)
+                in_exclusif = True
+                break
+        if not in_exclusif:
+            montant_total_realiste += est
 
     niveaux = {}
     categories = {}
@@ -6040,8 +6149,15 @@ async def rechercher_subventions(
 
     return {
         "total": len(aides_eligibles),
-        "montant_potentiel_estime": round(montant_total, 2),
+        "montant_potentiel_estime": round(montant_total_brut, 2),
+        "montant_potentiel_max_realiste": round(montant_total_realiste, 2),
         "nb_aides_chiffrees": nb_aides_chiffrees,
+        "avertissement_cumul": (
+            "Attention : certaines aides ne sont pas cumulables entre elles. "
+            "Le montant potentiel max realiste tient compte de ces regles de non-cumul "
+            "et ne retient que l'aide la plus avantageuse dans chaque groupe exclusif."
+        ) if avertissements_non_cumul else None,
+        "regles_non_cumul": avertissements_non_cumul if avertissements_non_cumul else [],
         "par_niveau": niveaux,
         "par_categorie": categories,
         "par_type": types,

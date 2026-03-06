@@ -37,3 +37,4 @@ pillow-heif>=0.16.0
 
 # Document parsing
 python-docx>=1.0.0
+olefile>=0.47

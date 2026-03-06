@@ -188,7 +188,7 @@ def save_uploaded_file(filename: str, content: bytes, analysis_id: str = "") -> 
     if encryption_key:
         try:
             from urssaf_analyzer.security.encryption import chiffrer_donnees
-            encrypted = chiffrer_donnees(content, encryption_key)
+            encrypted = chiffrer_donnees(content, encryption_key, contexte=filename)
             dest = date_dir / (filename + ".enc")
             dest.write_bytes(encrypted)
             return dest
