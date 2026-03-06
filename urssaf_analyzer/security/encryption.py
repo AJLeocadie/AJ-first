@@ -218,13 +218,16 @@ def chiffrer_champ(valeur: str, password: str) -> str:
     if not valeur or not password:
         return valeur
     if not HAS_CRYPTOGRAPHY:
-        return valeur
+        logger.error("SECURITE: chiffrement impossible - module 'cryptography' manquant. Donnee sensible non protegee.")
+        raise EncryptionError("Le module 'cryptography' est requis pour chiffrer les donnees sensibles.")
     try:
         encrypted = chiffrer_donnees(valeur.encode("utf-8"), password)
         return "ENC:" + base64.urlsafe_b64encode(encrypted).decode("ascii")
+    except EncryptionError:
+        raise
     except Exception as e:
-        logger.warning("Echec chiffrement champ: %s", e)
-        return valeur
+        logger.error("SECURITE: echec chiffrement champ - %s", e)
+        raise EncryptionError(f"Echec du chiffrement: {e}") from e
 
 
 def dechiffrer_champ(valeur: str, password: str) -> str:

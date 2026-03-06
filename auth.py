@@ -170,9 +170,9 @@ def create_user(email: str, password: str, nom: str, prenom: str,
     if role not in VALID_ROLES and role != "admin":
         raise ValueError(f"Role invalide. Choisissez parmi : {', '.join(VALID_ROLES)}")
     if not tenant_id:
-        tenant_id = str(uuid.uuid4())[:8]
+        tenant_id = str(uuid.uuid4())
     user = {
-        "id": str(uuid.uuid4())[:8],
+        "id": str(uuid.uuid4()),
         "email": email,
         "nom": nom,
         "prenom": prenom,
@@ -209,6 +209,8 @@ def get_user(email: str) -> Optional[dict]:
 
 
 def update_user_role(email: str, new_role: str) -> Optional[dict]:
+    if new_role not in VALID_ROLES and new_role != "admin":
+        raise ValueError(f"Role invalide. Choisissez parmi : {', '.join(VALID_ROLES)}")
     email = email.strip().lower()
     user = _users.get(email)
     if not user:
@@ -247,6 +249,15 @@ def _save_users():
 
 _DEFAULT_ADMIN_EMAIL = os.getenv("NORMACHECK_ADMIN_EMAIL", "admin@normacheck.fr")
 _DEFAULT_ADMIN_PASSWORD = os.getenv("NORMACHECK_ADMIN_PASSWORD", "Admin2026!Norma")
+_ADMIN_PW_IS_DEFAULT = os.getenv("NORMACHECK_ADMIN_PASSWORD") is None
+if _ADMIN_PW_IS_DEFAULT and os.getenv("NORMACHECK_ENV") in ("production", "staging"):
+    import logging as _logging
+    _logging.getLogger("normacheck").warning(
+        "SECURITE: NORMACHECK_ADMIN_PASSWORD non defini en %s. "
+        "Le mot de passe admin par defaut sera utilise. "
+        "Definissez NORMACHECK_ADMIN_PASSWORD pour securiser le compte admin.",
+        os.getenv("NORMACHECK_ENV"),
+    )
 
 def bootstrap_admin():
     """Cree un compte admin par defaut si aucun admin n'existe."""
@@ -261,7 +272,7 @@ def bootstrap_admin():
         _save_users()
         return _safe_user(_users[email])
     user = {
-        "id": str(uuid.uuid4())[:8],
+        "id": str(uuid.uuid4()),
         "email": email,
         "nom": "Admin",
         "prenom": "NormaCheck",

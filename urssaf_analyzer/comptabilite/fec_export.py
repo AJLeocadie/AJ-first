@@ -7,7 +7,7 @@ Nom de fichier conventionnel : {SIREN}FEC{YYYYMMDD}.txt
 
 import io
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, Ecriture, TypeJournal
 
