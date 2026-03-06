@@ -97,18 +97,26 @@ class SupabaseClient:
         return result.data[0] if result.data else {}
 
     def get_profil(self, profil_id: str) -> Optional[dict]:
+        if not self.client:
+            return None
         result = self.client.table("ua_profils").select("*").eq("id", profil_id).execute()
         return result.data[0] if result.data else None
 
     def get_profil_par_email(self, email: str) -> Optional[dict]:
+        if not self.client:
+            return None
         result = self.client.table("ua_profils").select("*").eq("email", email).execute()
         return result.data[0] if result.data else None
 
     def lister_profils(self) -> list[dict]:
+        if not self.client:
+            return []
         result = self.client.table("ua_profils").select("*").order("nom").execute()
         return result.data or []
 
     def maj_profil(self, profil_id: str, data: dict) -> dict:
+        if not self.client:
+            return {"error": "Supabase non connecte"}
         result = self.client.table("ua_profils").update(_serialize(data)).eq("id", profil_id).execute()
         return result.data[0] if result.data else {}
 
@@ -123,14 +131,20 @@ class SupabaseClient:
         return result.data[0] if result.data else {}
 
     def get_entreprise(self, entreprise_id: str) -> Optional[dict]:
+        if not self.client:
+            return None
         result = self.client.table("ua_entreprises").select("*").eq("id", entreprise_id).execute()
         return result.data[0] if result.data else None
 
     def get_entreprise_par_siret(self, siret: str) -> Optional[dict]:
+        if not self.client:
+            return None
         result = self.client.table("ua_entreprises").select("*").eq("siret", siret).execute()
         return result.data[0] if result.data else None
 
     def rechercher_entreprises(self, terme: str) -> list[dict]:
+        if not self.client:
+            return []
         # Echapper les caracteres speciaux PostgREST pour eviter l'injection
         import re
         terme_safe = re.sub(r'[%_\\,.()\[\]{}]', '', terme).strip()
@@ -151,10 +165,14 @@ class SupabaseClient:
         return result.data or []
 
     def lister_entreprises(self) -> list[dict]:
+        if not self.client:
+            return []
         result = self.client.table("ua_entreprises").select("*").eq("actif", True).order("raison_sociale").execute()
         return result.data or []
 
     def maj_entreprise(self, entreprise_id: str, data: dict) -> dict:
+        if not self.client:
+            return {"error": "Supabase non connecte"}
         result = self.client.table("ua_entreprises").update(_serialize(data)).eq("id", entreprise_id).execute()
         return result.data[0] if result.data else {}
 
@@ -169,6 +187,8 @@ class SupabaseClient:
         return result.data[0] if result.data else {}
 
     def get_profils_independants(self, profil_id: str) -> list[dict]:
+        if not self.client:
+            return []
         result = (
             self.client.table("ua_profils_independants")
             .select("*")
@@ -179,6 +199,8 @@ class SupabaseClient:
         return result.data or []
 
     def maj_profil_independant(self, independant_id: str, data: dict) -> dict:
+        if not self.client:
+            return {"error": "Supabase non connecte"}
         result = (
             self.client.table("ua_profils_independants")
             .update(_serialize(data))
@@ -192,12 +214,16 @@ class SupabaseClient:
     # ============================
 
     def assigner_entreprise(self, profil_id: str, entreprise_id: str, role: str = "gestionnaire") -> dict:
+        if not self.client:
+            return {"error": "Supabase non connecte"}
         data = {"profil_id": profil_id, "entreprise_id": entreprise_id, "role_sur_entreprise": role}
         result = self.client.table("ua_portefeuille").upsert(data).execute()
         return result.data[0] if result.data else {}
 
     def get_portefeuille(self, profil_id: str) -> list[dict]:
         """Retourne tout le portefeuille d'un utilisateur : entreprises + profils independants."""
+        if not self.client:
+            return {"entreprises": [], "profils_independants": []}
         entreprises = (
             self.client.table("ua_portefeuille")
             .select("*, ua_entreprises(*)")
@@ -216,6 +242,8 @@ class SupabaseClient:
 
     def get_baremes(self, annee: int) -> list[dict]:
         """Recupere les baremes pour une annee donnee."""
+        if not self.client:
+            return []
         result = (
             self.client.table("ua_baremes_historique")
             .select("*")
@@ -227,6 +255,8 @@ class SupabaseClient:
 
     def get_plafonds(self, annee: int) -> list[dict]:
         """Recupere les plafonds pour une annee donnee."""
+        if not self.client:
+            return []
         result = (
             self.client.table("ua_plafonds_historique")
             .select("*")
@@ -237,6 +267,8 @@ class SupabaseClient:
 
     def get_annees_disponibles(self) -> list[int]:
         """Liste les annees disponibles en base."""
+        if not self.client:
+            return []
         result = (
             self.client.table("ua_baremes_historique")
             .select("annee")
@@ -248,6 +280,8 @@ class SupabaseClient:
 
     def get_reglementation(self, annee: int, domaine: str = None) -> list[dict]:
         """Recupere la reglementation applicable pour une annee."""
+        if not self.client:
+            return []
         query = self.client.table("ua_reglementation").select("*").eq("annee_effet", annee)
         if domaine:
             query = query.eq("domaine", domaine)
@@ -259,10 +293,14 @@ class SupabaseClient:
     # ============================
 
     def enregistrer_analyse(self, data: dict) -> dict:
+        if not self.client:
+            return {"error": "Supabase non connecte"}
         result = self.client.table("ua_analyses").insert(_serialize(data)).execute()
         return result.data[0] if result.data else {}
 
     def get_historique_analyses(self, entreprise_id: str = None, profil_id: str = None, limit: int = 50) -> list[dict]:
+        if not self.client:
+            return []
         query = self.client.table("ua_analyses").select("*")
         if entreprise_id:
             query = query.eq("entreprise_id", entreprise_id)
@@ -348,6 +386,8 @@ class SupabaseClient:
 
     def get_historique_patches(self, limit: int = 24) -> list[dict]:
         """Historique des patches appliques."""
+        if not self.client:
+            return []
         result = (
             self.client.table("ua_patches_log")
             .select("*")

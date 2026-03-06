@@ -161,14 +161,18 @@ def create_user(email: str, password: str, nom: str, prenom: str,
         raise ValueError(f"Mot de passe trop court (min. {MIN_PASSWORD_LENGTH} caracteres)")
     if password.lower() == password or password.upper() == password:
         raise ValueError("Le mot de passe doit contenir majuscules et minuscules")
+    if not any(c.isdigit() for c in password):
+        raise ValueError("Le mot de passe doit contenir au moins un chiffre")
+    if all(c.isalnum() for c in password):
+        raise ValueError("Le mot de passe doit contenir au moins un caractere special")
     if offre not in VALID_OFFERS:
         raise ValueError(f"Offre invalide. Choisissez parmi : {', '.join(VALID_OFFERS)}")
     if role not in VALID_ROLES and role != "admin":
         raise ValueError(f"Role invalide. Choisissez parmi : {', '.join(VALID_ROLES)}")
     if not tenant_id:
-        tenant_id = str(uuid.uuid4())[:8]
+        tenant_id = str(uuid.uuid4())
     user = {
-        "id": str(uuid.uuid4())[:8],
+        "id": str(uuid.uuid4()),
         "email": email,
         "nom": nom,
         "prenom": prenom,
@@ -205,6 +209,8 @@ def get_user(email: str) -> Optional[dict]:
 
 
 def update_user_role(email: str, new_role: str) -> Optional[dict]:
+    if new_role not in VALID_ROLES and new_role != "admin":
+        raise ValueError(f"Role invalide. Choisissez parmi : {', '.join(VALID_ROLES)}")
     email = email.strip().lower()
     user = _users.get(email)
     if not user:
@@ -243,6 +249,15 @@ def _save_users():
 
 _DEFAULT_ADMIN_EMAIL = os.getenv("NORMACHECK_ADMIN_EMAIL", "admin@normacheck.fr")
 _DEFAULT_ADMIN_PASSWORD = os.getenv("NORMACHECK_ADMIN_PASSWORD", "Admin2026!Norma")
+_ADMIN_PW_IS_DEFAULT = os.getenv("NORMACHECK_ADMIN_PASSWORD") is None
+if _ADMIN_PW_IS_DEFAULT and os.getenv("NORMACHECK_ENV") in ("production", "staging"):
+    import logging as _logging
+    _logging.getLogger("normacheck").warning(
+        "SECURITE: NORMACHECK_ADMIN_PASSWORD non defini en %s. "
+        "Le mot de passe admin par defaut sera utilise. "
+        "Definissez NORMACHECK_ADMIN_PASSWORD pour securiser le compte admin.",
+        os.getenv("NORMACHECK_ENV"),
+    )
 
 def bootstrap_admin():
     """Cree un compte admin par defaut si aucun admin n'existe."""
@@ -257,7 +272,7 @@ def bootstrap_admin():
         _save_users()
         return _safe_user(_users[email])
     user = {
-        "id": str(uuid.uuid4())[:8],
+        "id": str(uuid.uuid4()),
         "email": email,
         "nom": "Admin",
         "prenom": "NormaCheck",
@@ -355,13 +370,12 @@ def require_role(*allowed_roles):
 # EMAIL VERIFICATION
 # =========================================
 
-import random
-import string
+import secrets as _secrets
 
 def generate_verification_code(email: str) -> str:
-    """Genere un code de verification a 6 chiffres pour l'email."""
+    """Genere un code de verification a 6 chiffres pour l'email (CSPRNG)."""
     email = email.strip().lower()
-    code = ''.join(random.choices(string.digits, k=6))
+    code = ''.join(_secrets.choice('0123456789') for _ in range(6))
     _verification_codes[email] = {
         "code": code,
         "expires": time.time() + VERIFICATION_CODE_EXPIRY,
@@ -383,7 +397,7 @@ def verify_email_code(email: str, code: str) -> bool:
     if entry["attempts"] > VERIFICATION_MAX_ATTEMPTS:
         del _verification_codes[email]
         return False
-    if entry["code"] != code:
+    if not hmac.compare_digest(entry["code"], code):
         return False
     # Code valide: marquer l'email comme verifie et nettoyer
     del _verification_codes[email]

@@ -124,9 +124,8 @@ class TestDeterminerCompteCharge:
         assert determiner_compte_charge("vente produits", "facture_vente") == "707000"
 
     def test_vente_prestation(self):
-        # "prestation" matche d'abord le 604000 (achat) avant de tester le contexte vente
-        # Le code verifie les mots-cles generiques avant le type de document
-        assert determiner_compte_charge("prestation conseil", "facture_vente") == "604000"
+        # Les ventes doivent etre imputees en classe 7 (produits), pas en classe 6
+        assert determiner_compte_charge("prestation conseil", "facture_vente") == "706000"
 
     def test_salaire(self):
         assert determiner_compte_charge("salaire mensuel", "bulletin_paie") == "641100"

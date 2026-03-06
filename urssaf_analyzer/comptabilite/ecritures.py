@@ -61,7 +61,7 @@ class Ecriture:
     def est_equilibree(self) -> bool:
         total_debit = sum(l.debit for l in self.lignes)
         total_credit = sum(l.credit for l in self.lignes)
-        return abs(total_debit - total_credit) < Decimal("0.01")
+        return total_debit == total_credit
 
     @property
     def total_debit(self) -> Decimal:
@@ -202,7 +202,7 @@ class MoteurEcritures:
             if abs(ecart) >= Decimal("0.01"):
                 regle = REGLES_AFFECTATION.get(type_doc, {})
                 le = LigneEcriture(
-                    compte=regle.get("compte_defaut", "471000"),
+                    compte="658000",  # Charges diverses gestion courante (pas 471)
                     libelle="Ecart d'arrondi",
                     piece_ref=numero_piece,
                 )

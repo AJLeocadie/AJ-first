@@ -366,7 +366,7 @@ def calculer_cotisations_tns(
     })
 
     # --- CSG / CRDS ---
-    assiette_csg = r + sum(l["montant"] for l in lignes)  # R + cotisations obligatoires
+    assiette_csg = r + Decimal(str(sum(l["montant"] for l in lignes)))  # R + cotisations obligatoires
     csg_ded = (Decimal(str(assiette_csg)) * t.csg_deductible).quantize(Decimal("0.01"), ROUND_HALF_UP)
     csg_nd = (Decimal(str(assiette_csg)) * t.csg_non_deductible).quantize(Decimal("0.01"), ROUND_HALF_UP)
     crds_m = (Decimal(str(assiette_csg)) * t.crds).quantize(Decimal("0.01"), ROUND_HALF_UP)

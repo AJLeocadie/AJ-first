@@ -786,7 +786,7 @@ _RE_MONTANT_TTC = re.compile(
 
 # Contrat fields
 _RE_TYPE_CONTRAT = re.compile(
-    r"contrat\s*(?:[aà]\s*dur[eé]e\s*)?(ind[eé]termin[eé]e|d[eé]termin[eé]e|cdi|cdd)",
+    r"contrat\s+(?:de\s+travail\s+)?(?:[aà]\s+dur[eé]e\s+)?(ind[eé]termin[eé]e|d[eé]termin[eé]e|cdi|cdd)",
     re.IGNORECASE,
 )
 _RE_REMUNERATION = re.compile(
@@ -1945,10 +1945,10 @@ class PDFParser(BaseParser):
                 (r"accidents?\s*(?:du\s*)?travail", "nb_at"),
             ]:
                 m = re.search(label + r"\s*[:\s]*([\d\s]+(?:[.,]\d+)?)", texte, re.IGNORECASE)
-                if m:
+                if m and m.group(1):
                     try:
                         metadata[key] = float(m.group(1).replace(" ", "").replace(",", "."))
-                    except ValueError:
+                    except (ValueError, AttributeError):
                         pass
 
         elif doc_type == "rupture_conventionnelle":
@@ -1991,8 +1991,11 @@ class PDFParser(BaseParser):
                 (r"(?:budget\s*)?activites?\s*sociales|(?:budget\s*)?asc", "budget_asc"),
             ]:
                 m = re.search(label + r"\s*[:\s]*([\d\s]+[.,]\d{2})", texte, re.IGNORECASE)
-                if m:
-                    metadata[key] = float(_parse_montant_local(m.group(1)))
+                if m and m.group(1):
+                    try:
+                        metadata[key] = float(_parse_montant_local(m.group(1)))
+                    except (ValueError, AttributeError):
+                        pass
 
         elif doc_type == "france_travail":
             emp = self._extraire_employe(texte, doc_id)

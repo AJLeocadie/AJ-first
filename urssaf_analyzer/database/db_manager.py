@@ -363,8 +363,18 @@ _MIGRATION_V2_STEPS = [
 ]
 
 
+_VALID_TABLE_NAMES = {
+    "profils", "entreprises", "portefeuille", "analyses",
+    "documents_analyses", "veille_textes", "veille_alertes",
+    "baremes", "plafonds", "reglementation", "patches_log",
+    "profils_independants", "schema_version",
+}
+
+
 def _get_existing_columns(conn: sqlite3.Connection, table: str) -> set:
     """Retourne l'ensemble des noms de colonnes d'une table existante."""
+    if table not in _VALID_TABLE_NAMES:
+        raise ValueError(f"Nom de table invalide: {table}")
     try:
         cursor = conn.execute(f"PRAGMA table_info({table})")
         return {row[1] for row in cursor.fetchall()}

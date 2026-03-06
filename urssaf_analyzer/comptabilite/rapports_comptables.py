@@ -156,14 +156,42 @@ class GenerateurRapports:
         total_produits = sum(p["montant"] for p in produits.values())
         resultat = total_produits - total_charges
 
-        # Groupement par nature
-        charges_exploitation = {k: v for k, v in charges.items() if k < "660000"}
-        charges_financieres = {k: v for k, v in charges.items() if "660000" <= k < "670000"}
-        charges_exceptionnelles = {k: v for k, v in charges.items() if k >= "670000"}
+        # Groupement par nature (PCG art. 932-1)
+        # Charges financieres : 66xxxx et 686xxx (dotations financieres)
+        # Impots sur benefices : 695xxx (poste specifique, hors exceptionnel)
+        # Participation : 691xxx (poste specifique, hors exceptionnel)
+        charges_exploitation = {}
+        charges_financieres = {}
+        charges_exceptionnelles = {}
+        charges_impots_benefices = {}
+        charges_participation = {}
+        for k, v in charges.items():
+            if k.startswith("686"):
+                charges_financieres[k] = v
+            elif k.startswith("695"):
+                charges_impots_benefices[k] = v
+            elif k.startswith("691"):
+                charges_participation[k] = v
+            elif k < "660000":
+                charges_exploitation[k] = v
+            elif "660000" <= k < "670000":
+                charges_financieres[k] = v
+            elif k >= "670000":
+                charges_exceptionnelles[k] = v
 
-        produits_exploitation = {k: v for k, v in produits.items() if k < "760000"}
-        produits_financiers = {k: v for k, v in produits.items() if "760000" <= k < "770000"}
-        produits_exceptionnels = {k: v for k, v in produits.items() if k >= "770000"}
+        # Produits financiers : 76xxxx et 786xxx (reprises financieres)
+        produits_exploitation = {}
+        produits_financiers = {}
+        produits_exceptionnels = {}
+        for k, v in produits.items():
+            if k.startswith("786"):
+                produits_financiers[k] = v
+            elif k < "760000":
+                produits_exploitation[k] = v
+            elif "760000" <= k < "770000":
+                produits_financiers[k] = v
+            else:
+                produits_exceptionnels[k] = v
 
         return {
             "charges": {

@@ -16,10 +16,13 @@ markers = [
     "securite: tests de securite (ISO 27001)",
     "rgpd: tests de conformite RGPD (ISO 27701)",
     "certification: tests de certification readiness",
+    "e2e: tests end-to-end avec Playwright",
+    "integration: tests d'integration pipeline complet",
+    "bancaire: tests de fiabilite niveau bancaire",
 ]
 
 [tool.coverage.run]
-source = ["urssaf_analyzer"]
+source = ["urssaf_analyzer", "auth", "persistence"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
