@@ -15203,8 +15203,9 @@ if(cfg.forme_juridique){var sel=document.getElementById("sub-forme");for(var i=0
 }
 
 /* === VEILLE === */
+function _toggleBaremesDetails(btn,count){var el=document.getElementById("v-baremes-full");if(!el)return;if(el.style.display==="none"){el.style.display="block";btn.textContent="Masquer les details";}else{el.style.display="none";btn.textContent="Afficher tous les baremes ("+count+")";}}
 function loadVeille(){var a=document.getElementById("v-annee").value;document.getElementById("v-res").style.display="block";
-fetch("/api/veille/baremes/"+a).then(safeJson).then(function(b){var keys=Object.keys(b);var essentiels=["pass_annuel","pass_mensuel","smic_horaire","smic_mensuel","taux_maladie_patronal","taux_vieillesse_plafonnee_patronal","taux_af_patronal","taux_at_moyen","taux_chomage_patronal","taux_csg_deductible","taux_crds"];var h="<table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>";var hFull="";var nbShown=0;for(var i=0;i<keys.length;i++){var k=keys[i];var row="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+b[k]+"</td></tr>";if(essentiels.indexOf(k)>=0){h+=row;nbShown++;}else{hFull+=row;}}h+="</table>";if(hFull){h+="<div id='v-baremes-full' style='display:none'><table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>"+hFull+"</table></div>";h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick=\"var el=document.getElementById('v-baremes-full');if(el.style.display==='none'){el.style.display='block';this.textContent='Masquer les details';}else{el.style.display='none';this.textContent='Afficher tous les baremes ('+"+keys.length+"+')';}\">"+"Afficher tous les baremes ("+keys.length+")</button>";}document.getElementById("v-baremes").innerHTML=h;}).catch(function(){});
+fetch("/api/veille/baremes/"+a).then(safeJson).then(function(b){var keys=Object.keys(b);var essentiels=["pass_annuel","pass_mensuel","smic_horaire","smic_mensuel","taux_maladie_patronal","taux_vieillesse_plafonnee_patronal","taux_af_patronal","taux_at_moyen","taux_chomage_patronal","taux_csg_deductible","taux_crds"];var h="<table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>";var hFull="";var nbShown=0;for(var i=0;i<keys.length;i++){var k=keys[i];var row="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+b[k]+"</td></tr>";if(essentiels.indexOf(k)>=0){h+=row;nbShown++;}else{hFull+=row;}}h+="</table>";if(hFull){h+="<div id='v-baremes-full' style='display:none'><table><tr><th>Parametre</th><th class='num'>Valeur</th></tr>"+hFull+"</table></div>";h+="<button class='btn btn-s btn-sm' style='margin-top:8px' onclick='_toggleBaremesDetails(this,"+keys.length+")'>"+"Afficher tous les baremes ("+keys.length+")</button>";}document.getElementById("v-baremes").innerHTML=h;}).catch(function(){});
 fetch("/api/veille/legislation/"+a).then(safeJson).then(function(l){var h="<p style='margin-bottom:10px'><strong>"+l.description+"</strong></p>";var tx=l.textes_cles||[];for(var i=0;i<tx.length;i++){h+="<div class='al info' style='margin:4px 0'><span class='ai'>&#9878;</span><span><strong>"+tx[i].reference+"</strong> - "+tx[i].titre+"<br><small>"+tx[i].resume+"</small></span></div>";}document.getElementById("v-legis").innerHTML=h;}).catch(function(){});}
 function compAnnees(){var a2=parseInt(document.getElementById("v-annee").value),a1=a2-1;fetch("/api/veille/baremes/comparer/"+a1+"/"+a2).then(safeJson).then(function(d){if(!d.length){toast("Pas de differences.","info");return;}var h="<table><tr><th>Parametre</th><th class='num'>"+a1+"</th><th class='num'>"+a2+"</th><th>Evolution</th></tr>";for(var i=0;i<d.length;i++){h+="<tr><td>"+d[i].parametre+"</td><td class='num'>"+(d[i]["valeur_"+a1]||"-")+"</td><td class='num'>"+(d[i]["valeur_"+a2]||"-")+"</td><td>"+d[i].evolution+"</td></tr>";}h+="</table>";document.getElementById("v-comp").innerHTML=h;document.getElementById("v-comp-card").style.display="block";}).catch(function(e){toast(e.message);});}
 
@@ -15866,7 +15867,7 @@ var matches=list.filter(function(s){return(s.nom_complet||"").toLowerCase().inde
 if(!matches.length){box.innerHTML="";return;}
 var h="<div class='sug-list show' style='position:absolute;width:100%;background:var(--card-bg);border:1px solid var(--brd);border-radius:8px;box-shadow:var(--sh);max-height:200px;overflow-y:auto;z-index:100'>";
 for(var i=0;i<Math.min(matches.length,8);i++){var s=matches[i];
-h+="<div class='sug-item' style='padding:8px 12px;cursor:pointer;font-size:.85em;border-bottom:1px solid var(--brd)' data-val='"+_esc(s.nom_complet||s.id)+"' onmouseover='this.style.background=\"var(--bg2)\"' onmouseout='this.style.background=\"\"'><strong>"+_esc(s.nom_complet||s.id)+"</strong>"+(s.type_contrat?" <span style='color:var(--tx2);font-size:.8em'>"+_esc(s.type_contrat)+"</span>":"")+"</div>";}
+h+="<div class='sug-item' style='padding:8px 12px;cursor:pointer;font-size:.85em;border-bottom:1px solid var(--brd)' data-val='"+_esc(s.nom_complet||s.id)+"'><strong>"+_esc(s.nom_complet||s.id)+"</strong>"+(s.type_contrat?" <span style='color:var(--tx2);font-size:.8em'>"+_esc(s.type_contrat)+"</span>":"")+"</div>";}
 h+="</div>";box.innerHTML=h;
 box.querySelectorAll(".sug-item").forEach(function(el){el.addEventListener("click",function(){inp.value=el.getAttribute("data-val");box.innerHTML="";});});
 });
@@ -16077,6 +16078,7 @@ else if(_planningView==="annee")renderPlanningAnnee();}
 function _plFilter(){return(document.getElementById("rh-pl-filter")||{}).value||"";}
 function _plStatutFilter(){return(document.getElementById("rh-pl-statut-filter")||{}).value||"";}
 function _plFmtDate(d){return d.toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long",year:"numeric"});}
+function _plChangeStatut(sel){if(!sel.value)return;var fd=new FormData();fd.append("salarie_id",sel.getAttribute("data-sid"));fd.append("date",sel.getAttribute("data-date"));fd.append("statut",sel.value);rhPost("/api/rh/planning",fd,function(){toast("Statut modifie.","ok");renderPlanningView();});}
 function _plStatutBadge(st){var c=_statutColors[st]||"#94a3b8";var labels={"present":"Present","conge_cp":"Conge CP","conge_maladie":"Arret maladie","arret_maladie":"Arret maladie","arret_accident_travail":"AT","formation":"Formation","teletravail":"Teletravail"};return "<span style='background:"+c+";color:#fff;border-radius:4px;padding:1px 6px;font-size:.75em'>"+(labels[st]||st||"Present")+"</span>";}
 function _plSlotDiv(s){var tp=s.type_poste||s.type||"normal";var bg=_planningColors[tp]||"#3b82f6";var pid=s.id||"";var sid=s.salarie_id||"";var dt=s.date||"";var h="<div style='background:"+bg+";color:#fff;border-radius:4px;padding:2px 6px;margin:1px 0;font-size:.78em;display:inline-flex;align-items:center;gap:4px;position:relative' class='pl-slot'>"+(s.heure_debut||"")+"-"+(s.heure_fin||"");if(pid){h+=" <span data-pl-action='delete' data-pl-id='"+pid+"' style='cursor:pointer;opacity:.7;font-size:.9em' title='Supprimer'>&#10005;</span>";}h+="</div>";return h;}
 
@@ -16117,7 +16119,7 @@ h+="</tr>";
 var salaries={};for(var i=0;i<list.length;i++){var p=list[i];var sid=p.salarie_nom||p.salarie_id||"?";if(filter&&sid.toLowerCase().indexOf(filter)<0)continue;var st=p.statut_reel||p.statut||"present";if(stFilter&&st!==stFilter)continue;if(!salaries[sid])salaries[sid]={statut:st,_sid:p.salarie_id||sid};var pd=new Date(p.date+"T12:00:00");for(var j=0;j<7;j++){var cd=new Date(startDate);cd.setDate(cd.getDate()+j);if(pd.toISOString().substring(0,10)===cd.toISOString().substring(0,10)){if(!salaries[sid][j])salaries[sid][j]=[];salaries[sid][j].push(p);}}}
 var nbPresent=0,nbAbsent=0;
 for(var sid in salaries){var st=salaries[sid].statut||"present";var stc=_statutColors[st]||"#94a3b8";
-h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd);border-left:4px solid "+stc+"'>"+_esc(sid)+" "+_plStatutBadge(st)+" <select style='font-size:.7em;padding:1px 4px;border-radius:4px;border:1px solid var(--brd);margin-left:4px' onchange=\"if(this.value){var fd=new FormData();fd.append('salarie_id','"+_esc(salaries[sid]._sid||sid)+"');fd.append('date','"+startDate.toISOString().substring(0,10)+"');fd.append('statut',this.value);rhPost('/api/rh/planning',fd,function(){toast('Statut modifie.','ok');renderPlanningView();});}\"><option value=''>Modifier...</option><option value='present'>Present</option><option value='conge_cp'>Conge CP</option><option value='conge_maladie'>Arret maladie</option><option value='formation'>Formation</option><option value='teletravail'>Teletravail</option></select></td>";
+h+="<tr><td style='padding:6px;font-weight:600;border-bottom:1px solid var(--brd);border-left:4px solid "+stc+"'>"+_esc(sid)+" "+_plStatutBadge(st)+" <select style='font-size:.7em;padding:1px 4px;border-radius:4px;border:1px solid var(--brd);margin-left:4px' data-sid='"+_esc(salaries[sid]._sid||sid)+"' data-date='"+startDate.toISOString().substring(0,10)+"' onchange='_plChangeStatut(this)'><option value=''>Modifier...</option><option value='present'>Present</option><option value='conge_cp'>Conge CP</option><option value='conge_maladie'>Arret maladie</option><option value='formation'>Formation</option><option value='teletravail'>Teletravail</option></select></td>";
 if(st==="present")nbPresent++;else nbAbsent++;
 for(var j=0;j<7;j++){var isToday2=false;var cd2=new Date(startDate);cd2.setDate(cd2.getDate()+j);if(cd2.toISOString().substring(0,10)===new Date().toISOString().substring(0,10))isToday2=true;
 h+="<td style='padding:4px;border-bottom:1px solid var(--brd);text-align:center;vertical-align:top;"+(isToday2?"background:rgba(59,130,246,.06);":"")+"'>";var slots=salaries[sid][j]||[];for(var k=0;k<slots.length;k++){h+=_plSlotDiv(slots[k]);}
@@ -16480,12 +16482,12 @@ report.warn.push("Bouton desactive: '"+btn.textContent.trim().substring(0,30)+"'
 });
 
 /* Summary */
-var summary="Navigation Audit - "+report.timestamp+"\n";
-summary+="OK: "+report.ok.length+" | Warnings: "+report.warn.length+" | Erreurs: "+report.err.length+"\n\n";
-if(report.err.length){summary+="=== ERREURS ===\n";report.err.forEach(function(e){summary+="  [ERR] "+e+"\n";});}
-if(report.warn.length){summary+="\n=== AVERTISSEMENTS ===\n";report.warn.forEach(function(w){summary+="  [WARN] "+w+"\n";});}
+var summary="Navigation Audit - "+report.timestamp+"\\n";
+summary+="OK: "+report.ok.length+" | Warnings: "+report.warn.length+" | Erreurs: "+report.err.length+"\\n\\n";
+if(report.err.length){summary+="=== ERREURS ===\\n";report.err.forEach(function(e){summary+="  [ERR] "+e+"\\n";});}
+if(report.warn.length){summary+="\\n=== AVERTISSEMENTS ===\\n";report.warn.forEach(function(w){summary+="  [WARN] "+w+"\\n";});}
 
-console.log("%c[Navigation Audit]","color:#2563eb;font-weight:bold","\n"+summary);
+console.log("%c[Navigation Audit]","color:#2563eb;font-weight:bold","\\n"+summary);
 
 /* Show results in toast */
 if(report.err.length){toast(report.err.length+" erreur(s) de navigation detectee(s). Voir la console (F12).");}
