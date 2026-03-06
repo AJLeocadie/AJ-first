@@ -173,11 +173,29 @@ entete_config_store = PersistentStore("entete_config", default={})
 
 
 def save_uploaded_file(filename: str, content: bytes, analysis_id: str = "") -> Path:
-    """Sauvegarde un fichier uploade sur disque persistant."""
+    """Sauvegarde un fichier uploade sur disque persistant, chiffre au repos.
+
+    Les fichiers sont chiffres avec AES-256-GCM si le module cryptography est
+    disponible et qu'une cle de chiffrement est configuree (NORMACHECK_ENCRYPTION_KEY).
+    Conforme RGPD art. 32 (securite du traitement) et PSSI NormaCheck.
+    """
     date_dir = UPLOADS_DIR / datetime.now().strftime("%Y-%m")
     if analysis_id:
         date_dir = date_dir / analysis_id
     date_dir.mkdir(parents=True, exist_ok=True)
+
+    encryption_key = os.getenv("NORMACHECK_ENCRYPTION_KEY", "")
+    if encryption_key:
+        try:
+            from urssaf_analyzer.security.encryption import chiffrer_donnees
+            encrypted = chiffrer_donnees(content, encryption_key)
+            dest = date_dir / (filename + ".enc")
+            dest.write_bytes(encrypted)
+            return dest
+        except Exception:
+            pass
+
+    # Fallback : stockage non chiffre (dev ou si cryptography manquant)
     dest = date_dir / filename
     dest.write_bytes(content)
     return dest

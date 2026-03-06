@@ -33,6 +33,12 @@ MIN_PASSWORD_LENGTH = 12
 # Stocke les JTI (JWT ID) des tokens revoques avec leur date d'expiration
 _token_blacklist: dict[str, float] = {}  # jti -> exp timestamp
 
+# --- Email verification codes ---
+# Stocke les codes de verification: email -> {code, expires, attempts}
+_verification_codes: dict[str, dict] = {}
+VERIFICATION_CODE_EXPIRY = 600  # 10 minutes
+VERIFICATION_MAX_ATTEMPTS = 5
+
 # --- Environment ---
 _IS_OVH = os.getenv("NORMACHECK_ENV") in ("production", "development", "staging")
 
@@ -141,8 +147,13 @@ def _cleanup_blacklist():
 # USER CRUD
 # =========================================
 
+VALID_OFFERS = ("solo", "equipe", "cabinet")
+VALID_ROLES = ("expert_comptable", "comptable", "gestionnaire_paie", "dirigeant", "collaborateur", "inspecteur")
+
 def create_user(email: str, password: str, nom: str, prenom: str,
-                role: str = "collaborateur", tenant_id: str = None) -> dict:
+                role: str = "collaborateur", tenant_id: str = None,
+                offre: str = "solo", entreprise: str = "",
+                telephone: str = "") -> dict:
     email = email.strip().lower()
     if email in _users:
         raise ValueError("Email deja utilise")
@@ -150,6 +161,10 @@ def create_user(email: str, password: str, nom: str, prenom: str,
         raise ValueError(f"Mot de passe trop court (min. {MIN_PASSWORD_LENGTH} caracteres)")
     if password.lower() == password or password.upper() == password:
         raise ValueError("Le mot de passe doit contenir majuscules et minuscules")
+    if offre not in VALID_OFFERS:
+        raise ValueError(f"Offre invalide. Choisissez parmi : {', '.join(VALID_OFFERS)}")
+    if role not in VALID_ROLES and role != "admin":
+        raise ValueError(f"Role invalide. Choisissez parmi : {', '.join(VALID_ROLES)}")
     if not tenant_id:
         tenant_id = str(uuid.uuid4())[:8]
     user = {
@@ -159,9 +174,13 @@ def create_user(email: str, password: str, nom: str, prenom: str,
         "prenom": prenom,
         "password_hash": hash_password(password),
         "role": role,
+        "offre": offre,
+        "entreprise": entreprise,
+        "telephone": telephone,
         "tenant_id": tenant_id,
         "created_at": datetime.now().isoformat(),
         "active": True,
+        "email_verifie": False,
     }
     _users[email] = user
     _save_users()
@@ -261,9 +280,11 @@ def generate_token(user: dict) -> str:
     return jwt_encode({
         "sub": user["email"],
         "role": user.get("role", "collaborateur"),
+        "offre": user.get("offre", "solo"),
         "tenant_id": user.get("tenant_id", "default"),
         "nom": user.get("nom", ""),
         "prenom": user.get("prenom", ""),
+        "email_verifie": user.get("email_verifie", False),
         "exp": int(time.time()) + TOKEN_EXPIRY_HOURS * 3600,
         "iat": int(time.time()),
         "jti": str(uuid.uuid4()),
@@ -281,11 +302,12 @@ def set_auth_cookie(response: Response, token: str):
         samesite="lax",
         max_age=TOKEN_EXPIRY_HOURS * 3600,
         secure=_use_secure,
+        path="/",  # Envoyer le cookie sur toutes les routes
     )
 
 
 def clear_auth_cookie(response: Response):
-    response.delete_cookie(key="nc_token")
+    response.delete_cookie(key="nc_token", path="/")
 
 
 # =========================================
@@ -327,6 +349,49 @@ def require_role(*allowed_roles):
             raise HTTPException(403, f"Role requis : {', '.join(allowed_roles)}")
         return user
     return checker
+
+
+# =========================================
+# EMAIL VERIFICATION
+# =========================================
+
+import random
+import string
+
+def generate_verification_code(email: str) -> str:
+    """Genere un code de verification a 6 chiffres pour l'email."""
+    email = email.strip().lower()
+    code = ''.join(random.choices(string.digits, k=6))
+    _verification_codes[email] = {
+        "code": code,
+        "expires": time.time() + VERIFICATION_CODE_EXPIRY,
+        "attempts": 0,
+    }
+    return code
+
+
+def verify_email_code(email: str, code: str) -> bool:
+    """Verifie le code de verification pour l'email."""
+    email = email.strip().lower()
+    entry = _verification_codes.get(email)
+    if not entry:
+        return False
+    if time.time() > entry["expires"]:
+        del _verification_codes[email]
+        return False
+    entry["attempts"] += 1
+    if entry["attempts"] > VERIFICATION_MAX_ATTEMPTS:
+        del _verification_codes[email]
+        return False
+    if entry["code"] != code:
+        return False
+    # Code valide: marquer l'email comme verifie et nettoyer
+    del _verification_codes[email]
+    user = _users.get(email)
+    if user:
+        user["email_verifie"] = True
+        _save_users()
+    return True
 
 
 # =========================================
