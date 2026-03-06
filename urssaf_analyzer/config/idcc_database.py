@@ -35,6 +35,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "maintien_salaire_jours": 90,
         "conges_anciennete": True,
         "indemnite_depart_retraite_majoree": True,
+        "salaire_minimum_conventionnel": Decimal("1870.00"),
+        "salaire_minimum_cadre": Decimal("2550.00"),
     },
     "1597": {
         "nom": "Batiment ouvriers (jusqu a 10 salaries)",
@@ -43,6 +45,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_non_cadre": Decimal("0.0175"),
         "mutuelle_employeur_min_pct": 50,
         "maintien_salaire_jours": 90,
+        "salaire_minimum_conventionnel": Decimal("1870.00"),
+        "salaire_minimum_cadre": Decimal("2550.00"),
     },
     "2609": {
         "nom": "Batiment ETAM",
@@ -50,6 +54,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.010"),
         "mutuelle_employeur_min_pct": 50,
+        "salaire_minimum_conventionnel": Decimal("1900.00"),
+        "salaire_minimum_cadre": Decimal("2600.00"),
     },
     "2614": {
         "nom": "Travaux publics ouvriers",
@@ -57,6 +63,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.017"),
         "mutuelle_employeur_min_pct": 50,
+        "salaire_minimum_conventionnel": Decimal("1870.00"),
+        "salaire_minimum_cadre": Decimal("2550.00"),
     },
     "2622": {
         "nom": "Travaux publics ETAM",
@@ -64,6 +72,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.010"),
         "mutuelle_employeur_min_pct": 50,
+        "salaire_minimum_conventionnel": Decimal("1900.00"),
+        "salaire_minimum_cadre": Decimal("2600.00"),
     },
     "7001": {
         "nom": "Batiment cadres",
@@ -71,6 +81,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.010"),
         "mutuelle_employeur_min_pct": 50,
+        "salaire_minimum_conventionnel": Decimal("2600.00"),
+        "salaire_minimum_cadre": Decimal("2600.00"),
     },
     "7002": {
         "nom": "Travaux publics cadres",
@@ -78,6 +90,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.010"),
         "mutuelle_employeur_min_pct": 50,
+        "salaire_minimum_conventionnel": Decimal("2600.00"),
+        "salaire_minimum_cadre": Decimal("2600.00"),
     },
     # ---------------------------------------------------------------
     # METALLURGIE
@@ -91,6 +105,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "maintien_salaire_jours": 90,
         "prime_anciennete": True,
         "indemnite_licenciement_majoree": True,
+        "salaire_minimum_conventionnel": Decimal("1862.00"),
+        "salaire_minimum_cadre": Decimal("2420.00"),
     },
     # ---------------------------------------------------------------
     # COMMERCE / DISTRIBUTION
@@ -141,6 +157,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "mutuelle_employeur_min_pct": 50,
         "prime_vacances": True,
         "indemnite_licenciement_specifique": True,
+        "salaire_minimum_conventionnel": Decimal("1880.00"),
+        "salaire_minimum_cadre": Decimal("2380.00"),
     },
     # ---------------------------------------------------------------
     # HOTELLERIE / RESTAURATION / TOURISME
@@ -153,6 +171,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "mutuelle_employeur_min_pct": 50,
         "avantage_nature_repas": True,
         "jours_feries_garantis": 6,
+        "salaire_minimum_conventionnel": Decimal("1862.00"),
+        "salaire_minimum_cadre": Decimal("2460.00"),
     },
     "1501": {
         "nom": "Restauration rapide",
@@ -180,6 +200,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prime_anciennete": True,
         "indemnite_depart_retraite_majoree": True,
         "duree_travail_specifique": True,
+        "salaire_minimum_conventionnel": Decimal("1870.00"),
+        "salaire_minimum_cadre": Decimal("2550.00"),
     },
     "2121": {
         "nom": "Edition",
@@ -246,6 +268,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_non_cadre": Decimal("0.010"),
         "mutuelle_employeur_min_pct": 50,
         "transfert_personnel_article7": True,
+        "salaire_minimum_conventionnel": Decimal("1860.00"),
+        "salaire_minimum_cadre": Decimal("2400.00"),
     },
     "1351": {
         "nom": "Prevention et securite",
@@ -264,6 +288,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_non_cadre": Decimal("0.012"),
         "mutuelle_employeur_min_pct": 60,
         "13eme_mois": True,
+        "salaire_minimum_conventionnel": Decimal("2050.00"),
+        "salaire_minimum_cadre": Decimal("2750.00"),
     },
     "1672": {
         "nom": "Societes d assurances",
@@ -478,6 +504,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_cadre": Decimal("0.015"),
         "prevoyance_non_cadre": Decimal("0.008"),
         "mutuelle_employeur_min_pct": 50,
+        "salaire_minimum_conventionnel": Decimal("1900.00"),
+        "salaire_minimum_cadre": Decimal("2500.00"),
     },
     # ---------------------------------------------------------------
     # CHIMIE / PLASTURGIE
@@ -489,6 +517,8 @@ IDCC_DATABASE: dict[str, dict] = {
         "prevoyance_non_cadre": Decimal("0.010"),
         "mutuelle_employeur_min_pct": 50,
         "prime_anciennete": True,
+        "salaire_minimum_conventionnel": Decimal("1900.00"),
+        "salaire_minimum_cadre": Decimal("2600.00"),
     },
     "0292": {
         "nom": "Plasturgie",

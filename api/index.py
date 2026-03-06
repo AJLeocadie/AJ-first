@@ -3155,11 +3155,43 @@ async def sim_bulletin(
     effectif: int = Query(10, description="Effectif total de l entreprise (pour seuils FNAL, versement mobilite)"),
     est_cadre: bool = Query(False, description="Le salarie simule est-il cadre ?"),
     annee: int = Query(2026, description="Annee de reference pour les baremes (2020-2026)"),
+    jours_absence: float = Query(0, description="Nombre de jours d absence dans le mois"),
+    type_absence: str = Query("", description="Type d absence : maladie, at_mp, maternite, conge_sans_solde"),
 ):
     bar = _get_baremes_pour_annee(annee)
     from urssaf_analyzer.rules.contribution_rules import ContributionRules
+
+    # Gestion des absences
+    jours_ouvres_mois = 21.67
+    retenue_absences = round(brut_mensuel / jours_ouvres_mois * jours_absence, 2) if jours_absence > 0 else 0.0
+    brut_effectif = round(brut_mensuel - retenue_absences, 2)
+
+    # IJSS estimees selon le type d absence
+    info_absences = None
+    if jours_absence > 0:
+        smic_mensuel_ref = bar["smic_mensuel"]
+        ijss = 0.0
+        complement_employeur = 0.0
+        if type_absence == "maladie":
+            ijss = round(min(brut_mensuel / 30.42, smic_mensuel_ref / 30.42 * 1.8) * 0.5 * jours_absence, 2)
+            jours_complement = max(0, jours_absence - 7)
+            complement_employeur = round(brut_mensuel / 30.42 * 0.9 * min(jours_complement, 30), 2)
+        elif type_absence == "maternite":
+            ijss = round(min(brut_mensuel / 30.42, smic_mensuel_ref / 30.42 * 1.8) * jours_absence, 2)
+        elif type_absence == "at_mp":
+            ijss = round((brut_mensuel / 30.42) * 0.6 * min(jours_absence, 28) + (brut_mensuel / 30.42) * 0.8 * max(0, jours_absence - 28), 2)
+        info_absences = {
+            "type": type_absence or "non_precise",
+            "jours": jours_absence,
+            "retenue_brut": retenue_absences,
+            "brut_contractuel": brut_mensuel,
+            "brut_apres_absences": brut_effectif,
+            "ijss_estimees": ijss,
+            "complement_employeur": complement_employeur,
+        }
+
     calc = ContributionRules(effectif_entreprise=effectif)
-    res = calc.calculer_bulletin_complet(Decimal(str(brut_mensuel)), est_cadre=est_cadre)
+    res = calc.calculer_bulletin_complet(Decimal(str(brut_effectif)), est_cadre=est_cadre)
     lignes = []
     for l in res.get("lignes", []):
         lignes.append({
@@ -3167,16 +3199,30 @@ async def sim_bulletin(
             "montant_patronal": float(l["montant_patronal"]),
             "montant_salarial": float(l["montant_salarial"]),
         })
+
+    # Alertes SMIC
+    alertes = []
+    smic_mensuel = bar["smic_mensuel"]
+    if brut_mensuel > 0 and brut_mensuel < smic_mensuel:
+        alertes.append({
+            "niveau": "haute",
+            "message": f"ALERTE SMIC : Le salaire brut ({brut_mensuel:.2f} EUR) est inferieur au SMIC mensuel ({smic_mensuel:.2f} EUR). Ref: Art. L.3231-2 CT.",
+        })
+
     return {
         "annee_baremes": annee,
         "smic_mensuel_ref": bar["smic_mensuel"],
         "pass_mensuel_ref": bar["pass_mensuel"],
-        "brut_mensuel": float(res["brut_mensuel"]),
+        "brut_mensuel": brut_mensuel,
+        "brut_effectif": brut_effectif,
+        "retenue_absences": retenue_absences,
         "net_a_payer": float(res["net_avant_impot"]),
         "cout_total_employeur": float(res["cout_total_employeur"]),
         "total_patronal": float(res["total_patronal"]),
         "total_salarial": float(res["total_salarial"]),
         "lignes": lignes,
+        "info_absences": info_absences,
+        "alertes": alertes,
     }
 
 
@@ -4065,9 +4111,41 @@ async def sim_ccn(
 
     cout_prev = round(brut_mensuel * taux_prev, 2)
 
+    # Salaire minimum conventionnel
+    smic_mensuel = float(_SMIC_MENSUEL)
+    salaire_min_conv = None
+    alerte_salaire_minimum = None
+    if ccn_data:
+        if est_cadre and ccn_data.get("salaire_minimum_cadre"):
+            salaire_min_conv = float(ccn_data["salaire_minimum_cadre"])
+        elif ccn_data.get("salaire_minimum_conventionnel"):
+            salaire_min_conv = float(ccn_data["salaire_minimum_conventionnel"])
+
+    if salaire_min_conv and brut_mensuel < salaire_min_conv:
+        alerte_salaire_minimum = {
+            "niveau": "haute",
+            "message": f"ALERTE MINIMUM CONVENTIONNEL : Le salaire brut ({brut_mensuel:.2f} EUR) est inferieur "
+                       f"au minimum conventionnel ({salaire_min_conv:.2f} EUR) pour {'un cadre' if est_cadre else 'un non-cadre'} "
+                       f"de la CCN {nom_ccn}. Ref: Art. L.2253-1 CT (principe de faveur).",
+        }
+    elif brut_mensuel < smic_mensuel:
+        alerte_salaire_minimum = {
+            "niveau": "haute",
+            "message": f"ALERTE SMIC : Le salaire brut ({brut_mensuel:.2f} EUR) est inferieur "
+                       f"au SMIC mensuel ({smic_mensuel:.2f} EUR). Ref: Art. L.3231-2 CT.",
+        }
+
     # Obligations conventionnelles specifiques
     obligations_conv = []
     if ccn_data:
+        # Salaire minimum conventionnel en premier
+        if salaire_min_conv:
+            obligations_conv.append({
+                "obligation": "Salaire minimum conventionnel",
+                "conventionnel": f"{salaire_min_conv:.2f} EUR/mois ({'cadre' if est_cadre else 'non-cadre'})",
+                "legal": f"SMIC : {smic_mensuel:.2f} EUR/mois (Art. L.3231-2 CT)",
+                "plus_favorable": salaire_min_conv > smic_mensuel,
+            })
         if ccn_data.get("maintien_salaire_jours"):
             obligations_conv.append({
                 "obligation": "Maintien de salaire maladie",
@@ -4162,6 +4240,7 @@ async def sim_ccn(
 
     # Obligations legales communes (toujours presentes)
     obligations_leg = [
+        {"obligation": "Salaire minimum (SMIC)", "legal": f"{smic_mensuel:.2f} EUR/mois brut (Art. L.3231-2 CT)"},
         {"obligation": "Prevoyance cadres", "legal": "1.50% TA patronal (ANI 2017 / art. 7 CCN 1947)", "conventionnel": f"{taux_prev*100:.2f}%"},
         {"obligation": "Mutuelle obligatoire", "legal": "50% minimum part employeur (ANI 2013 / art. L.911-7 CSS)", "conventionnel": f"{mut_min}%"},
         {"obligation": "Indemnite licenciement", "legal": "1/4 mois/an <= 10 ans, 1/3 au-dela (art. R.1234-2 CT)"},
@@ -4174,6 +4253,9 @@ async def sim_ccn(
         "idcc": idcc,
         "nom_ccn": nom_ccn,
         "secteur": ccn_data.get("secteur", "") if ccn_data else "",
+        "salaire_minimum_conventionnel": salaire_min_conv,
+        "smic_mensuel": smic_mensuel,
+        "alerte_salaire_minimum": alerte_salaire_minimum,
         "bulletin": {
             "brut_mensuel": float(bulletin["brut_mensuel"]),
             "total_patronal": float(bulletin["total_patronal"]),
@@ -4572,80 +4654,141 @@ async def sim_optimisation(
     nb_parts: float = Query(1),
     forme_juridique: str = Query("sas"),
 ):
-    result = {"forme_juridique": forme_juridique}
+    result = {"forme_juridique": forme_juridique, "benefice_net": benefice_net}
     scenarios = []
 
-    # Scenario 1: Tout en salaire
-    sal_total = benefice_net * 0.85
-    charges_sal = sal_total * 0.42
-    net_sal = sal_total - sal_total * 0.22
-    ir_sal = _calculer_ir_simple(net_sal, nb_parts)
-    total_net_1 = net_sal - ir_sal
+    def _calcul_is(base_is):
+        """IS progressif : 15% jusqu a 42 500 EUR, 25% au-dela."""
+        if base_is <= 0:
+            return 0.0
+        if base_is <= 42500:
+            return round(base_is * 0.15, 2)
+        return round(42500 * 0.15 + (base_is - 42500) * 0.25, 2)
+
+    # ---------------------------------------------------------------
+    # Scenario 1 : 100% Salaire
+    # Tout le benefice sert a payer le salaire brut + charges patronales
+    # brut + charges_patronales = benefice_net  =>  brut * 1.42 = benefice_net
+    # ---------------------------------------------------------------
+    brut_1 = round(benefice_net / 1.42, 2)
+    charges_pat_1 = round(brut_1 * 0.42, 2)
+    charges_sal_1 = round(brut_1 * 0.22, 2)
+    net_sal_1 = round(brut_1 - charges_sal_1, 2)
+    ir_1 = _calculer_ir_simple(net_sal_1, nb_parts)
+    total_net_1 = round(net_sal_1 - ir_1, 2)
     scenarios.append({
-        "nom": "100% Salaire", "salaire_brut": round(sal_total, 2),
-        "charges_sociales": round(charges_sal, 2), "dividendes": 0,
-        "ir": round(ir_sal, 2), "net_disponible": round(total_net_1, 2),
-        "protection_sociale": "Maximale (chomage, retraite, prevoyance)",
+        "nom": "100% Salaire",
+        "description": "Le benefice est integralement verse en salaire. Pas de dividendes ni d IS.",
+        "salaire_brut": brut_1,
+        "charges_sociales": charges_pat_1,
+        "is_entreprise": 0.0,
+        "dividendes": 0.0,
+        "pfu_dividendes": 0.0,
+        "ir": round(ir_1, 2),
+        "net_disponible": total_net_1,
+        "cout_entreprise": round(brut_1 + charges_pat_1, 2),
+        "protection_sociale": "Maximale (chomage, retraite, prevoyance completes)",
     })
 
-    # Scenario 2: Mix actuel
-    charges_rem = remuneration_gerant * 0.42
-    net_rem = remuneration_gerant - remuneration_gerant * 0.22
-    is_val = max(0, benefice_net - remuneration_gerant - charges_rem - frais_pro)
-    is_impot = is_val * 0.15 if is_val <= 42500 else 42500 * 0.15 + (is_val - 42500) * 0.25
-    div_net = dividendes * 0.7  # abattement 40% puis PFU ou bareme
-    pfu_div = dividendes * 0.30  # PFU 30%
-    ir_rem = _calculer_ir_simple(net_rem, nb_parts)
-    total_net_2 = net_rem - ir_rem + dividendes - pfu_div
+    # ---------------------------------------------------------------
+    # Scenario 2 : Mix actuel (salaire + dividendes)
+    # L utilisateur choisit la repartition remuneration / dividendes
+    # ---------------------------------------------------------------
+    charges_pat_2 = round(remuneration_gerant * 0.42, 2)
+    charges_sal_2 = round(remuneration_gerant * 0.22, 2)
+    net_sal_2 = round(remuneration_gerant - charges_sal_2, 2)
+    # Base IS = benefice - (salaire brut + charges patronales) - frais pro
+    is_base_2 = max(0, benefice_net - remuneration_gerant - charges_pat_2 - frais_pro)
+    is_impot_2 = _calcul_is(is_base_2)
+    # Dividendes distribuables = resultat apres IS
+    div_distribuables_2 = max(0, is_base_2 - is_impot_2)
+    div_reels_2 = min(dividendes, div_distribuables_2)
+    pfu_2 = round(div_reels_2 * 0.30, 2)
+    ir_2 = _calculer_ir_simple(net_sal_2, nb_parts)
+    total_net_2 = round(net_sal_2 - ir_2 + div_reels_2 - pfu_2, 2)
     scenarios.append({
-        "nom": "Mix actuel (salaire + dividendes)", "salaire_brut": round(remuneration_gerant, 2),
-        "charges_sociales": round(charges_rem, 2), "dividendes": round(dividendes, 2),
-        "is_entreprise": round(is_impot, 2), "pfu_dividendes": round(pfu_div, 2),
-        "ir": round(ir_rem, 2), "net_disponible": round(total_net_2, 2),
-        "protection_sociale": "Moyenne (pas de cotisation sur dividendes)",
-    })
-
-    # Scenario 3: Maximum dividendes
-    bar_opt = _get_baremes_pour_annee(2026)  # optimisation toujours sur annee courante
-    sal_min = bar_opt["smic_mensuel"] * 12  # SMIC annuel
-    charges_min = sal_min * 0.42
-    net_min = sal_min - sal_min * 0.22
-    is_base_3 = max(0, benefice_net - sal_min - charges_min)
-    is_impot_3 = is_base_3 * 0.15 if is_base_3 <= 42500 else 42500 * 0.15 + (is_base_3 - 42500) * 0.25
-    div_max = is_base_3 - is_impot_3
-    pfu_3 = div_max * 0.30
-    ir_3 = _calculer_ir_simple(net_min, nb_parts)
-    total_net_3 = net_min - ir_3 + div_max - pfu_3
-    scenarios.append({
-        "nom": "Maximum dividendes (salaire SMIC)", "salaire_brut": round(sal_min, 2),
-        "charges_sociales": round(charges_min, 2), "dividendes": round(div_max, 2),
-        "is_entreprise": round(is_impot_3, 2), "pfu_dividendes": round(pfu_3, 2),
-        "ir": round(ir_3, 2), "net_disponible": round(total_net_3, 2),
-        "protection_sociale": "Minimale (retraite, chomage au minimum)",
-    })
-
-    # Scenario 4: Avec optimisation (interessement + PEE)
-    int_val = min(benefice_net * 0.15, 3 * 46368)  # plafond interessement
-    part_val = max(0, (benefice_net - remuneration_gerant * 1.42) * 0.5 * 0.5)
-    abond_val = min(pee_abondement, 3709)  # plafond 2026
-    forfait_social_int = round(int_val * 0.20, 2)
-    forfait_social_part = round(part_val * 0.20, 2)
-    charges_s4 = remuneration_gerant * 0.42
-    net_s4 = remuneration_gerant - remuneration_gerant * 0.22
-    ir_s4 = _calculer_ir_simple(net_s4, nb_parts)
-    epargne_exo = int_val + part_val + abond_val - forfait_social_int - forfait_social_part
-    total_net_4 = net_s4 - ir_s4 + epargne_exo * 0.903
-    scenarios.append({
-        "nom": "Optimise (interessement + participation + PEE)",
+        "nom": "Mix actuel (salaire + dividendes)",
+        "description": f"Salaire de {remuneration_gerant:.0f} EUR + dividendes de {div_reels_2:.0f} EUR. Le solde reste en tresorerie.",
         "salaire_brut": round(remuneration_gerant, 2),
-        "charges_sociales": round(charges_s4, 2),
-        "interessement": round(int_val, 2),
-        "participation": round(part_val, 2),
-        "abondement_pee": round(abond_val, 2),
-        "forfait_social": round(forfait_social_int + forfait_social_part, 2),
-        "ir": round(ir_s4, 2),
-        "net_disponible": round(total_net_4, 2),
-        "protection_sociale": "Bonne + epargne salariale bloquee 5 ans",
+        "charges_sociales": charges_pat_2,
+        "is_entreprise": is_impot_2,
+        "dividendes": round(div_reels_2, 2),
+        "pfu_dividendes": pfu_2,
+        "ir": round(ir_2, 2),
+        "net_disponible": total_net_2,
+        "cout_entreprise": round(remuneration_gerant + charges_pat_2 + is_impot_2, 2),
+        "protection_sociale": "Moyenne (pas de cotisation retraite/chomage sur dividendes)",
+        "tresorerie_residuelle": round(div_distribuables_2 - div_reels_2, 2),
+    })
+
+    # ---------------------------------------------------------------
+    # Scenario 3 : Maximum dividendes (salaire au SMIC)
+    # Le dirigeant se verse le minimum legal, le reste en dividendes
+    # ---------------------------------------------------------------
+    bar_opt = _get_baremes_pour_annee(2026)
+    sal_min = round(bar_opt["smic_mensuel"] * 12, 2)  # SMIC annuel
+    charges_pat_3 = round(sal_min * 0.42, 2)
+    charges_sal_3 = round(sal_min * 0.22, 2)
+    net_sal_3 = round(sal_min - charges_sal_3, 2)
+    is_base_3 = max(0, benefice_net - sal_min - charges_pat_3)
+    is_impot_3 = _calcul_is(is_base_3)
+    div_max = round(max(0, is_base_3 - is_impot_3), 2)
+    pfu_3 = round(div_max * 0.30, 2)
+    ir_3 = _calculer_ir_simple(net_sal_3, nb_parts)
+    total_net_3 = round(net_sal_3 - ir_3 + div_max - pfu_3, 2)
+    scenarios.append({
+        "nom": "Maximum dividendes (salaire SMIC)",
+        "description": f"Salaire au minimum legal ({sal_min:.0f} EUR/an = {bar_opt['smic_mensuel']:.2f} EUR/mois). "
+                       f"Le benefice restant ({is_base_3:.0f} EUR) est soumis a l IS puis distribue en dividendes.",
+        "salaire_brut": sal_min,
+        "charges_sociales": charges_pat_3,
+        "is_entreprise": is_impot_3,
+        "dividendes": div_max,
+        "pfu_dividendes": pfu_3,
+        "ir": round(ir_3, 2),
+        "net_disponible": total_net_3,
+        "cout_entreprise": round(sal_min + charges_pat_3 + is_impot_3, 2),
+        "protection_sociale": "Minimale (retraite et chomage au minimum, faible couverture prevoyance)",
+    })
+
+    # ---------------------------------------------------------------
+    # Scenario 4 : Optimise (interessement + participation + PEE)
+    # Le salaire est maintenu, l epargne salariale beneficie d exonerations
+    # ---------------------------------------------------------------
+    charges_pat_4 = round(remuneration_gerant * 0.42, 2)
+    charges_sal_4 = round(remuneration_gerant * 0.22, 2)
+    net_sal_4 = round(remuneration_gerant - charges_sal_4, 2)
+    is_base_4 = max(0, benefice_net - remuneration_gerant - charges_pat_4 - frais_pro)
+    # Interessement : plafond = 3 PASS ou 20% du benefice net (le plus bas)
+    int_val = round(min(max(interessement, benefice_net * 0.15), 3 * 48060), 2)
+    # Participation : formule legale RSP = 0.5 * (B - 5% CP) * S / VA (simplifie ici)
+    part_val = round(max(0, (is_base_4) * 0.5 * 0.5), 2)
+    abond_val = round(min(pee_abondement if pee_abondement > 0 else 3709, 3709), 2)
+    forfait_social = round((int_val + part_val) * 0.20, 2)
+    ir_4 = _calculer_ir_simple(net_sal_4, nb_parts)
+    # L epargne salariale est exoneree de charges (hors forfait social 20%) et d IR (si PEE bloque 5 ans)
+    # Le salarie percoit : epargne - CSG/CRDS (9.7%)
+    epargne_brute = int_val + part_val + abond_val
+    epargne_nette = round(epargne_brute * (1 - 0.097), 2)  # apres CSG/CRDS
+    total_net_4 = round(net_sal_4 - ir_4 + epargne_nette, 2)
+    scenarios.append({
+        "nom": "Optimise (salaire + epargne salariale)",
+        "description": f"Salaire de {remuneration_gerant:.0f} EUR + interessement ({int_val:.0f} EUR) "
+                       f"+ participation ({part_val:.0f} EUR) + abondement PEE ({abond_val:.0f} EUR). "
+                       f"Epargne bloquee 5 ans mais exoneree d IR.",
+        "salaire_brut": round(remuneration_gerant, 2),
+        "charges_sociales": charges_pat_4,
+        "is_entreprise": _calcul_is(max(0, is_base_4 - int_val - part_val)),
+        "dividendes": 0.0,
+        "pfu_dividendes": 0.0,
+        "interessement": int_val,
+        "participation": part_val,
+        "abondement_pee": abond_val,
+        "forfait_social": forfait_social,
+        "ir": round(ir_4, 2),
+        "net_disponible": total_net_4,
+        "cout_entreprise": round(remuneration_gerant + charges_pat_4 + forfait_social + int_val + part_val + abond_val, 2),
+        "protection_sociale": "Bonne + epargne salariale (bloquee 5 ans, exoneree d IR)",
     })
 
     # Meilleur scenario
@@ -7103,13 +7246,43 @@ async def knowledge_audit(
     salaires_analyses = [s["dernier_brut"] for s in kb["salaries"].values() if s.get("dernier_brut", 0) > 0]
     smic_mensuel = float(_SMIC_MENSUEL)  # SMIC 2025/2026 approximatif
     sous_smic = [b for b in salaires_analyses if b < smic_mensuel and b > 0]
+    # Verification minimum conventionnel (si CCN identifiee)
+    ccn_ctx = ctx.get("convention_collective", "")
+    min_conv_detail = ""
+    sous_minimum_conv = []
+    if ccn_ctx:
+        try:
+            from urssaf_analyzer.config.idcc_database import rechercher_idcc, get_ccn_par_idcc
+            ccn_found = get_ccn_par_idcc(ccn_ctx)
+            if not ccn_found:
+                res_idcc = rechercher_idcc(ccn_ctx)
+                if res_idcc:
+                    ccn_found = get_ccn_par_idcc(res_idcc[0]["idcc"])
+            if ccn_found and ccn_found.get("salaire_minimum_conventionnel"):
+                min_conv = float(ccn_found["salaire_minimum_conventionnel"])
+                sous_minimum_conv = [b for b in salaires_analyses if 0 < b < min_conv]
+                if sous_minimum_conv:
+                    min_conv_detail = f" | {len(sous_minimum_conv)} sous le minimum conventionnel ({min_conv:.2f} EUR)"
+                else:
+                    min_conv_detail = f" | Tous conformes au minimum conventionnel ({min_conv:.2f} EUR)"
+        except Exception:
+            pass
+    smic_detail = ""
+    if salaires_analyses:
+        if sous_smic:
+            smic_detail = f"{len(salaires_analyses)} salaire(s) analyse(s), {len(sous_smic)} sous le SMIC mensuel ({smic_mensuel} EUR)"
+        else:
+            smic_detail = f"{len(salaires_analyses)} salaire(s) conforme(s) au SMIC ({smic_mensuel} EUR)"
+        smic_detail += min_conv_detail
+    else:
+        smic_detail = "Aucun salaire disponible"
     social_checks.append(_audit_check(
         "Verification SMIC et minima conventionnels",
         "Art. L.3231-2 CT - Art. L.2253-1 CT",
         len(salaires_analyses) > 0,
-        (f"{len(salaires_analyses)} salaire(s) analyse(s), {len(sous_smic)} sous le SMIC mensuel ({smic_mensuel} EUR)" if sous_smic else f"{len(salaires_analyses)} salaire(s) conforme(s) au SMIC") if salaires_analyses else "Aucun salaire disponible",
+        smic_detail,
         "Bulletins de paie, grille de la convention collective",
-        alerte=len(sous_smic) > 0,
+        alerte=len(sous_smic) > 0 or len(sous_minimum_conv) > 0,
     ))
 
     # 10. Blocs DSN (Cahier technique)
@@ -8817,11 +8990,42 @@ async def generer_bulletin(
 
     # Alerte minimum conventionnel (si convention renseignee)
     if ccn_label:
-        alertes.append({
-            "niveau": "info",
-            "message": f"Convention collective : {ccn_label}. Verifiez que le salaire respecte le minimum conventionnel "
-                       f"applicable a la classification du poste (Art. L.2253-1 CT).",
-        })
+        # Tenter de verifier le minimum conventionnel via la base IDCC
+        min_conv_rh = None
+        try:
+            from urssaf_analyzer.config.idcc_database import rechercher_idcc, get_ccn_par_idcc
+            ccn_found_rh = get_ccn_par_idcc(ccn_label)
+            if not ccn_found_rh:
+                res_rh = rechercher_idcc(ccn_label)
+                if res_rh:
+                    ccn_found_rh = get_ccn_par_idcc(res_rh[0]["idcc"])
+            if ccn_found_rh:
+                is_cadre = est_cadre.lower() == "true"
+                if is_cadre and ccn_found_rh.get("salaire_minimum_cadre"):
+                    min_conv_rh = float(ccn_found_rh["salaire_minimum_cadre"])
+                elif ccn_found_rh.get("salaire_minimum_conventionnel"):
+                    min_conv_rh = float(ccn_found_rh["salaire_minimum_conventionnel"])
+        except Exception:
+            pass
+        if min_conv_rh and float(brut_base) > 0 and float(brut_base) < min_conv_rh:
+            alertes.append({
+                "niveau": "haute",
+                "message": f"ALERTE MINIMUM CONVENTIONNEL : Le salaire brut ({float(brut_base):.2f} EUR) est inferieur "
+                           f"au minimum conventionnel ({min_conv_rh:.2f} EUR) de la CCN {ccn_label}. "
+                           f"L employeur doit appliquer le montant le plus favorable (Art. L.2253-1 CT).",
+            })
+        elif min_conv_rh:
+            alertes.append({
+                "niveau": "info",
+                "message": f"Convention collective : {ccn_label}. Minimum conventionnel : {min_conv_rh:.2f} EUR/mois. "
+                           f"Salaire conforme (Art. L.2253-1 CT).",
+            })
+        else:
+            alertes.append({
+                "niveau": "info",
+                "message": f"Convention collective : {ccn_label}. Verifiez que le salaire respecte le minimum conventionnel "
+                           f"applicable a la classification du poste (Art. L.2253-1 CT).",
+            })
 
     # Alerte heures sup au-dela du contingent annuel (220h/an - art. D.3121-24 CT)
     if float(hs) > 0:
@@ -13560,6 +13764,10 @@ APP_HTML += """
 <div><label>Statut du salarie</label><select id="sim-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div>
 <div><label>Convention collective (IDCC ou nom)</label><input id="sim-bull-ccn" placeholder="Ex: 1486, SYNTEC, HCR..."></div>
 </div>
+<div style="background:var(--bg2);border-radius:8px;padding:14px;margin:10px 0">
+<h3 style="margin:0 0 8px;font-size:.95em">&#128197; Absences du mois</h3>
+<div class="g3"><div><label>Jours d absence</label><input type="number" step="0.5" id="sim-abs-jours" value="0" min="0" max="31"></div><div><label>Type d absence</label><select id="sim-abs-type"><option value="">Aucune</option><option value="maladie">Maladie</option><option value="at_mp">AT / Maladie professionnelle</option><option value="maternite">Maternite / Paternite</option><option value="conge_sans_solde">Conge sans solde</option></select></div><div><label style="color:var(--tx2);font-size:.82em">La retenue est calculee au prorata des jours ouvres (base 21.67j/mois). Les IJSS sont estimees selon le type.</label></div></div>
+</div>
 <div class="al info" style="margin:8px 0;font-size:.82em"><span class="ai">&#9878;</span><span>La convention collective peut imposer des taux de prevoyance et mutuelle superieurs aux minimums legaux. <a href="#" onclick="showSimTab('ccn',document.querySelector('[onclick*=ccn]'));return false">Voir l onglet Convention collective</a> pour le detail.</span></div>
 <div class="btn-group"><button class="btn btn-blue" onclick="simBulletin()">Simuler</button><button class="btn btn-s btn-sm" onclick="exportSection('sim')">&#128190; Export</button></div>
 <div id="sim-bull-res"></div>
@@ -15082,9 +15290,9 @@ var cls=d.sans_justificatif?"warn":"ok";var icon=d.sans_justificatif?"&#9888;":"
 document.getElementById("em-res").innerHTML="<div class='al "+cls+"'><span class='ai'>"+icon+"</span><span>"+(d.alerte||"Ecriture enregistree.")+(d.sans_justificatif?" <em style='color:var(--r)'>(justificatif manquant)</em>":"")+"</span></div>";loadCompta();}).catch(function(e){document.getElementById("em-res").innerHTML="<div class='al err'>"+e.message+"</div>";});}
 
 /* === SIMULATION === */
-function simBulletin(){var brut=document.getElementById("sim-brut").value;if(!brut||parseFloat(brut)<=0){toast("Saisissez un salaire brut valide.");return;}fetch("/api/simulation/bulletin?brut_mensuel="+brut+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div><table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simBulletin(){var brut=document.getElementById("sim-brut").value;if(!brut||parseFloat(brut)<=0){toast("Saisissez un salaire brut valide.");return;}var absJ=gv("sim-abs-jours")||"0";var absT=gv("sim-abs-type")||"";fetch("/api/simulation/bulletin?brut_mensuel="+brut+"&effectif="+document.getElementById("sim-eff").value+"&est_cadre="+document.getElementById("sim-cadre").value+"&jours_absence="+absJ+"&type_absence="+encodeURIComponent(absT)).then(safeJson).then(function(r){var h="";if(r.alertes&&r.alertes.length>0){for(var a=0;a<r.alertes.length;a++){var al=r.alertes[a];var cls=al.niveau==="haute"?"err":"warn";h+="<div class='al "+cls+"' style='margin-bottom:8px'><span class='ai'>&#9888;</span><span>"+al.message+"</span></div>";}}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut contractuel</div></div><div class='sc "+(r.retenue_absences>0?"amber":"blue")+"'><div class='val'>"+r.brut_effectif.toFixed(2)+"</div><div class='lab'>Brut effectif</div></div><div class='sc green'><div class='val'>"+r.net_a_payer.toFixed(2)+"</div><div class='lab'>Net a payer</div></div><div class='sc amber'><div class='val'>"+r.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div></div>";if(r.info_absences){var ab=r.info_absences;var typeLabels={"maladie":"Maladie","at_mp":"AT/Maladie pro.","maternite":"Maternite/Paternite","conge_sans_solde":"Conge sans solde","non_precise":"Non precise"};h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--o)'><strong>&#128197; Absences : "+ab.jours+" jour(s) - "+(typeLabels[ab.type]||ab.type)+"</strong><div style='font-size:.84em;margin-top:4px'>Retenue sur brut : <b style=\"color:var(--r)\">-"+ab.retenue_brut.toFixed(2)+" EUR</b> | Brut contractuel : "+ab.brut_contractuel.toFixed(2)+" EUR &rarr; Brut effectif : <b>"+ab.brut_apres_absences.toFixed(2)+" EUR</b>";if(ab.ijss_estimees>0)h+="<br>IJSS estimees : <b style=\"color:#16a34a\">"+ab.ijss_estimees.toFixed(2)+" EUR</b>";if(ab.complement_employeur>0)h+=" | Complement employeur : <b>"+ab.complement_employeur.toFixed(2)+" EUR</b>";h+="</div></div>";}h+="<table style='margin-top:12px'><tr><th>Rubrique</th><th class='num'>Patronal</th><th class='num'>Salarial</th></tr>";var ls=r.lignes||[];for(var i=0;i<ls.length;i++){h+="<tr><td>"+ls[i].libelle+"</td><td class='num'>"+ls[i].montant_patronal.toFixed(2)+"</td><td class='num'>"+ls[i].montant_salarial.toFixed(2)+"</td></tr>";}h+="</table>";document.getElementById("sim-bull-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function ccnAutoSearch(){var t=document.getElementById("ccn-search").value;if(t.length<2){document.getElementById("ccn-search-results").innerHTML="";return;}fetch("/api/simulation/recherche-ccn?terme="+encodeURIComponent(t)).then(safeJson).then(function(r){var box=document.getElementById("ccn-search-results");if(!r.resultats||!r.resultats.length){box.innerHTML="";return;}var container=document.createElement("div");container.style.cssText="background:var(--bg2);border-radius:6px;padding:6px";for(var i=0;i<Math.min(r.resultats.length,8);i++){(function(c){var d=document.createElement("div");d.style.cssText="padding:4px 8px;cursor:pointer;border-radius:4px;font-size:.85em";d.innerHTML="<strong>IDCC "+c.idcc+"<\/strong> - "+c.nom;d.onmouseover=function(){d.style.background="var(--bg3)";};d.onmouseout=function(){d.style.background="";};d.onclick=function(){document.getElementById("ccn-search").value=c.idcc;box.innerHTML="";};container.appendChild(d);})(r.resultats[i]);}box.innerHTML="";box.appendChild(container);}).catch(function(){});}
-function simCCN(){var ccn=document.getElementById("ccn-search").value;if(!ccn){toast("Saisissez un IDCC ou un nom de convention collective");return;}var p="ccn="+encodeURIComponent(ccn)+"&brut_mensuel="+gv("ccn-brut")+"&est_cadre="+gv("ccn-cadre")+"&effectif="+gv("ccn-eff");fetch("/api/simulation/ccn?"+p).then(safeJson).then(function(r){var h="";if(r.ccn_identifiee){h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>IDCC "+r.idcc+" - "+r.nom_ccn+"</strong>"+(r.secteur?" ("+r.secteur+")":"")+"</span></div>";}else{h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>Convention non identifiee</strong> — les minimums legaux sont appliques. Essayez un numero IDCC (ex: 1486).</span></div>";}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.bulletin.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut mensuel</div></div><div class='sc green'><div class='val'>"+r.bulletin.net_avant_impot.toFixed(2)+"</div><div class='lab'>Net avant impot</div></div><div class='sc amber'><div class='val'>"+r.bulletin.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+r.prevoyance_ccn.montant_mensuel.toFixed(2)+"</div><div class='lab'>Prevoyance CCN/mois</div></div></div>";h+="<h3 style='margin-top:16px'>&#9878; Obligations conventionnelles vs legales</h3>";if(r.obligations_conventionnelles&&r.obligations_conventionnelles.length>0){h+="<table><thead><tr><th>Obligation</th><th>Disposition conventionnelle</th><th>Minimum legal</th><th>+Favorable?</th></tr></thead><tbody>";for(var i=0;i<r.obligations_conventionnelles.length;i++){var o=r.obligations_conventionnelles[i];var badge=o.plus_favorable===true?"<span style='color:#16a34a'>&#10004; Oui</span>":o.plus_favorable===false?"<span style='color:#dc2626'>&#10008; Non</span>":"<span style='color:#d97706'>&#8212;</span>";h+="<tr><td><strong>"+o.obligation+"</strong></td><td>"+o.conventionnel+"</td><td>"+(o.legal||"-")+"</td><td>"+badge+"</td></tr>";}h+="</tbody></table>";h+="<p style='margin-top:8px;font-size:.85em;color:var(--tx2)'><strong>"+r.nb_obligations_plus_favorables+"</strong> disposition(s) conventionnelle(s) plus favorable(s) que la loi.</p>";}else{h+="<p style='color:var(--tx2);font-style:italic'>Aucune specificite conventionnelle identifiee au-dela du minimum legal.</p>";}h+="<h3 style='margin-top:16px'>&#128214; Rappel obligations legales (Code du travail / ANI)</h3>";if(r.obligations_legales){h+="<table><thead><tr><th>Obligation</th><th>Minimum legal</th></tr></thead><tbody>";for(var j=0;j<r.obligations_legales.length;j++){var ol=r.obligations_legales[j];h+="<tr><td>"+ol.obligation+"</td><td>"+ol.legal+"</td></tr>";}h+="</tbody></table>";}h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";document.getElementById("sim-ccn-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simCCN(){var ccn=document.getElementById("ccn-search").value;if(!ccn){toast("Saisissez un IDCC ou un nom de convention collective");return;}var p="ccn="+encodeURIComponent(ccn)+"&brut_mensuel="+gv("ccn-brut")+"&est_cadre="+gv("ccn-cadre")+"&effectif="+gv("ccn-eff");fetch("/api/simulation/ccn?"+p).then(safeJson).then(function(r){var h="";if(r.ccn_identifiee){h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#9989;</span><span><strong>IDCC "+r.idcc+" - "+r.nom_ccn+"</strong>"+(r.secteur?" ("+r.secteur+")":"")+"</span></div>";}else{h+="<div class='al warn' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span><strong>Convention non identifiee</strong> — les minimums legaux sont appliques. Essayez un numero IDCC (ex: 1486).</span></div>";}if(r.alerte_salaire_minimum){var cls=r.alerte_salaire_minimum.niveau==="haute"?"err":"warn";h+="<div class='al "+cls+"' style='margin-bottom:12px'><span class='ai'>&#9888;</span><span>"+r.alerte_salaire_minimum.message+"</span></div>";}h+="<div class='g4'><div class='sc blue'><div class='val'>"+r.bulletin.brut_mensuel.toFixed(2)+"</div><div class='lab'>Brut mensuel</div></div><div class='sc green'><div class='val'>"+r.bulletin.net_avant_impot.toFixed(2)+"</div><div class='lab'>Net avant impot</div></div><div class='sc amber'><div class='val'>"+r.bulletin.cout_total_employeur.toFixed(2)+"</div><div class='lab'>Cout employeur</div></div><div class='sc'><div class='val'>"+r.prevoyance_ccn.montant_mensuel.toFixed(2)+"</div><div class='lab'>Prevoyance CCN/mois</div></div></div>";if(r.salaire_minimum_conventionnel||r.smic_mensuel){h+="<div style='margin:10px 0;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--p)'><strong>&#128176; Salaires minimums applicables</strong><div style='margin-top:6px;font-size:.88em'><span>SMIC legal : <b>"+r.smic_mensuel.toFixed(2)+" EUR/mois</b></span>";if(r.salaire_minimum_conventionnel){h+=" | Minimum conventionnel : <b style='color:"+(r.salaire_minimum_conventionnel>r.smic_mensuel?"#16a34a":"var(--tx)")+"'>"+r.salaire_minimum_conventionnel.toFixed(2)+" EUR/mois</b>";}h+="</div></div>";};h+="<h3 style='margin-top:16px'>&#9878; Obligations conventionnelles vs legales</h3>";if(r.obligations_conventionnelles&&r.obligations_conventionnelles.length>0){h+="<table><thead><tr><th>Obligation</th><th>Disposition conventionnelle</th><th>Minimum legal</th><th>+Favorable?</th></tr></thead><tbody>";for(var i=0;i<r.obligations_conventionnelles.length;i++){var o=r.obligations_conventionnelles[i];var badge=o.plus_favorable===true?"<span style='color:#16a34a'>&#10004; Oui</span>":o.plus_favorable===false?"<span style='color:#dc2626'>&#10008; Non</span>":"<span style='color:#d97706'>&#8212;</span>";h+="<tr><td><strong>"+o.obligation+"</strong></td><td>"+o.conventionnel+"</td><td>"+(o.legal||"-")+"</td><td>"+badge+"</td></tr>";}h+="</tbody></table>";h+="<p style='margin-top:8px;font-size:.85em;color:var(--tx2)'><strong>"+r.nb_obligations_plus_favorables+"</strong> disposition(s) conventionnelle(s) plus favorable(s) que la loi.</p>";}else{h+="<p style='color:var(--tx2);font-style:italic'>Aucune specificite conventionnelle identifiee au-dela du minimum legal.</p>";}h+="<h3 style='margin-top:16px'>&#128214; Rappel obligations legales (Code du travail / ANI)</h3>";if(r.obligations_legales){h+="<table><thead><tr><th>Obligation</th><th>Minimum legal</th></tr></thead><tbody>";for(var j=0;j<r.obligations_legales.length;j++){var ol=r.obligations_legales[j];h+="<tr><td>"+ol.obligation+"</td><td>"+ol.legal+"</td></tr>";}h+="</tbody></table>";}h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";document.getElementById("sim-ccn-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simMicro(){fetch("/api/simulation/micro-entrepreneur?chiffre_affaires="+document.getElementById("sim-ca").value+"&activite="+document.getElementById("sim-act").value+"&acre="+document.getElementById("sim-acre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-micro-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simTNS(){fetch("/api/simulation/tns?revenu_net="+document.getElementById("sim-rev").value+"&type_statut="+document.getElementById("sim-stat").value+"&acre="+document.getElementById("sim-tacre").value).then(safeJson).then(function(r){var h="<div class='g4'>";for(var k in r){if(typeof r[k]==="number")h+="<div class='sc'><div class='val'>"+r[k].toFixed(2)+"</div><div class='lab'>"+k.replace(/_/g," ")+"</div></div>";}h+="</div>";document.getElementById("sim-tns-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simGUSO(){var p="salaire_brut="+gv("sim-gbrut")+"&nb_heures="+gv("sim-gh")+"&type_contrat="+gv("sim-gtype")+"&est_artiste="+gv("sim-gartiste");fetch("/api/simulation/guso?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+fmtN(r.salaire_brut)+"</div><div class='lab'>Brut "+r.type_contrat+"</div></div><div class='sc green'><div class='val'>"+fmtN(r.net_artiste)+"</div><div class='lab'>Net "+(r.est_artiste?"artiste":"technicien")+"</div></div><div class='sc amber'><div class='val'>"+fmtN(r.total_charges_guso)+"</div><div class='lab'>Total charges GUSO</div></div><div class='sc red'><div class='val'>"+fmtN(r.cout_total_employeur)+"</div><div class='lab'>Cout total employeur</div></div></div>";h+="<h3 style='margin-top:14px'>Detail des cotisations spectacle</h3><table><thead><tr><th>Cotisation</th><th class='num'>Montant</th><th>Base</th></tr></thead><tbody>";h+="<tr><td>Cotisations patronales URSSAF</td><td class='num'>"+fmtN(r.cotisations_patronales_urssaf)+"</td><td>Droit commun</td></tr>";h+="<tr><td><strong>Conge spectacle (15.5%)</strong></td><td class='num'>"+fmtN(r.conge_spectacle_15_5pct)+"</td><td>Obligatoire spectacle</td></tr>";h+="<tr><td>Audiens prevoyance (1.5%)</td><td class='num'>"+fmtN(r.audiens_prevoyance)+"</td><td>CCN Spectacle</td></tr>";h+="<tr><td>Audiens sante (0.82%)</td><td class='num'>"+fmtN(r.audiens_sante)+"</td><td>Complementaire obligatoire</td></tr>";h+="<tr><td>FCAP (0.5%)</td><td class='num'>"+fmtN(r.fcap)+"</td><td>Pole emploi spectacle</td></tr>";h+="<tr><td>Medecine du travail</td><td class='num'>"+fmtN(r.medecine_travail)+"</td><td>0.46 EUR/heure</td></tr>";h+="</tbody></table>";if(r.detail_csg_crds){var csg=r.detail_csg_crds;h+="<h3 style='margin-top:14px'>CSG/CRDS (prelevements salarie)</h3><table><thead><tr><th>Prelevement</th><th class='num'>Montant</th></tr></thead><tbody>";h+="<tr><td>CSG deductible (6.8%)</td><td class='num'>"+fmtN(csg.csg_deductible_6_8)+"</td></tr>";h+="<tr><td>CSG non deductible (2.4%)</td><td class='num'>"+fmtN(csg.csg_non_deductible_2_4)+"</td></tr>";h+="<tr><td>CRDS (0.5%)</td><td class='num'>"+fmtN(csg.crds_0_5)+"</td></tr>";h+="<tr style='font-weight:600'><td>Total CSG/CRDS</td><td class='num'>"+fmtN(csg.total)+"</td></tr>";h+="</tbody></table>";}if(r.rappel){h+="<p style='margin-top:10px;font-size:.83em;color:var(--tx2);font-style:italic'>"+r.rappel+"</p>";}document.getElementById("sim-guso-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
@@ -15120,7 +15328,7 @@ document.getElementById("sim-exo-res").innerHTML=h;}).catch(function(e){toast(e.
 function simMasse(){var p="brut_moyen="+gv("ms-brut")+"&effectif="+gv("ms-eff")+"&augmentation_pct="+gv("ms-aug")+"&inflation_pct="+gv("ms-infl")+"&frais_km_moyen="+gv("ms-km")+"&avantages_nature_moyen="+gv("ms-an")+"&primes_variables_pct="+gv("ms-primes")+"&turnover_pct="+gv("ms-turn");fetch("/api/simulation/masse-salariale?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+fmt(r.masse_actuelle)+"</div><div class='lab'>Masse actuelle</div></div><div class='sc amber'><div class='val'>"+fmt(r.masse_apres_augmentation)+"</div><div class='lab'>Apres augmentation</div></div><div class='sc'><div class='val'>"+fmt(r.cout_global_projete)+"</div><div class='lab'>Cout global projete</div></div><div class='sc "+(r.evolution_pct>0?"red":"green")+"'><div class='val'>"+(r.evolution_pct>0?"+":"")+r.evolution_pct+"%</div><div class='lab'>Evolution</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant annuel</th></tr>";h+="<tr><td>Masse actuelle (brut)</td><td class='num'>"+fmt(r.masse_actuelle)+"</td></tr>";h+="<tr><td>Charges patronales actuelles (45%)</td><td class='num'>"+fmt(r.charges_patronales_actuelles)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total actuel</td><td class='num'>"+fmt(r.cout_total_actuel)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Impact augmentation (+"+r.augmentation_pct+"%)</td></tr>";h+="<tr><td>Nouveau brut moyen</td><td class='num'>"+r.nouveau_brut_moyen.toFixed(2)+" EUR/mois</td></tr>";h+="<tr><td>Cout augmentation (brut)</td><td class='num'>"+fmt(r.cout_augmentation_brut)+"</td></tr>";h+="<tr><td>Charges supplementaires</td><td class='num'>"+fmt(r.cout_augmentation_charges)+"</td></tr>";h+="<tr style='font-weight:600'><td>Cout total augmentation</td><td class='num'>"+fmt(r.cout_augmentation_total)+"</td></tr>";h+="<tr><td colspan='2' style='background:var(--bg2);font-weight:600;padding-top:8px'>Autres postes</td></tr>";h+="<tr><td>Perte pouvoir achat (inflation "+r.augmentation_pct+"% vs "+gv("ms-infl")+"%)</td><td class='num'>"+fmt(r.perte_pouvoir_achat_inflation)+"</td></tr>";h+="<tr><td>Ecart augmentation/inflation</td><td class='num'>"+fmt(r.ecart_augmentation_inflation)+"</td></tr>";h+="<tr><td>Primes variables</td><td class='num'>"+fmt(r.primes_variables_total)+"</td></tr>";h+="<tr><td>Charges sur primes</td><td class='num'>"+fmt(r.charges_primes)+"</td></tr>";h+="<tr><td>Frais kilometriques (non soumis)</td><td class='num'>"+fmt(r.frais_km_total)+"</td></tr>";h+="<tr><td>Avantages en nature (soumis)</td><td class='num'>"+fmt(r.avantages_nature_total)+"</td></tr>";h+="<tr><td>Charges sur avantages</td><td class='num'>"+fmt(r.charges_avantages)+"</td></tr>";h+="<tr><td>Cout turnover estime</td><td class='num'>"+fmt(r.cout_turnover_estime)+"</td></tr>";h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT GLOBAL PROJETE</td><td class='num'>"+fmt(r.cout_global_projete)+"</td></tr></table>";document.getElementById("sim-masse-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simSeuils(){fetch("/api/simulation/seuils-effectif?effectif_actuel="+gv("se-eff")+"&masse_salariale_annuelle="+gv("se-masse")).then(safeJson).then(function(r){var h="";if(r.prochain_seuil){h+="<div class='g3'><div class='sc amber'><div class='val'>"+r.prochain_seuil+"</div><div class='lab'>Prochain seuil</div></div><div class='sc blue'><div class='val'>"+r.marge_avant_seuil+"</div><div class='lab'>Salaries avant seuil</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_prochain_seuil)+"</div><div class='lab'>Cout franchissement</div></div></div>";}h+="<div class='g2' style='margin-top:10px'><div class='sc'><div class='val'>"+r.effectif_actuel+"</div><div class='lab'>Effectif actuel</div></div><div class='sc amber'><div class='val'>"+fmt(r.total_obligations_actuelles)+"</div><div class='lab'>Obligations actuelles</div></div></div>";var seuils=r.seuils||[];for(var i=0;i<seuils.length;i++){var s=seuils[i];var obligs=s.obligations||[];var franchi=obligs.length>0&&obligs[0].franchi;h+="<div style='margin-top:14px;padding:10px;border-radius:8px;background:"+(franchi?"var(--bg2)":"var(--bg1)")+";border:1px solid "+(franchi?"var(--green)":"var(--border)")+"'>";h+="<h3 style='margin:0 0 6px'>"+(franchi?"&#9989; ":"&#9898; ")+"Seuil "+s.seuil+" salaries</h3>";h+="<table style='margin:0'><tr><th>Obligation</th><th>Reference</th><th class='num'>Cout estime</th><th>Detail</th></tr>";for(var j=0;j<obligs.length;j++){var o=obligs[j];h+="<tr><td>"+o.nom+"</td><td style='font-size:.8em'>"+o.reference+"</td><td class='num'>"+fmt(o.cout_estime)+"</td><td style='font-size:.84em;color:var(--tx2)'>"+o.detail+"</td></tr>";}h+="</table></div>";}document.getElementById("sim-seuils-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simFinContrat(){var p="type_fin="+gv("fc-type")+"&salaire_brut="+gv("fc-brut")+"&anciennete_mois="+gv("fc-anc")+"&est_cadre="+gv("fc-cadre")+"&motif="+gv("fc-motif");fetch("/api/simulation/fin-contrat?"+p).then(safeJson).then(function(r){var h="<div class='g3'><div class='sc blue'><div class='val'>"+r.type_fin.replace(/_/g," ")+"</div><div class='lab'>Type</div></div><div class='sc'><div class='val'>"+r.anciennete_ans+" ans</div><div class='lab'>Anciennete</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_total)+"</div><div class='lab'>Cout total</div></div></div>";h+="<table style='margin-top:12px'><tr><th>Poste</th><th class='num'>Montant</th></tr>";var skip={"type_fin":1,"salaire_brut":1,"anciennete_mois":1,"anciennete_ans":1,"cout_total":1,"reference":1,"motif":1,"note":1,"exceptions":1};for(var k in r){if(!skip[k]&&typeof r[k]==="number"){h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+r[k].toFixed(2)+"</td></tr>";}}h+="<tr style='font-weight:600;background:var(--bg2)'><td>COUT TOTAL</td><td class='num'>"+r.cout_total.toFixed(2)+"</td></tr></table>";if(r.reference)h+="<p style='margin-top:8px;font-size:.82em;color:var(--tx2)'>Ref: "+r.reference+"</p>";if(r.note)h+="<p style='font-size:.82em;color:var(--amber)'>"+r.note+"</p>";if(r.exceptions)h+="<p style='font-size:.82em;color:var(--tx2)'>"+r.exceptions+"</p>";document.getElementById("sim-fc-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
-function simOptim(){var p="benefice_net="+gv("op-benef")+"&remuneration_gerant="+gv("op-rem")+"&dividendes="+gv("op-div")+"&interessement="+gv("op-int")+"&participation="+gv("op-part")+"&frais_pro="+gv("op-frais")+"&pee_abondement="+gv("op-pee")+"&nb_parts="+gv("op-parts")+"&forme_juridique="+gv("op-forme");fetch("/api/simulation/optimisation?"+p).then(safeJson).then(function(r){var h="<div class='g2' style='margin-bottom:12px'><div class='sc green'><div class='val'>"+r.meilleur_scenario+"</div><div class='lab'>Meilleur scenario</div></div><div class='sc blue'><div class='val'>"+fmt(r.ecart_max)+"</div><div class='lab'>Ecart max entre scenarios</div></div></div>";var sc=r.scenarios||[];h+="<table><tr><th>Scenario</th><th class='num'>Salaire brut</th><th class='num'>Charges</th><th class='num'>Dividendes</th><th class='num'>IR</th><th class='num'>Net disponible</th><th>Protection</th></tr>";for(var i=0;i<sc.length;i++){var s=sc[i];var best=s.nom===r.meilleur_scenario?" style='background:var(--bg2);font-weight:600'":"";h+="<tr"+best+"><td>"+s.nom+"</td><td class='num'>"+s.salaire_brut.toFixed(2)+"</td><td class='num'>"+s.charges_sociales.toFixed(2)+"</td><td class='num'>"+(s.dividendes||0).toFixed(2)+"</td><td class='num'>"+s.ir.toFixed(2)+"</td><td class='num' style='font-weight:600'>"+s.net_disponible.toFixed(2)+"</td><td style='font-size:.8em'>"+s.protection_sociale+"</td></tr>";}h+="</table>";if(r.frais_professionnels){var fp=r.frais_professionnels;h+="<div style='margin-top:14px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Frais professionnels deductibles</h3>";h+="<p style='margin:0 0 6px;font-size:.84em'>Frais declares: <b>"+fp.frais_declares.toFixed(2)+" EUR</b> - Economie IS: <b>"+fp.economie_is.toFixed(2)+" EUR</b></p>";h+="<div style='font-size:.84em;color:var(--tx2)'>Types eligibles: "+fp.types_eligibles.join(" | ")+"</div></div>";}document.getElementById("sim-optim-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
+function simOptim(){var p="benefice_net="+gv("op-benef")+"&remuneration_gerant="+gv("op-rem")+"&dividendes="+gv("op-div")+"&interessement="+gv("op-int")+"&participation="+gv("op-part")+"&frais_pro="+gv("op-frais")+"&pee_abondement="+gv("op-pee")+"&nb_parts="+gv("op-parts")+"&forme_juridique="+gv("op-forme");fetch("/api/simulation/optimisation?"+p).then(safeJson).then(function(r){var h="";h+="<div class='al ok' style='margin-bottom:12px'><span class='ai'>&#127942;</span><span><strong>Meilleur scenario : "+r.meilleur_scenario+"</strong> — ecart max entre scenarios : <b>"+fmtN(r.ecart_max)+" EUR</b></span></div>";var sc=r.scenarios||[];for(var i=0;i<sc.length;i++){var s=sc[i];var isBest=s.nom===r.meilleur_scenario;var border=isBest?"border:2px solid #16a34a;":"border:1px solid var(--border);";h+="<div style='"+border+"border-radius:10px;padding:14px;margin-bottom:14px;background:var(--bg1)'>";h+="<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>";h+="<h3 style='margin:0;font-size:1em'>"+(isBest?"&#127942; ":"")+"Scenario "+(i+1)+" : "+s.nom+"</h3>";h+="<div style='font-size:1.2em;font-weight:700;color:"+(isBest?"#16a34a":"var(--tx)")+"'>"+fmtN(s.net_disponible)+" EUR net</div></div>";if(s.description){h+="<p style='margin:6px 0 10px;font-size:.84em;color:var(--tx2)'>"+s.description+"</p>";}h+="<div class='g3' style='margin-bottom:8px'><div class='sc blue'><div class='val'>"+fmtN(s.salaire_brut)+"</div><div class='lab'>Salaire brut annuel</div></div><div class='sc amber'><div class='val'>"+fmtN(s.charges_sociales)+"</div><div class='lab'>Charges patronales</div></div><div class='sc green'><div class='val' style='font-size:1.1em'>"+fmtN(s.net_disponible)+"</div><div class='lab'>Net disponible</div></div></div>";h+="<table style='margin:0'><thead><tr><th>Poste</th><th class='num'>Montant (EUR)</th><th>Detail</th></tr></thead><tbody>";h+="<tr><td>Salaire brut annuel</td><td class='num'>"+fmtN(s.salaire_brut)+"</td><td style='font-size:.82em;color:var(--tx2)'>"+fmtN(s.salaire_brut/12)+" EUR/mois</td></tr>";h+="<tr><td>Charges patronales (42%)</td><td class='num' style='color:var(--r)'>-"+fmtN(s.charges_sociales)+"</td><td style='font-size:.82em;color:var(--tx2)'>A la charge de l entreprise</td></tr>";h+="<tr><td>IS (Impot sur les societes)</td><td class='num' style='color:var(--r)'>-"+fmtN(s.is_entreprise||0)+"</td><td style='font-size:.82em;color:var(--tx2)'>"+(s.is_entreprise>0?"15% jusqu a 42 500 EUR puis 25%":"Pas d IS (tout en salaire)")+"</td></tr>";h+="<tr><td>Dividendes distribues</td><td class='num'>"+fmtN(s.dividendes||0)+"</td><td style='font-size:.82em;color:var(--tx2)'>"+(s.dividendes>0?"Apres IS, nets de l entreprise":"")+"</td></tr>";h+="<tr><td>PFU sur dividendes (30%)</td><td class='num' style='color:var(--r)'>-"+fmtN(s.pfu_dividendes||0)+"</td><td style='font-size:.82em;color:var(--tx2)'>"+(s.pfu_dividendes>0?"Flat tax : 12.8% IR + 17.2% PS":"")+"</td></tr>";if(s.interessement){h+="<tr><td>Interessement</td><td class='num'>"+fmtN(s.interessement)+"</td><td style='font-size:.82em;color:var(--tx2)'>Exonere d IR si PEE (bloque 5 ans)</td></tr>";}if(s.participation){h+="<tr><td>Participation</td><td class='num'>"+fmtN(s.participation)+"</td><td style='font-size:.82em;color:var(--tx2)'>Exoneree d IR si PEE (bloquee 5 ans)</td></tr>";}if(s.abondement_pee){h+="<tr><td>Abondement PEE</td><td class='num'>"+fmtN(s.abondement_pee)+"</td><td style='font-size:.82em;color:var(--tx2)'>Plafond 2026 : 3 709 EUR</td></tr>";}if(s.forfait_social){h+="<tr><td>Forfait social (20%)</td><td class='num' style='color:var(--r)'>-"+fmtN(s.forfait_social)+"</td><td style='font-size:.82em;color:var(--tx2)'>Sur epargne salariale</td></tr>";}h+="<tr><td>IR (Impot sur le revenu)</td><td class='num' style='color:var(--r)'>-"+fmtN(s.ir)+"</td><td style='font-size:.82em;color:var(--tx2)'>Bareme progressif "+r.forme_juridique.toUpperCase()+"</td></tr>";h+="<tr style='font-weight:700;background:var(--bg2)'><td>NET DISPONIBLE</td><td class='num' style='color:#16a34a;font-size:1.05em'>"+fmtN(s.net_disponible)+"</td><td style='font-size:.82em'>Somme percue apres tous prelevements</td></tr>";h+="</tbody></table>";h+="<div style='margin-top:6px;font-size:.82em;color:var(--tx2)'>&#128737; Protection sociale : "+s.protection_sociale+"</div>";if(s.tresorerie_residuelle>0){h+="<div style='margin-top:4px;font-size:.82em;color:var(--tx2)'>&#128176; Tresorerie residuelle en entreprise : "+fmtN(s.tresorerie_residuelle)+" EUR</div>";}h+="</div>";}if(r.frais_professionnels){var fp=r.frais_professionnels;h+="<div style='margin-top:14px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Frais professionnels deductibles</h3>";h+="<p style='margin:0 0 6px;font-size:.84em'>Frais declares: <b>"+fp.frais_declares.toFixed(2)+" EUR</b> - Economie IS: <b>"+fp.economie_is.toFixed(2)+" EUR</b></p>";h+="<div style='font-size:.84em;color:var(--tx2)'>Types eligibles: "+fp.types_eligibles.join(" | ")+"</div></div>";}document.getElementById("sim-optim-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 function simRisques(){var p="code_naf="+encodeURIComponent(gv("rs-naf"))+"&effectif="+gv("rs-eff")+"&masse_salariale="+gv("rs-masse");fetch("/api/simulation/risques-sectoriels?"+p).then(safeJson).then(function(r){var h="<div class='g4'><div class='sc blue'><div class='val'>"+r.secteur+"</div><div class='lab'>Secteur</div></div><div class='sc amber'><div class='val'>"+r.taux_at_moyen+"%</div><div class='lab'>Taux AT moyen</div></div><div class='sc red'><div class='val'>"+fmt(r.cout_at_annuel)+"</div><div class='lab'>Cout AT annuel</div></div><div class='sc'><div class='val'>"+r.effectif+"</div><div class='lab'>Effectif</div></div></div>";h+="<div style='margin-top:14px'><h3>Risques specifiques du secteur</h3><ul style='margin:6px 0;padding-left:20px'>";var rs=r.risques_specifiques||[];for(var i=0;i<rs.length;i++)h+="<li style='margin:3px 0'>"+rs[i]+"</li>";h+="</ul></div>";h+="<h3 style='margin-top:14px'>Risques financiers</h3><table><tr><th>Risque</th><th class='num'>Impact estime</th><th>Detail</th></tr>";var rf=r.risques_financiers||[];for(var i=0;i<rf.length;i++){h+="<tr><td>"+rf[i].risque+"</td><td class='num'>"+fmt(rf[i].impact_estime)+"</td><td style='font-size:.84em'>"+rf[i].detail+"</td></tr>";}h+="</table>";h+="<h3 style='margin-top:14px'>Subventions eligibles</h3><table><tr><th>Subvention</th><th class='num'>Montant max</th><th>Condition</th></tr>";var sb=r.subventions_eligibles||[];for(var i=0;i<sb.length;i++){h+="<tr><td>"+sb[i].nom+"</td><td class='num'>"+fmt(sb[i].montant_max)+"</td><td style='font-size:.84em'>"+sb[i].condition+"</td></tr>";}h+="</table>";h+="<div style='margin-top:12px;padding:10px;background:var(--bg2);border-radius:8px'><h3 style='margin:0 0 6px'>Recommandations</h3><ul style='margin:0;padding-left:20px'>";var rc=r.recommandations||[];for(var i=0;i<rc.length;i++)h+="<li style='margin:3px 0'>"+rc[i]+"</li>";h+="</ul></div>";document.getElementById("sim-risques-res").innerHTML=h;}).catch(function(e){toast(e.message);});}
 
 /* === SUBVENTIONS === */
