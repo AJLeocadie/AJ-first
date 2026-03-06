@@ -3268,6 +3268,8 @@ async def sim_ir(
     autres_revenus: float = Query(0),
 ):
     rev = benefice + autres_revenus
+    if nb_parts <= 0:
+        nb_parts = 1
     qi = rev / nb_parts
     tranches = [(11294, 0), (28797, 0.11), (82341, 0.30), (177106, 0.41), (float("inf"), 0.45)]
     impot_qi = 0
@@ -3339,10 +3341,13 @@ async def sim_epargne_salariale(
     info_plafond = plafonds.get(td, {})
 
     # Calcul RSP (Reserve Speciale de Participation) si participation
+    # Formule legale: RSP = 0.5 * (B - 5%*C) * S/VA (Art. L.3324-1 CT)
+    # B=benefice net, C=capitaux propres, S=salaires, VA=valeur ajoutee
     rsp = 0
-    if td == "participation" and bn > 0:
+    if td == "participation" and bn > 0 and ms > 0:
         capitaux_propres = ms * 0.5  # estimation
-        rsp = round(max(0, 0.5 * (bn - 0.05 * capitaux_propres) * (ms / (ms + 0))), 2)
+        valeur_ajoutee = ms * 1.5  # estimation VA = masse salariale * 1.5
+        rsp = round(max(0, 0.5 * (bn - 0.05 * capitaux_propres) * (ms / valeur_ajoutee)), 2)
         if montant == 0 or montant > rsp:
             montant = rsp
         info_plafond["plafond_rsp"] = rsp
@@ -3513,11 +3518,11 @@ async def sim_exonerations(
     exonerations = []
     total_exo = 0.0
 
-    # === Taux patronaux detailles ===
-    taux_maladie = 0.07 if ratio_smic > 2.5 else 0.13
+    # === Taux patronaux detailles (2026, LFSS 2025 art.17 + LFSS 2026) ===
+    taux_maladie = 0.07 if ratio_smic <= 2.25 else 0.13   # Seuil 2.25 SMIC (LFSS 2025 art.17)
     taux_vieillesse_plaf = 0.0855
-    taux_vieillesse_deplaf = 0.0202
-    taux_af = 0.0525 if ratio_smic > 3.5 else 0.0345
+    taux_vieillesse_deplaf = 0.0211  # 2.11% (hausse LFSS 2026, ex-2.02%)
+    taux_af = 0.0325 if ratio_smic <= 3.3 else 0.0525     # Seuil 3.3 SMIC (LFSS 2025 art.17)
     taux_at_reel = taux_at if taux_at > 0 else 0.0208
     taux_fnal = 0.001 if effectif < 50 else 0.005
     taux_csa = 0.003
@@ -3527,25 +3532,26 @@ async def sim_exonerations(
     taux_pat_total = round(taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_at_reel + taux_fnal + taux_csa + taux_chom + taux_ags + taux_agirc, 4)
     charges_normales = round(brut * taux_pat_total, 2)
 
-    # 1. Reduction generale (ex-Fillon) - proratisee heures
-    if ratio_smic <= 3.5:
+    # 1. RGDU / Reduction generale (ex-Fillon) - formule 2026 (CSS art. L241-13 refonte)
+    # Seuil: 3 SMIC (RGDU 2026), formule: C = (T/0.6) * (3 * SMIC_retabli / brut - 1)
+    if ratio_smic <= 3.0:
         coeff_t = 0.3194 if effectif < 50 else 0.3234
-        # Formule officielle avec SMIC reconstitue (Art. D.241-7 CSS)
-        coeff = (coeff_t / 0.6) * (1.6 * smic_retabli / brut - 1) if brut > 0 else 0
+        # Formule RGDU 2026 avec SMIC reconstitue (Art. L.241-13 CSS refonte)
+        coeff = (coeff_t / 0.6) * (3.0 * smic_retabli / brut - 1) if brut > 0 else 0
         coeff = max(0, min(coeff, coeff_t))
         # Plafonnement : la reduction ne peut exceder les cotisations ecretes
         montant_fillon = round(brut * coeff, 2)
         # Regularisation progressive annuelle (Art. D.241-13 CSS)
-        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 / D.241-7 CSS",
+        exonerations.append({"nom": "Reduction generale (RGDU 2026)", "reference": "Art. L.241-13 CSS (refonte LFSS 2026)",
             "montant_mensuel": montant_fillon, "montant_annuel": round(montant_fillon * 12, 2),
-            "conditions": f"Ratio SMIC: {ratio_smic:.3f} (seuil 3.5). Coeff T={coeff_t}, coeff calcule={coeff:.5f}. "
+            "conditions": f"Ratio SMIC: {ratio_smic:.3f} (seuil 3.0). Coeff T={coeff_t}, coeff calcule={coeff:.5f}. "
                           f"SMIC retabli: {smic_retabli:.2f} EUR (presence {coeff_presence*100:.0f}%, TP {temps_partiel_pct:.0f}%). "
                           f"Heures contrat: {heures_contrat:.2f}h.", "applicable": True})
         total_exo += montant_fillon
     else:
-        exonerations.append({"nom": "Reduction generale (ex-Fillon)", "reference": "Art. L.241-13 / D.241-7 CSS",
+        exonerations.append({"nom": "Reduction generale (RGDU 2026)", "reference": "Art. L.241-13 CSS (refonte LFSS 2026)",
             "montant_mensuel": 0, "montant_annuel": 0,
-            "conditions": f"Non applicable: ratio SMIC {ratio_smic:.3f} > 3.5", "applicable": False})
+            "conditions": f"Non applicable: ratio SMIC {ratio_smic:.3f} > 3.0", "applicable": False})
 
     # 2. Exoneration apprenti
     if statut_salarie == "apprenti":
@@ -3662,7 +3668,7 @@ async def sim_exonerations(
     # 10. JEI (Jeune Entreprise Innovante)
     if statut_salarie == "jei":
         # Plafond: exoneration patronale SS hors AT/MP, plafond 5 PASS mensuel
-        pass_mensuel = 3864.0  # 2025
+        pass_mensuel = float(_PASS_MENSUEL)  # 4005 EUR en 2026
         plafond_jei = pass_mensuel * 5
         base_jei = min(brut, plafond_jei)
         taux_jei = taux_maladie + taux_vieillesse_plaf + taux_vieillesse_deplaf + taux_af + taux_fnal + taux_csa
@@ -3756,20 +3762,38 @@ async def sim_exonerations(
             "conditions": "Zone a finalite regionale. Exoneration partielle cotisations."})
         total_exo += exo_afr
 
+    # 17. Emplois francs (embauche d'un resident QPV)
+    if zone == "qpv" and statut_salarie == "emploi_franc":
+        # CDI : 5000 EUR/an pendant 3 ans = 416.67 EUR/mois
+        # CDD >= 6 mois : 2500 EUR/an pendant 2 ans = 208.33 EUR/mois
+        aide_ef_annuelle = 5000 if duree_contrat_mois == 0 or duree_contrat_mois >= 12 else 2500
+        aide_ef_mois = round(aide_ef_annuelle / 12, 2)
+        duree_ef = "3 ans (CDI)" if aide_ef_annuelle == 5000 else "2 ans (CDD >= 6 mois)"
+        exonerations.append({"nom": "Emploi franc (QPV)",
+            "reference": "Decret 2019-1471 / Art. L.5134-66 CT",
+            "montant_mensuel": aide_ef_mois, "montant_annuel": aide_ef_annuelle, "applicable": True,
+            "conditions": f"Embauche d un resident QPV. Aide {aide_ef_annuelle:.0f} EUR/an pendant {duree_ef}. "
+                          f"Cumulable avec la reduction generale et les aides a l insertion."})
+        total_exo += aide_ef_mois
+
     # === REGLES DE NON-CUMUL DES EXONERATIONS ===
     # Certaines exonerations sont mutuellement exclusives (Art. L.131-4-2, L.131-4-3 CSS)
     _NON_CUMUL_GROUPS = {
         "zone": ["Exoneration ZRR", "Exoneration ZFU-TE", "Exoneration QPV",
                  "Exoneration BER", "Exoneration AFR", "Exoneration ZRD"],
-        "generale_vs_zone": ["Reduction generale (ex-Fillon)"],
+        "generale_vs_zone": ["Reduction generale (RGDU 2026)"],
     }
-    # La reduction generale n'est pas cumulable avec les exo de zone, JEI, LODEOM, ACRE
+    # La RGDU n'est pas cumulable avec les exo de zone, JEI, LODEOM, ACRE (Art. L.241-13 IX CSS)
     _INCOMPATIBLES_FILLON = [
         "Exoneration ZRR", "Exoneration ZFU-TE", "Exoneration QPV",
         "Exoneration BER", "Exoneration ZRD", "Exoneration AFR",
         "Exoneration JEI (Jeune Entreprise Innovante)",
         "ACRE (Aide aux Createurs/Repreneurs)",
     ]
+    # Ajouter les exonerations LODEOM dynamiquement
+    for e in exonerations:
+        if e["nom"].startswith("Exoneration outre-mer") and e["nom"] not in _INCOMPATIBLES_FILLON:
+            _INCOMPATIBLES_FILLON.append(e["nom"])
     # ACRE non cumulable avec JEI
     _INCOMPATIBLES_ACRE = ["Exoneration JEI (Jeune Entreprise Innovante)"]
 
@@ -3787,13 +3811,13 @@ async def sim_exonerations(
             exo_desactivees.add(e["nom"])
 
     # 2. Reduction generale vs exonerations specifiques
-    has_fillon = any(e["nom"] == "Reduction generale (ex-Fillon)" and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
+    has_fillon = any(e["nom"] == "Reduction generale (RGDU 2026)" and e.get("applicable") and e.get("montant_mensuel", 0) > 0 for e in exonerations)
     exos_specifiques = [e for e in exonerations if e["nom"] in _INCOMPATIBLES_FILLON and e.get("applicable") and e.get("montant_mensuel", 0) > 0]
     if has_fillon and exos_specifiques:
-        fillon = next((e for e in exonerations if e["nom"] == "Reduction generale (ex-Fillon)"), None)
+        fillon = next((e for e in exonerations if e["nom"] == "Reduction generale (RGDU 2026)"), None)
         best_specific = max(exos_specifiques, key=lambda e: e.get("montant_mensuel", 0))
         if fillon and best_specific["montant_mensuel"] >= fillon["montant_mensuel"]:
-            exo_desactivees.add("Reduction generale (ex-Fillon)")
+            exo_desactivees.add("Reduction generale (RGDU 2026)")
         else:
             for e in exos_specifiques:
                 exo_desactivees.add(e["nom"])
@@ -4497,7 +4521,7 @@ async def sim_optimisation(
     })
 
     # Scenario 3: Maximum dividendes
-    sal_min = 12 * 1823.03  # SMIC annuel 2026
+    sal_min = float(_SMIC_MENSUEL) * 12  # SMIC annuel 2026
     charges_min = sal_min * 0.42
     net_min = sal_min - sal_min * 0.22
     is_base_3 = max(0, benefice_net - sal_min - charges_min)
@@ -5490,7 +5514,7 @@ async def rechercher_subventions(
         "organisme": "URSSAF / DGFIP", "niveau": "national", "categorie": "social",
         "type_aide": "exoneration",
         "description": "Exonerations renforcees de cotisations patronales pour les entreprises d Outre-mer. Baremes specifiques selon taille et secteur : competitivite, competitivite renforcee, innovation.",
-        "montant_max": "Exoneration jusqu a 2 SMIC (competitivite) ou 3.5 SMIC (innovation)",
+        "montant_max": "Exoneration jusqu a 2.2 SMIC (competitivite) ou 3.0 SMIC (innovation/croissance)",
         "montant_estime": None,
         "conditions": ["Siege social en DOM (Guadeloupe, Martinique, Guyane, Reunion, Mayotte)", "Effectif < 250 salaries (sauf secteurs prioritaires)"],
         "tailles": ["tpe", "pme"],
@@ -6711,7 +6735,7 @@ async def knowledge_audit(
         2023: {"pass": 43992, "smic_h": 11.27, "smic_m": 1709.28, "plafond_ss_m": 3666, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.24, "forfait_social_pee": 20, "taux_agff": 2.0},
         2024: {"pass": 46368, "smic_h": 11.65, "smic_m": 1766.92, "plafond_ss_m": 3864, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.23, "forfait_social_pee": 20, "taux_agff": 2.0},
         2025: {"pass": 47100, "smic_h": 11.88, "smic_m": 1801.80, "plafond_ss_m": 3925, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.22, "forfait_social_pee": 20, "taux_agff": 2.0},
-        2026: {"pass": 48060, "smic_h": 12.02, "smic_m": 1823.07, "plafond_ss_m": 4005, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.20, "forfait_social_pee": 20, "taux_agff": 2.0},
+        2026: {"pass": 48060, "smic_h": 12.02, "smic_m": 1823.03, "plafond_ss_m": 4005, "seuil_cse": 11, "seuil_participation": 50, "taux_at_moyen": 2.20, "forfait_social_pee": 20, "taux_agff": 2.0},
     }
     def _cst(annee, cle):
         return _CONSTANTES_HIST.get(annee, _CONSTANTES_HIST.get(2026, {})).get(cle, 0)
@@ -13469,7 +13493,7 @@ APP_HTML += """
 <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
 <h3 style="margin:0 0 8px;font-size:.95em">&#128100; Salarie simule</h3>
 <div class="g4"><div><label>Salaire brut mensuel du salarie (EUR)</label><input type="number" step="0.01" id="exo-brut" value="2000"></div><div><label>Effectif total de l entreprise (nb salaries)</label><input type="number" id="exo-eff" value="10"></div><div><label>Age du salarie simule</label><input type="number" id="exo-age" value="30"></div><div><label>Duree du contrat (mois, 0 = CDI)</label><input type="number" id="exo-duree" value="0" placeholder="0 = CDI"></div></div>
-<div class="g4"><div><label>Statut du salarie</label><select id="exo-statut"><option value="standard">Standard (CDI/CDD)</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option></select></div><div><label>Statut cadre/non-cadre</label><select id="exo-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div><div><label>Nb de salaries au meme profil (simulation groupee)</label><input type="number" id="exo-nb" value="1" min="1" max="500"></div></div>
+<div class="g4"><div><label>Statut du salarie</label><select id="exo-statut"><option value="standard">Standard (CDI/CDD)</option><option value="apprenti">Apprenti</option><option value="handicape">Travailleur handicape (RQTH)</option><option value="jei">JEI - Chercheur/technicien</option><option value="contrat_pro">Contrat professionnalisation</option><option value="acre">ACRE (Createur/Repreneur)</option><option value="emploi_franc">Emploi franc (resident QPV)</option></select></div><div><label>Statut cadre/non-cadre</label><select id="exo-cadre"><option value="false">Non cadre</option><option value="true">Cadre</option></select></div><div><label>Convention collective</label><input id="exo-ccn" placeholder="Ex: Syntec, HCR, BTP..."></div><div><label>Nb de salaries au meme profil (simulation groupee)</label><input type="number" id="exo-nb" value="1" min="1" max="500"></div></div>
 </div>
 
 <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:12px">
@@ -14214,7 +14238,7 @@ S<sub>URSSAF</sub> = max(0, 100 &times; (1 - &Sigma;W<sub>k</sub> / W<sub>max</s
 <h3 style="margin-bottom:8px">Perimetres de controle</h3>
 <table><thead><tr><th>Point de controle</th><th>Reference legale</th><th>Nature du constat</th></tr></thead><tbody>
 <tr><td>Assiette des cotisations</td><td>Art. L242-1 CSS</td><td>Ecart brut BS vs DSN</td></tr>
-<tr><td>Reduction generale (ex-Fillon)</td><td>Art. L241-13 CSS</td><td>Depassement 3,5 SMIC, coefficient errone</td></tr>
+<tr><td>Reduction generale (RGDU 2026)</td><td>Art. L241-13 CSS (refonte)</td><td>Depassement 3,0 SMIC, coefficient errone</td></tr>
 <tr><td>FNAL</td><td>Art. L834-1 CSS</td><td>Taux incorrect selon effectif (&lt;50 / &ge;50)</td></tr>
 <tr><td>Taux AT/MP</td><td>Art. L242-5, D242-6-1 CSS</td><td>Taux applique vs taux notifie</td></tr>
 <tr><td>CSG/CRDS</td><td>Art. L136-1-1 CSS</td><td>Assiette incorrecte (abattement 1,75%)</td></tr>
