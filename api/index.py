@@ -3573,12 +3573,14 @@ async def sim_exonerations(
     heures_contrat = nb_heures_mensuelles * coeff_tp
     smic_mensuel = smic_mensuel_ref * coeff_tp
 
-    # Prorata absences : on deduit les jours d'absence du SMIC reconstitue
+    # Prorata absences : on deduit les jours d'absence du SMIC reconstitue ET du brut
     jours_ouvres_mois = 21.67
     coeff_presence = max(0, (jours_ouvres_mois - jours_absence) / jours_ouvres_mois)
     smic_retabli = round(smic_mensuel * coeff_presence, 2)
 
-    brut = brut_mensuel
+    # Le brut doit aussi etre proratise pour les absences (coherent avec generer_bulletin)
+    retenue_absences = round(brut_mensuel / jours_ouvres_mois * jours_absence, 2) if jours_absence > 0 else 0
+    brut = round(brut_mensuel - retenue_absences, 2)
     ratio_smic = brut / smic_retabli if smic_retabli > 0 else 999
 
     exonerations = []
@@ -3753,7 +3755,7 @@ async def sim_exonerations(
 
     # 11. TEPA - Desocialisation des heures supplementaires
     if heures_supplementaires > 0:
-        taux_horaire = round(brut / heures_contrat, 2) if heures_contrat > 0 else 0
+        taux_horaire = round(brut_mensuel / heures_contrat, 2) if heures_contrat > 0 else 0
         # Majoration : 25% (1-8h), 50% (au-dela)
         hs_25 = min(heures_supplementaires, 8) * taux_horaire * 1.25
         hs_50 = max(0, heures_supplementaires - 8) * taux_horaire * 1.50
@@ -3917,22 +3919,25 @@ async def sim_exonerations(
 
     # Impact des absences sur cotisations
     info_absences = {}
-    if jours_absence > 0 and type_absence:
+    if jours_absence > 0:
         ijss = 0
         complement = 0
+        # Les IJSS se calculent sur le salaire de reference (brut_mensuel contractuel)
         if type_absence == "maladie":
-            ijss = round(min(brut / 30.42, smic_mensuel_ref / 30.42 * 1.8) * 0.5 * jours_absence, 2)
+            ijss = round(min(brut_mensuel / 30.42, smic_mensuel_ref / 30.42 * 1.8) * 0.5 * jours_absence, 2)
             # Complement employeur apres carence 7j (Art. L.1226-1 CT)
             jours_complement = max(0, jours_absence - 7)
-            complement = round((brut / 30.42) * 0.9 * min(jours_complement, 30), 2)
+            complement = round((brut_mensuel / 30.42) * 0.9 * min(jours_complement, 30), 2)
         elif type_absence == "maternite":
-            ijss = round(min(brut / 30.42, smic_mensuel_ref / 30.42 * 1.8) * jours_absence, 2)
+            ijss = round(min(brut_mensuel / 30.42, smic_mensuel_ref / 30.42 * 1.8) * jours_absence, 2)
         elif type_absence == "at_mp":
-            ijss = round((brut / 30.42) * 0.6 * min(jours_absence, 28) + (brut / 30.42) * 0.8 * max(0, jours_absence - 28), 2)
+            ijss = round((brut_mensuel / 30.42) * 0.6 * min(jours_absence, 28) + (brut_mensuel / 30.42) * 0.8 * max(0, jours_absence - 28), 2)
         elif type_absence == "conge_sans_solde":
             ijss = 0
         info_absences = {
-            "type": type_absence, "jours": jours_absence,
+            "type": type_absence if type_absence else "non_precise", "jours": jours_absence,
+            "retenue_absences": retenue_absences,
+            "brut_contractuel": brut_mensuel, "brut_apres_absences": brut,
             "ijss_estimees": ijss, "complement_employeur": complement,
             "impact_smic_retabli": f"SMIC retabli de {smic_mensuel:.2f} a {smic_retabli:.2f} EUR",
             "impact_ratio": f"Ratio SMIC ajuste: {ratio_smic:.3f}",
@@ -3953,7 +3958,7 @@ async def sim_exonerations(
     return {
         "annee_baremes": annee,
         "baremes_appliques": f"Baremes {annee} (SMIC {smic_mensuel_ref:.2f} EUR, PASS {bar['pass_mensuel']:.2f} EUR)",
-        "brut_mensuel": brut, "effectif": effectif, "zone": zone, "statut_salarie": statut_salarie,
+        "brut_mensuel": brut, "brut_contractuel": brut_mensuel, "effectif": effectif, "zone": zone, "statut_salarie": statut_salarie,
         "ratio_smic": round(ratio_smic, 3), "smic_retabli": smic_retabli,
         "smic_mensuel_ref": smic_mensuel_ref,
         "heures_contrat": round(heures_contrat, 2),
@@ -15102,7 +15107,7 @@ if(r.taux_patronal_detaille){var tp=r.taux_patronal_detaille;h+="<div style='mar
 for(var k in tp){if(k!=="total")h+="<tr><td>"+k.replace(/_/g," ")+"</td><td class='num'>"+(tp[k]*100).toFixed(2)+"%</td></tr>";}
 h+="<tr style='font-weight:600;background:var(--bg2)'><td>TOTAL</td><td class='num'>"+(tp.total*100).toFixed(2)+"%</td></tr></table></details></div>";}
 // Absences
-if(r.info_absences){var ab=r.info_absences;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--o)'><strong>&#128197; Impact absences ("+ab.jours+" jours - "+ab.type+")</strong><div style='font-size:.84em;margin-top:4px'>IJSS estimees: <b>"+fmtN(ab.ijss_estimees)+" EUR</b>";if(ab.complement_employeur>0)h+=" | Complement employeur: <b>"+fmtN(ab.complement_employeur)+" EUR</b>";h+="<br>"+ab.impact_smic_retabli+" | "+ab.impact_ratio+"</div></div>";}
+if(r.info_absences){var ab=r.info_absences;h+="<div style='margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--o)'><strong>&#128197; Impact absences ("+ab.jours+" jours - "+ab.type+")</strong><div style='font-size:.84em;margin-top:4px'>Retenue absences: <b>"+fmtN(ab.retenue_absences)+" EUR</b> | Brut contractuel: <b>"+fmtN(ab.brut_contractuel)+" EUR</b> &rarr; Brut apres absences: <b>"+fmtN(ab.brut_apres_absences)+" EUR</b>";if(ab.ijss_estimees>0)h+="<br>IJSS estimees: <b>"+fmtN(ab.ijss_estimees)+" EUR</b>";if(ab.complement_employeur>0)h+=" | Complement employeur: <b>"+fmtN(ab.complement_employeur)+" EUR</b>";h+="<br>"+ab.impact_smic_retabli+" | "+ab.impact_ratio+"</div></div>";}
 // Tableau exonerations
 h+="<table style='margin-top:12px'><tr><th>Exoneration</th><th>Reference</th><th class='num'>Mensuel (EUR)</th><th class='num'>Annuel (EUR)</th><th>Statut</th></tr>";
 var exos=r.exonerations||[];for(var i=0;i<exos.length;i++){var e=exos[i];var cls=e.applicable?"":"color:var(--tx2);opacity:.6";
