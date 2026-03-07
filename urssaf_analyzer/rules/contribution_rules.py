@@ -42,6 +42,25 @@ from urssaf_analyzer.config.constants import (
 )
 
 
+def _taux(ct: ContributionType, cle: str, defaut: Decimal = None) -> Decimal:
+    """Recupere un taux depuis TAUX_COTISATIONS_2026, source unique de verite.
+
+    Leve KeyError si le taux n'existe pas et aucun defaut n'est fourni,
+    evitant les fallbacks hardcodes desynchronises.
+    """
+    data = TAUX_COTISATIONS_2026.get(ct)
+    if data is None:
+        if defaut is not None:
+            return defaut
+        raise KeyError(f"Pas de taux defini pour {ct.value}")
+    val = data.get(cle)
+    if val is not None:
+        return val
+    if defaut is not None:
+        return defaut
+    raise KeyError(f"Cle '{cle}' absente pour {ct.value}")
+
+
 class ContributionRules:
     """Regles de calcul et de validation des cotisations sociales 2026.
 
@@ -83,29 +102,29 @@ class ContributionRules:
 
         # Maladie (reduction si <= 2.5 SMIC)
         if type_cotisation == ContributionType.MALADIE:
-            seuil = self._smic_mensuel * taux.get("seuil_reduction_smic", Decimal("2.5"))
+            seuil = self._smic_mensuel * _taux(ContributionType.MALADIE, "seuil_reduction_smic")
             if Decimal("0") < salaire_brut <= seuil:
-                return taux.get("patronal_reduit", taux["patronal"])
+                return _taux(ContributionType.MALADIE, "patronal_reduit")
             return taux["patronal"]
 
         # Allocations familiales (reduction si <= 3.5 SMIC)
         if type_cotisation == ContributionType.ALLOCATIONS_FAMILIALES:
-            seuil = self._smic_mensuel * taux.get("seuil_reduction_smic", Decimal("3.5"))
+            seuil = self._smic_mensuel * _taux(ContributionType.ALLOCATIONS_FAMILIALES, "seuil_reduction_smic")
             if Decimal("0") < salaire_brut <= seuil:
-                return taux.get("patronal_reduit", taux["patronal"])
+                return _taux(ContributionType.ALLOCATIONS_FAMILIALES, "patronal_reduit")
             return taux["patronal"]
 
         # FNAL : plafonne < 50, deplafonne >= 50
         if type_cotisation == ContributionType.FNAL:
             if self.effectif >= SEUIL_EFFECTIF_50:
-                return taux.get("patronal_50_plus", Decimal("0.005"))
-            return taux.get("patronal_moins_50", Decimal("0.001"))
+                return _taux(ContributionType.FNAL, "patronal_50_plus")
+            return _taux(ContributionType.FNAL, "patronal_moins_50")
 
         # Formation professionnelle
         if type_cotisation == ContributionType.FORMATION_PROFESSIONNELLE:
             if self.effectif >= SEUIL_EFFECTIF_11:
-                return taux.get("patronal_11_plus", Decimal("0.01"))
-            return taux.get("patronal_moins_11", Decimal("0.0055"))
+                return _taux(ContributionType.FORMATION_PROFESSIONNELLE, "patronal_11_plus")
+            return _taux(ContributionType.FORMATION_PROFESSIONNELLE, "patronal_moins_11")
 
         # AT/MP : taux propre a l'entreprise
         if type_cotisation == ContributionType.ACCIDENT_TRAVAIL:
@@ -113,49 +132,49 @@ class ContributionRules:
 
         # Versement mobilite : taux selon commune, >= 11 salaries
         if type_cotisation == ContributionType.VERSEMENT_MOBILITE:
-            if self.effectif >= taux.get("seuil_effectif", 11):
+            if self.effectif >= _taux(ContributionType.VERSEMENT_MOBILITE, "seuil_effectif", Decimal("11")):
                 return self.taux_vm
             return Decimal("0")
 
         # PEEC : >= 20 salaries
         if type_cotisation == ContributionType.PEEC:
             if self.effectif >= SEUIL_EFFECTIF_20:
-                return taux.get("patronal", Decimal("0.0045"))
+                return _taux(ContributionType.PEEC, "patronal")
             return Decimal("0")
 
         # Taxe apprentissage
         if type_cotisation == ContributionType.TAXE_APPRENTISSAGE:
-            return taux.get("patronal", Decimal("0.0068"))
+            return _taux(ContributionType.TAXE_APPRENTISSAGE, "patronal")
 
         # CSA (Contribution Solidarite Autonomie)
         if type_cotisation == ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE:
-            return taux.get("patronal", Decimal("0.003"))
+            return _taux(ContributionType.CONTRIBUTION_SOLIDARITE_AUTONOMIE, "patronal")
 
         # Dialogue social
         if type_cotisation == ContributionType.CONTRIBUTION_DIALOGUE_SOCIAL:
-            return taux.get("patronal", Decimal("0.00016"))
+            return _taux(ContributionType.CONTRIBUTION_DIALOGUE_SOCIAL, "patronal")
 
         # Prevoyance cadre (minimum)
         if type_cotisation == ContributionType.PREVOYANCE_CADRE:
-            return taux.get("patronal_minimum", Decimal("0.015"))
+            return _taux(ContributionType.PREVOYANCE_CADRE, "patronal_minimum")
 
         # Forfait social
         if type_cotisation == ContributionType.FORFAIT_SOCIAL:
-            return taux.get("taux_droit_commun", Decimal("0.20"))
+            return _taux(ContributionType.FORFAIT_SOCIAL, "taux_droit_commun")
 
         # Contribution supplementaire apprentissage
         if type_cotisation == ContributionType.CONTRIBUTION_SUPPLEMENTAIRE_APPRENTISSAGE:
             if self.effectif >= SEUIL_EFFECTIF_250:
-                return taux.get("patronal_250_plus", Decimal("0.0005"))
+                return _taux(ContributionType.CONTRIBUTION_SUPPLEMENTAIRE_APPRENTISSAGE, "patronal_250_plus")
             return Decimal("0")
 
         # CPF-CDD
         if type_cotisation == ContributionType.CONTRIBUTION_CPF_CDD:
-            return taux.get("patronal", Decimal("0.01"))
+            return _taux(ContributionType.CONTRIBUTION_CPF_CDD, "patronal")
 
         # Taxe sur les salaires
         if type_cotisation == ContributionType.TAXE_SUR_SALAIRES:
-            return taux.get("taux_normal", Decimal("0.0425"))
+            return _taux(ContributionType.TAXE_SUR_SALAIRES, "taux_normal")
 
         return taux.get("patronal", taux.get("taux"))
 
@@ -174,7 +193,7 @@ class ContributionRules:
         # Alsace-Moselle : cotisation supplementaire maladie 1.30%
         if type_cotisation == ContributionType.MALADIE_ALSACE_MOSELLE:
             if self.est_alsace_moselle:
-                return taux.get("salarial", Decimal("0.013"))
+                return _taux(ContributionType.MALADIE_ALSACE_MOSELLE, "salarial")
             return Decimal("0")
 
         return taux.get("salarial", taux.get("taux"))
@@ -222,7 +241,7 @@ class ContributionRules:
         # Tranche 2 : entre PASS et X * PASS
         if "plancher" in taux:
             plancher = self._pass_mensuel
-            plafond = self._pass_mensuel * taux.get("plafond_multiple_pass", Decimal("8"))
+            plafond = self._pass_mensuel * taux["plafond_multiple_pass"]
             if brut_mensuel <= plancher:
                 return Decimal("0")
             return min(brut_mensuel, plafond) - plancher
@@ -295,9 +314,7 @@ class ContributionRules:
         # --- Prevoyance cadre (calculee en amont pour CSG/CRDS) ---
         prevoyance_patronale = Decimal("0")
         if est_cadre:
-            taux_prev = TAUX_COTISATIONS_2026.get(
-                ContributionType.PREVOYANCE_CADRE, {}
-            ).get("patronal_minimum", Decimal("0.015"))
+            taux_prev = _taux(ContributionType.PREVOYANCE_CADRE, "patronal_minimum")
             assiette_prev = min(brut_mensuel, self._pass_mensuel)
             prevoyance_patronale = (assiette_prev * taux_prev).quantize(
                 Decimal("0.01"), ROUND_HALF_UP
@@ -538,12 +555,12 @@ class ContributionRules:
 
     def calculer_taxe_salaires(self, brut_annuel: Decimal) -> dict:
         """Calcule la taxe sur les salaires avec les 3 tranches."""
-        taux = TAUX_COTISATIONS_2026.get(ContributionType.TAXE_SUR_SALAIRES, {})
-        s1 = taux.get("seuil_1", Decimal("8573"))
-        s2 = taux.get("seuil_2", Decimal("17114"))
-        t1 = taux.get("taux_normal", Decimal("0.0425"))
-        t2 = taux.get("taux_majore_1", Decimal("0.0850"))
-        t3 = taux.get("taux_majore_2", Decimal("0.1360"))
+        ct = ContributionType.TAXE_SUR_SALAIRES
+        s1 = _taux(ct, "seuil_1")
+        s2 = _taux(ct, "seuil_2")
+        t1 = _taux(ct, "taux_normal")
+        t2 = _taux(ct, "taux_majore_1")
+        t3 = _taux(ct, "taux_majore_2")
 
         montant_t1 = (min(brut_annuel, s1) * t1).quantize(Decimal("0.01"))
         montant_t2 = Decimal("0")
@@ -912,3 +929,140 @@ class ContributionRules:
                 best_match = code
 
         return best_match if best_score >= 1 else None
+
+    # =================================================================
+    # REGIMES SPECIAUX - INTEGRATION AU MOTEUR DE CALCUL
+    # Ref: CSS art. L711-1, L741-1
+    # =================================================================
+
+    def calculer_bulletin_regime_special(
+        self, brut_mensuel: Decimal, regime: str,
+        est_cadre: bool = False,
+    ) -> dict:
+        """Calcule un bulletin en appliquant les specificites d'un regime special.
+
+        Regimes supportes : msa, alsace_moselle, crpcen.
+        Pour les regimes en extinction (mines, sncf, ratp), retourne
+        le bulletin regime general avec un avertissement.
+        """
+        from urssaf_analyzer.rules.regimes_speciaux import (
+            get_regime, calculer_supplement_alsace_moselle,
+            calculer_cotisations_msa,
+        )
+
+        regime_data = get_regime(regime)
+        if not regime_data:
+            bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+            bulletin["regime_special"] = {
+                "code": regime,
+                "applique": False,
+                "motif": f"Regime '{regime}' non reconnu, regime general applique.",
+            }
+            return bulletin
+
+        regimes_en_extinction = {"mines", "sncf", "ratp", "ieg", "bdf"}
+        if regime in regimes_en_extinction:
+            bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+            bulletin["regime_special"] = {
+                "code": regime,
+                "nom": regime_data["nom"],
+                "applique": False,
+                "motif": (
+                    f"Regime '{regime_data['nom']}' en extinction - "
+                    f"les nouveaux salaries relevent du regime general."
+                ),
+                "specificites": regime_data.get("specificites", []),
+            }
+            return bulletin
+
+        # Alsace-Moselle : bulletin regime general + supplement maladie
+        if regime == "alsace_moselle":
+            saved = self.est_alsace_moselle
+            try:
+                self.est_alsace_moselle = True
+                bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+            finally:
+                self.est_alsace_moselle = saved
+            supplement = calculer_supplement_alsace_moselle(brut_mensuel)
+            bulletin["regime_special"] = {
+                "code": "alsace_moselle",
+                "nom": regime_data["nom"],
+                "applique": True,
+                "supplement_maladie": supplement,
+            }
+            return bulletin
+
+        # MSA : cotisations specifiques
+        if regime == "msa":
+            bulletin_rg = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+            cotisations_msa = calculer_cotisations_msa(brut_mensuel, self.effectif)
+            bulletin_rg["regime_special"] = {
+                "code": "msa",
+                "nom": regime_data["nom"],
+                "applique": True,
+                "cotisations_specifiques": cotisations_msa,
+                "specificites": regime_data.get("specificites", []),
+            }
+            return bulletin_rg
+
+        # CRPCEN : cotisations supplementaires
+        if regime == "crpcen":
+            bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+            cots_crpcen = regime_data.get("cotisations", {})
+            supplements = []
+            for nom, params in cots_crpcen.items():
+                pat = params.get("patronal", Decimal("0"))
+                sal = params.get("salarial", Decimal("0"))
+                montant_pat = (brut_mensuel * pat).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                montant_sal = (brut_mensuel * sal).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                supplements.append({
+                    "cotisation": nom,
+                    "taux_patronal": float(pat),
+                    "taux_salarial": float(sal),
+                    "montant_patronal": float(montant_pat),
+                    "montant_salarial": float(montant_sal),
+                })
+            bulletin["regime_special"] = {
+                "code": "crpcen",
+                "nom": regime_data["nom"],
+                "applique": True,
+                "cotisations_supplementaires": supplements,
+                "specificites": regime_data.get("specificites", []),
+            }
+            return bulletin
+
+        # Fallback: regime general
+        bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+        bulletin["regime_special"] = {
+            "code": regime,
+            "nom": regime_data.get("nom", regime),
+            "applique": False,
+            "motif": "Regime non integre au moteur de calcul.",
+        }
+        return bulletin
+
+    def detecter_et_appliquer_regime(
+        self, brut_mensuel: Decimal,
+        code_naf: str = "",
+        departement: str = "",
+        idcc: str = "",
+        texte: str = "",
+        est_cadre: bool = False,
+    ) -> dict:
+        """Detecte automatiquement les regimes applicables et calcule le bulletin."""
+        from urssaf_analyzer.rules.regimes_speciaux import detecter_regime
+
+        regimes = detecter_regime(code_naf, departement, idcc, texte)
+
+        if not regimes:
+            bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+            bulletin["regimes_detectes"] = []
+            return bulletin
+
+        # Appliquer le regime principal (le premier detecte)
+        regime_principal = regimes[0]
+        bulletin = self.calculer_bulletin_regime_special(
+            brut_mensuel, regime_principal, est_cadre
+        )
+        bulletin["regimes_detectes"] = regimes
+        return bulletin

@@ -33,8 +33,9 @@ import defusedxml.ElementTree as ET
 
 from urssaf_analyzer.core.exceptions import ParseError
 from urssaf_analyzer.models.documents import (
-    Document, Declaration, Cotisation, Employe, Employeur, DateRange,
+    Document, Declaration, Cotisation, Employe, Employeur, DateRange, Finding,
 )
+from urssaf_analyzer.config.constants import Severity, FindingCategory
 from urssaf_analyzer.config.constants import ContributionType
 from urssaf_analyzer.parsers.base_parser import BaseParser
 from urssaf_analyzer.utils.date_utils import parser_date
@@ -319,14 +320,39 @@ class DSNParser(BaseParser):
             if cotisations:
                 total_s81 = sum(float(c.montant_patronal) for c in cotisations)
                 ecart = abs(total_s81 - s89_totaux["total_cotisations"])
+                reconcilie = ecart < 1.0  # Tolerance 1 EUR
                 declaration.metadata["s89_reconciliation"] = {
                     "total_s81": round(total_s81, 2),
                     "total_s89": s89_totaux["total_cotisations"],
                     "ecart": round(ecart, 2),
-                    "reconcilie": ecart < 1.0,  # Tolerance 1 EUR
+                    "reconcilie": reconcilie,
                 }
-                if ecart >= 1.0:
-                    parse_log.warning(0, "s89", f"Ecart S89/S81: {ecart:.2f} EUR")
+                if not reconcilie:
+                    parse_log.error(
+                        0, "s89",
+                        f"Ecart S89/S81 non reconcilie: {ecart:.2f} EUR "
+                        f"(S81={round(total_s81, 2)}, S89={s89_totaux['total_cotisations']})"
+                    )
+                    declaration.metadata["s89_finding"] = {
+                        "categorie": FindingCategory.INCOHERENCE.value,
+                        "severite": Severity.HAUTE.value,
+                        "titre": "Ecart de reconciliation S89/S81 non reconcilie",
+                        "description": (
+                            f"Les totaux declares en S89 ({s89_totaux['total_cotisations']:.2f} EUR) "
+                            f"ne correspondent pas aux cotisations calculees en S81 "
+                            f"({round(total_s81, 2):.2f} EUR). "
+                            f"Ecart de {ecart:.2f} EUR (tolerance: 1.00 EUR). "
+                            f"Cet ecart peut indiquer une erreur dans la DSN ou "
+                            f"des cotisations manquantes/doublonnees."
+                        ),
+                        "score_risque": min(80, int(30 + ecart)),
+                        "recommandation": (
+                            "Verifier l'integralite des blocs S81 et comparer "
+                            "avec le bordereau de cotisations URSSAF. Corriger la DSN "
+                            "si necessaire via une declaration annule-et-remplace."
+                        ),
+                        "reference_legale": "Art. R243-14 CSS - DSN",
+                    }
 
         # Compter les blocs presents
         blocs_presents = set()

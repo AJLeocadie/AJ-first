@@ -4,6 +4,7 @@ Genere automatiquement les ecritures a partir des pieces comptables
 detectees par le module OCR.
 """
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -14,6 +15,8 @@ from typing import Optional
 from urssaf_analyzer.comptabilite.plan_comptable import (
     PlanComptable, REGLES_AFFECTATION, determiner_compte_charge,
 )
+
+logger = logging.getLogger("urssaf_analyzer.comptabilite.ecritures")
 
 
 class TypeJournal(str, Enum):
@@ -169,8 +172,40 @@ class MoteurEcritures:
                     credit=tva, piece_ref=numero_piece,
                 ))
 
-        self.ecritures.append(ecriture)
+        self._valider_et_ajouter(ecriture)
         return ecriture
+
+    def _valider_et_ajouter(self, ecriture: Ecriture) -> None:
+        """Valide une ecriture avant de l'ajouter au journal.
+
+        Verifie :
+        - Equilibre debit/credit
+        - Presence de lignes
+        - Validite des comptes
+        """
+        if not ecriture.lignes:
+            raise ValueError(
+                f"Ecriture '{ecriture.libelle}' sans lignes : "
+                f"impossible d'enregistrer une ecriture vide."
+            )
+        if not ecriture.est_equilibree:
+            ecart = ecriture.total_debit - ecriture.total_credit
+            logger.error(
+                "Ecriture desequilibree '%s' : D=%s C=%s ecart=%s",
+                ecriture.libelle, ecriture.total_debit, ecriture.total_credit, ecart,
+            )
+            raise ValueError(
+                f"Ecriture '{ecriture.libelle}' desequilibree : "
+                f"debit={ecriture.total_debit} credit={ecriture.total_credit} "
+                f"ecart={ecart}"
+            )
+        for ligne in ecriture.lignes:
+            if not ligne.compte or not ligne.compte.strip():
+                raise ValueError(
+                    f"Ecriture '{ecriture.libelle}' contient une ligne "
+                    f"sans numero de compte : '{ligne.libelle}'"
+                )
+        self.ecritures.append(ecriture)
 
     def _ajouter_lignes_charges(
         self, ecriture: Ecriture, lignes_detail: list[dict],
@@ -338,7 +373,7 @@ class MoteurEcritures:
                 credit=cot_retraite, piece_ref=ecriture.numero_piece,
             ))
 
-        self.ecritures.append(ecriture)
+        self._valider_et_ajouter(ecriture)
         return ecriture
 
     def generer_ecriture_reglement(
@@ -383,7 +418,7 @@ class MoteurEcritures:
                 piece_ref=numero_piece,
             ))
 
-        self.ecritures.append(ecriture)
+        self._valider_et_ajouter(ecriture)
         return ecriture
 
     def valider_ecritures(self) -> list[str]:

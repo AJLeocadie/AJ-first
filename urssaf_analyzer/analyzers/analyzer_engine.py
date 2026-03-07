@@ -91,6 +91,9 @@ class AnalyzerEngine:
         # Constats structurels : document unique, employeur manquant
         all_findings.extend(self._constats_structurels(declarations))
 
+        # Constats issus du parsing (ex: reconciliation S89/S81)
+        all_findings.extend(self._constats_parsing(declarations))
+
         # Deduplication inter-analyzers (SPEC §3.3)
         self._pre_dedup_count = len(all_findings)
         all_findings = self._deduplicate(all_findings)
@@ -114,6 +117,26 @@ class AnalyzerEngine:
         all_findings.sort(key=lambda f: (poids_severite.get(f.severite, 9), -f.score_risque))
 
         return all_findings
+
+    @staticmethod
+    def _constats_parsing(declarations: list[Declaration]) -> list[Finding]:
+        """Recupere les constats generes lors du parsing (S89, etc.)."""
+        findings = []
+        for d in declarations:
+            meta = getattr(d, "metadata", None) or {}
+            s89 = meta.get("s89_finding")
+            if s89:
+                findings.append(Finding(
+                    categorie=FindingCategory(s89["categorie"]),
+                    severite=Severity(s89["severite"]),
+                    titre=s89["titre"],
+                    description=s89["description"],
+                    score_risque=s89.get("score_risque", 50),
+                    recommandation=s89.get("recommandation", ""),
+                    detecte_par="DSNParser",
+                    reference_legale=s89.get("reference_legale", ""),
+                ))
+        return findings
 
     @staticmethod
     def _deduplicate(findings: list[Finding]) -> list[Finding]:

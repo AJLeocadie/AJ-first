@@ -52,6 +52,18 @@ def auth_headers(client, clean_auth):
 
 
 @pytest.fixture(autouse=True)
+def reset_rate_limit():
+    """Reset rate limiting before each test to avoid 429 errors."""
+    from api import state
+    from api import index as api_index
+    state.rate_store.clear()
+    api_index._rate_store.clear()
+    yield
+    state.rate_store.clear()
+    api_index._rate_store.clear()
+
+
+@pytest.fixture(autouse=True)
 def clean_rh_state():
     """Clear RH in-memory state before and after each test."""
     from api import state
