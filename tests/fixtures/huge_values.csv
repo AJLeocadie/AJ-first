@@ -1,0 +1,5 @@
+Code;Libelle;Base;Taux Patronal;Taux Salarial;Montant Patronal;Montant Salarial
+201;Maladie;99999999.99;0.070;0.000;6999999.99;0.00
+202;Vieillesse plafonnee;-50000.00;0.0855;0.069;-4275.00;-3450.00
+203;Vieillesse deplafonnee;0.00;0.019;0.004;0.00;0.00
+999;Code inconnu;3500.00;9.999;9.999;34996.50;34996.50

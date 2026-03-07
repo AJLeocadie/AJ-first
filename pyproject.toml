@@ -20,7 +20,14 @@ markers = [
     "e2e: tests end-to-end avec Playwright",
     "integration: tests d'integration pipeline complet",
     "bancaire: tests de fiabilite niveau bancaire",
+    "negative: tests de chemins d'erreur et cas negatifs",
+    "boundary: tests de conditions limites",
+    "performance: tests de performance et charge",
+    "concurrency: tests de concurrence et thread-safety",
+    "regression: tests de non-regression",
+    "owasp: tests de securite OWASP top 10",
 ]
+timeout = 30
 
 [tool.coverage.run]
 source = ["urssaf_analyzer", "auth", "persistence"]
@@ -31,7 +38,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 40
+fail_under = 60
 show_missing = true
 exclude_lines = [
     "pragma: no cover",
