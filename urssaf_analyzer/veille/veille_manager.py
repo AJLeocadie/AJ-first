@@ -7,11 +7,14 @@ Coordonne :
 - Le suivi mensuel de la legislation
 """
 
+import logging
 import re
 import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("urssaf_analyzer.veille.manager")
 
 from urssaf_analyzer.database.db_manager import Database
 from urssaf_analyzer.veille.legifrance_client import (
@@ -113,8 +116,8 @@ class VeilleManager:
         try:
             exonerations = self.urssaf.get_exonerations(annee=annee, limit=10)
             resultats["donnees_open_data"]["exonerations"] = exonerations
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Echec recuperation exonerations URSSAF %d: %s", annee, e)
 
         # 3. Generer les alertes
         legislation = get_legislation_par_annee(annee)
@@ -153,8 +156,8 @@ class VeilleManager:
                         texte.get("type", ""),
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Echec sauvegarde texte veille '%s': %s", texte.get("reference", ""), e)
 
         for alerte in resultats.get("alertes", []):
             try:
@@ -169,8 +172,8 @@ class VeilleManager:
                         alerte.get("severite", "info"),
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Echec sauvegarde alerte veille '%s': %s", alerte.get("titre", ""), e)
 
     # --- Consultation ---
 

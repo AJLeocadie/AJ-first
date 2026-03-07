@@ -20,11 +20,15 @@ Informations extraites :
 - Convention collective
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Optional
+
+
+logger = logging.getLogger("urssaf_analyzer.ocr.legal_document_extractor")
 
 
 @dataclass
@@ -371,8 +375,8 @@ class LegalDocumentExtractor:
             try:
                 info.capital_social = Decimal(val)
                 info.champs_extraits.append("capital_social")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Echec conversion capital social '%s': %s", val, e)
 
         if PATTERNS_JURIDIQUES["capital_variable"].search(texte):
             info.capital_variable = True

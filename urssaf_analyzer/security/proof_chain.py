@@ -15,6 +15,7 @@ blockchain simplifiee ou toute modification retroactive est detectable.
 """
 
 import hashlib
+import logging
 import json
 import fcntl
 import os
@@ -23,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+
+logger = logging.getLogger("urssaf_analyzer.security.proof_chain")
 
 # Durees de conservation legales (en annees)
 CONSERVATION_FISCALE = 6   # Art. L102 B LPF
@@ -125,8 +128,8 @@ class ProofChain:
                     try:
                         token = self._tsa.timestamp_hash(entry["hash"])
                         entry["tsa_token"] = token.to_dict()
-                    except Exception:
-                        pass  # Fallback: pas de jeton TSA
+                    except Exception as e:
+                        logger.warning("Echec horodatage TSA pour entree proof chain: %s", e)
 
                 line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
                 # Ecriture atomique : ecrire dans un fichier temporaire puis

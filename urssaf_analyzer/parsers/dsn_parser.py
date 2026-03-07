@@ -192,7 +192,8 @@ class DSNParser(BaseParser):
                 with open(chemin, "r", encoding="utf-8") as f:
                     debut = f.read(500)
                 return "dsn" in debut.lower() or "S10.G00" in debut
-            except Exception:
+            except Exception as e:
+                logger.debug("Echec lecture DSN XML %s: %s", chemin.name, e)
                 return False
         return False
 

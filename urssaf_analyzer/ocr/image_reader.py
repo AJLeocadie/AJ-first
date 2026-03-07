@@ -217,7 +217,8 @@ class LecteurMultiFormat:
                 with open(chemin, "rb") as f:
                     data = f.read()
                 resultat.texte = self._extraire_texte_image_basique(data)
-            except Exception:
+            except Exception as e:
+                logger.debug("Echec lecture image basique: %s", e)
                 resultat.texte = ""
 
         resultat.metadonnees["type_image"] = ext
@@ -563,7 +564,8 @@ class LecteurMultiFormat:
             return pytesseract.image_to_string(img, lang="fra")
         except ImportError:
             return ""
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec OCR image fichier: %s", e)
             return ""
 
     def _ocr_image_bytes(self, contenu: bytes) -> str:
@@ -576,7 +578,8 @@ class LecteurMultiFormat:
             return pytesseract.image_to_string(img, lang="fra")
         except ImportError:
             return ""
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec OCR image bytes: %s", e)
             return ""
 
     def _extraire_texte_image_basique(self, data: bytes) -> str:

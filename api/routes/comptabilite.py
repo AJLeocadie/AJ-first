@@ -4,6 +4,7 @@ Journal, balance, grand livre, bilan, compte de resultat, TVA,
 ecritures manuelles, FEC import/export/validation.
 """
 
+import logging
 import tempfile
 from datetime import date, datetime
 from decimal import Decimal
@@ -18,6 +19,8 @@ from api.state import (
 from urssaf_analyzer.comptabilite.plan_comptable import PlanComptable
 from urssaf_analyzer.comptabilite.ecritures import MoteurEcritures, TypeJournal, Ecriture, LigneEcriture
 from urssaf_analyzer.comptabilite.rapports_comptables import GenerateurRapports
+
+logger = logging.getLogger("api.routes.comptabilite")
 
 router = APIRouter(prefix="/api", tags=["Comptabilite"])
 
@@ -401,8 +404,8 @@ async def suggestions_comptes(compte: str = Query(""), description: str = Query(
             for r in resultats[:15]:
                 if not any(s["numero"] == r.numero for s in suggestions):
                     suggestions.append({"numero": r.numero, "libelle": r.libelle, "explication": ""})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Echec recherche plan comptable terme '%s': %s", terme, e)
 
         # Aussi chercher dans les sous-comptes manuels
         for sc in _sous_comptes:
@@ -480,8 +483,8 @@ async def creer_sous_compte(
         resultats = pc.rechercher(racine)
         if resultats:
             parent_valide = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Echec recherche plan comptable racine %s: %s", racine, e)
     if not parent_valide:
         for cpt_num in pc.comptes:
             if cpt_num.startswith(racine):

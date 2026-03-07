@@ -827,7 +827,8 @@ def _parse_montant_local(s: str) -> Decimal:
     s = s.replace("\u00a0", "").replace(" ", "").replace(",", ".")
     try:
         return Decimal(s)
-    except Exception:
+    except Exception as e:
+        logger.debug("Echec conversion montant '%s': %s", s, e)
         return Decimal("0")
 
 

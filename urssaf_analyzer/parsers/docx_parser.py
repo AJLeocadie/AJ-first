@@ -112,7 +112,8 @@ def _extraire_texte_brut_stream(raw: bytes, parts: list) -> None:
             # Filtrer le bruit (sequences de caracteres de controle, metadata XML, etc.)
             if _est_texte_significatif(decoded):
                 parts.append(decoded.strip())
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec decodage chunk cp1252: %s", e)
             continue
 
     # Extraire le texte Unicode (UTF-16LE, courant dans les .doc modernes)
@@ -125,8 +126,8 @@ def _extraire_texte_brut_stream(raw: bytes, parts: list) -> None:
             decoded = chunk.decode("utf-16-le", errors="replace")
             if _est_texte_significatif(decoded):
                 parts.append(decoded.strip())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Echec extraction texte UTF-16LE: %s", e)
 
 
 def _est_texte_significatif(texte: str) -> bool:
@@ -159,7 +160,8 @@ def _extraire_texte_binaire_doc(data: bytes) -> str:
             decoded = decoded.replace("\r\n", "\n").replace("\r", "\n")
             if _est_texte_significatif(decoded) and len(decoded) >= 10:
                 texte_parts.append(decoded.strip())
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec decodage chunk cp1252: %s", e)
             continue
 
     # 2. Extraire les longues sequences UTF-16LE
@@ -172,7 +174,8 @@ def _extraire_texte_binaire_doc(data: bytes) -> str:
             decoded = m.decode("utf-16-le", errors="replace")
             if _est_texte_significatif(decoded) and len(decoded) >= 10:
                 texte_parts.append(decoded.strip())
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec decodage chunk UTF-16LE: %s", e)
             continue
 
     # Dedupliquement et assemblage
@@ -232,7 +235,8 @@ def _extraire_texte_docx_zip(chemin: Path) -> str:
             texte = re.sub(r"<[^>]+>", " ", xml_content)
             texte = re.sub(r"\s+", " ", texte).strip()
             return texte
-    except Exception:
+    except Exception as e:
+        logger.debug("Echec extraction texte docx ZIP: %s", e)
         return ""
 
 
@@ -315,8 +319,8 @@ def _extraire_tableaux_doc(chemin: Path) -> list:
                         if rows:
                             tableaux.append(rows)
                     return tableaux
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Echec extraction tableaux docx: %s", e)
     return []
 
 
@@ -372,8 +376,8 @@ class DocxParser(BaseParser):
                         doc_props["dernier_auteur"] = props.last_modified_by
                     if doc_props:
                         meta["proprietes_document"] = doc_props
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Echec extraction proprietes document: %s", e)
             return meta
         except Exception as e:
             return {"format": ext.lstrip("."), "erreur": str(e)}
@@ -446,8 +450,8 @@ class DocxParser(BaseParser):
                                 if p.text.strip():
                                     parts.append(p.text)
                 return "\n".join(parts)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Echec extraction texte python-docx pour %s: %s", chemin.name, e)
         # Fallback: extraction basique via ZIP
         return _extraire_texte_docx_zip(chemin)
 
@@ -472,5 +476,6 @@ class DocxParser(BaseParser):
                 if rows:
                     tableaux.append(rows)
             return tableaux
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec extraction tableaux pour %s: %s", chemin.name, e)
             return []

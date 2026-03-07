@@ -175,7 +175,8 @@ def _purger_fichiers_expires():
                 from urssaf_analyzer.security.secure_storage import suppression_securisee
                 suppression_securisee(f, passes=1)
                 count += 1
-            except Exception:
+            except Exception as e:
+                logger.debug("Suppression securisee echouee pour %s: %s, tentative unlink", f.name, e)
                 try:
                     f.unlink()
                     count += 1
@@ -1339,7 +1340,8 @@ async def rgpd_suppression(request: Request):
             try:
                 from urssaf_analyzer.security.secure_storage import nettoyer_repertoire_temp
                 nettoyer_repertoire_temp(uploads_dir, passes=3)
-            except Exception:
+            except Exception as e:
+                logger.debug("Nettoyage securise echoue pour uploads: %s, fallback rmtree", e)
                 import shutil
                 shutil.rmtree(uploads_dir, ignore_errors=True)
             uploads_dir.mkdir(parents=True, exist_ok=True)

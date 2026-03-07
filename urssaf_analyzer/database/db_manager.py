@@ -11,9 +11,12 @@ Gere :
 - Migrations incrementales (schema_version)
 """
 
+import logging
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 # =============================================
 # SCHEMA COMPLET V2 (pour nouvelles installations)
@@ -378,7 +381,8 @@ def _get_existing_columns(conn: sqlite3.Connection, table: str) -> set:
     try:
         cursor = conn.execute(f"PRAGMA table_info({table})")
         return {row[1] for row in cursor.fetchall()}
-    except Exception:
+    except Exception as e:
+        logger.debug("Echec lecture colonnes table %s: %s", table, e)
         return set()
 
 
@@ -464,7 +468,8 @@ class Database:
         try:
             yield conn
             conn.commit()
-        except Exception:
+        except Exception as e:
+            logger.warning("Echec transaction DB, rollback: %s", e)
             conn.rollback()
             raise
         finally:

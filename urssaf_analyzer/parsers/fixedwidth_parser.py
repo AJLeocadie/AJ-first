@@ -101,7 +101,8 @@ def _parse_fixed_montant(s: str) -> Decimal:
     s = s.replace(",", ".")
     try:
         return Decimal(s)
-    except Exception:
+    except Exception as e:
+        logger.debug("Echec conversion montant '%s': %s", s, e)
         return Decimal("0")
 
 
@@ -119,7 +120,8 @@ class FixedWidthParser(BaseParser):
             with open(chemin, "r", encoding="cp1252", errors="replace") as f:
                 lignes = [f.readline() for _ in range(5)]
             return self._detecter_format(lignes) is not None
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec detection format fixedwidth pour %s: %s", chemin.name, e)
             return False
 
     def extraire_metadata(self, chemin: Path) -> dict[str, Any]:
@@ -230,7 +232,8 @@ class FixedWidthParser(BaseParser):
                     )
                     cotisations.append(cot)
 
-            except Exception:
+            except Exception as e:
+                logger.debug("Echec parsing ligne PNM: %s", e)
                 continue
 
         total_debit = sum(c.montant_patronal for c in cotisations)
@@ -293,7 +296,8 @@ class FixedWidthParser(BaseParser):
                     )
                     cotisations.append(cot)
 
-            except Exception:
+            except Exception as e:
+                logger.debug("Echec parsing ligne XIMPORT: %s", e)
                 continue
 
         total_debit = sum(c.montant_patronal for c in cotisations)

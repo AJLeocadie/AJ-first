@@ -11,6 +11,7 @@ Supporte : PDF (via pdfplumber), images (via base64 + regex OCR-like),
 textes bruts, CSV d'exports bancaires.
 """
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -22,6 +23,9 @@ from typing import Optional
 
 from urssaf_analyzer.utils.number_utils import parser_montant
 from urssaf_analyzer.utils.date_utils import parser_date
+
+
+logger = logging.getLogger(__name__)
 
 
 class TypeDocument(str, Enum):
@@ -252,7 +256,8 @@ class InvoiceDetector:
                     texte += (page.extract_text() or "") + "\n"
         except ImportError:
             texte = ""
-        except Exception:
+        except Exception as e:
+            logger.debug("Echec lecture PDF %s: %s", chemin.name, e)
             texte = ""
 
         return self.analyser_document(texte, nom_fichier=chemin.name)

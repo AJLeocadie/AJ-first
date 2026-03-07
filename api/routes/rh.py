@@ -4,6 +4,7 @@ Gestion des contrats, conges, arrets, sanctions, attestations,
 entretiens, visites medicales, planning, alertes.
 """
 
+import logging
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -19,6 +20,8 @@ from api.state import (
     log_action, safe_json, paginate, get_moteur,
     DEFAULT_PAGE_LIMIT,
 )
+
+logger = logging.getLogger("api.routes.rh")
 
 router = APIRouter(prefix="/api/rh", tags=["RH"])
 
@@ -272,8 +275,8 @@ async def creer_contrat(
         )
         moteur.ecritures.append(provision)
         cascading["ecriture_comptable"] = {"id": provision.id, "montant_brut": brut}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Echec creation ecriture comptable pour %s %s: %s", prenom_salarie, nom_salarie, e)
 
     contrat["cascading_effects"] = cascading
 
@@ -661,8 +664,8 @@ async def generer_bulletin(
                     min_conv_rh = float(ccn_found_rh["salaire_minimum_cadre"])
                 elif ccn_found_rh.get("salaire_minimum_conventionnel"):
                     min_conv_rh = float(ccn_found_rh["salaire_minimum_conventionnel"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Echec recherche minimum conventionnel CCN %s: %s", ccn_label, e)
         if min_conv_rh and float(brut_base) > 0 and float(brut_base) < min_conv_rh:
             alertes.append({
                 "niveau": "haute",
@@ -933,8 +936,8 @@ async def suggestions_comptes(compte: str = Query(""), description: str = Query(
             for r in resultats[:15]:
                 if not any(s["numero"] == r.numero for s in suggestions):
                     suggestions.append({"numero": r.numero, "libelle": r.libelle, "explication": ""})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Echec recherche plan comptable terme '%s': %s", terme, e)
 
         # Aussi chercher dans les sous-comptes manuels
         for sc in _sous_comptes:
@@ -1012,8 +1015,8 @@ async def creer_sous_compte(
         resultats = pc.rechercher(racine)
         if resultats:
             parent_valide = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Echec recherche plan comptable racine %s: %s", racine, e)
     if not parent_valide:
         for cpt_num in pc.comptes:
             if cpt_num.startswith(racine):

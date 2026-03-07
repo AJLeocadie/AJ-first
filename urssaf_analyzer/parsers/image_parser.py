@@ -9,6 +9,7 @@ Sur Vercel serverless (pas de Tesseract), effectue une classification
 par nom de fichier et tente une extraction basique des metadonnees.
 """
 
+import logging
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +22,8 @@ from urssaf_analyzer.models.documents import (
 from urssaf_analyzer.config.constants import ContributionType
 from urssaf_analyzer.ocr.image_reader import LecteurMultiFormat, EXTENSIONS_IMAGES
 
+
+logger = logging.getLogger(__name__)
 
 # Regex d'extraction de donnees sociales depuis du texte OCR
 _RE_SIRET = re.compile(r"(?:SIRET|siret)\s*[:\s]?\s*(\d[\d\s]{12}\d)", re.IGNORECASE)
@@ -124,7 +127,8 @@ def _parse_montant(s: str) -> Decimal:
     s = s.replace(" ", "").replace(",", ".")
     try:
         return Decimal(s)
-    except Exception:
+    except Exception as e:
+        logger.debug("Echec conversion montant '%s': %s", s, e)
         return Decimal("0")
 
 

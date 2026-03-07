@@ -18,13 +18,12 @@ from enum import Enum
 # Ref: Arrete du 19/12/2025, CSS art. D242-17
 # ===================================================================
 
-# Valeurs 2025 confirmees (arrete du 19/12/2024). Actualiser des publication
-# de l'arrete fixant les valeurs 2026 (attendu decembre 2025).
-PASS_ANNUEL = Decimal("47100.00")
-PASS_MENSUEL = Decimal("3925.00")
-PASS_TRIMESTRIEL = Decimal("11775.00")
-PASS_JOURNALIER = Decimal("216.00")
-PASS_HORAIRE = Decimal("27.00")
+# Valeurs 2026 (arrete du 19/12/2025, CSS art. D242-17).
+PASS_ANNUEL = Decimal("48060.00")
+PASS_MENSUEL = Decimal("4005.00")
+PASS_TRIMESTRIEL = Decimal("12015.00")
+PASS_JOURNALIER = Decimal("185.00")
+PASS_HORAIRE = Decimal("28.00")
 
 # Plafonds specifiques
 PLAFOND_4_PASS = PASS_ANNUEL * 4     # 192 240 EUR - chomage, AGS
@@ -35,10 +34,9 @@ PLAFOND_8_PASS = PASS_ANNUEL * 8     # 384 480 EUR - retraite T2
 # Ref: Art. L3231-2 Code du travail, Decret n° 2025-xxx
 # ===================================================================
 
-# Valeurs 2025 confirmees (decret du 31/10/2024). Actualiser des publication
-# du decret fixant le SMIC 2026 (attendu fin 2025 / debut 2026).
-SMIC_HORAIRE_BRUT = Decimal("11.88")
-SMIC_MENSUEL_BRUT = Decimal("1801.84")  # 151.67h x 11.88
+# Valeurs 2026 (decret n° 2025-xxx, Art. L3231-2 Code du travail).
+SMIC_HORAIRE_BRUT = Decimal("12.02")
+SMIC_MENSUEL_BRUT = Decimal("1823.03")  # 151.67h x 12.02
 SMIC_ANNUEL_BRUT = SMIC_MENSUEL_BRUT * 12
 HEURES_MENSUELLES_LEGALES = Decimal("151.67")
 

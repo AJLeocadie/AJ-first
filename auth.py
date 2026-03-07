@@ -6,6 +6,7 @@ Compatible OVHcloud (persistant) et Vercel (in-memory).
 """
 
 import base64
+import logging
 import hashlib
 import hmac
 import json
@@ -16,6 +17,8 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import Request, HTTPException, Response
+
+logger = logging.getLogger("auth")
 
 # --- Configuration ---
 _DEFAULT_SECRET = "normacheck-dev-key-CHANGEZ-EN-PRODUCTION"
@@ -121,7 +124,8 @@ def jwt_decode(token: str) -> Optional[dict]:
         if jti and jti in _token_blacklist:
             return None
         return payload
-    except Exception:
+    except Exception as e:
+        logger.debug("Echec decodage JWT: %s", e)
         return None
 
 
