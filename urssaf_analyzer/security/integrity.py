@@ -1,6 +1,7 @@
 """Verification d'integrite des fichiers via SHA-256."""
 
 import hashlib
+import hmac
 from pathlib import Path
 
 from urssaf_analyzer.core.exceptions import IntegrityError
@@ -26,7 +27,7 @@ def calculer_hash_sha256(chemin: Path) -> str:
 def verifier_hash(chemin: Path, hash_attendu: str) -> bool:
     """Verifie qu'un fichier correspond au hash attendu."""
     hash_calcule = calculer_hash_sha256(chemin)
-    return hash_calcule == hash_attendu
+    return hmac.compare_digest(hash_calcule, hash_attendu)
 
 
 def creer_manifeste(fichiers: list[Path]) -> dict[str, str]:

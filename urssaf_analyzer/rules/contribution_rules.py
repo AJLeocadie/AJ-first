@@ -64,6 +64,9 @@ class ContributionRules:
         self.taux_at = taux_at
         self.taux_vm = taux_versement_mobilite
         self.est_alsace_moselle = est_alsace_moselle
+        # Plafond mensuel effectif (proratable pour temps partiel)
+        self._pass_mensuel = PASS_MENSUEL
+        self._smic_mensuel = SMIC_MENSUEL_BRUT
 
     # =================================================================
     # TAUX PATRONAUX
@@ -80,14 +83,14 @@ class ContributionRules:
 
         # Maladie (reduction si <= 2.5 SMIC)
         if type_cotisation == ContributionType.MALADIE:
-            seuil = SMIC_MENSUEL_BRUT * taux.get("seuil_reduction_smic", Decimal("2.5"))
+            seuil = self._smic_mensuel * taux.get("seuil_reduction_smic", Decimal("2.5"))
             if Decimal("0") < salaire_brut <= seuil:
                 return taux.get("patronal_reduit", taux["patronal"])
             return taux["patronal"]
 
         # Allocations familiales (reduction si <= 3.5 SMIC)
         if type_cotisation == ContributionType.ALLOCATIONS_FAMILIALES:
-            seuil = SMIC_MENSUEL_BRUT * taux.get("seuil_reduction_smic", Decimal("3.5"))
+            seuil = self._smic_mensuel * taux.get("seuil_reduction_smic", Decimal("3.5"))
             if Decimal("0") < salaire_brut <= seuil:
                 return taux.get("patronal_reduit", taux["patronal"])
             return taux["patronal"]
@@ -207,18 +210,19 @@ class ContributionRules:
 
         # Cotisations plafonnees au PASS (Tranche 1)
         if "plafond" in taux and "plancher" not in taux:
-            plafond = taux["plafond"]
+            # Utiliser le PASS effectif (proratise pour temps partiel)
+            plafond = self._pass_mensuel
             return min(brut_mensuel, plafond)
 
         # Cotisations plafonnees a un multiple du PASS
         if "plafond_multiple_pass" in taux and "plancher" not in taux:
-            plafond = PASS_MENSUEL * taux["plafond_multiple_pass"]
+            plafond = self._pass_mensuel * taux["plafond_multiple_pass"]
             return min(brut_mensuel, plafond)
 
         # Tranche 2 : entre PASS et X * PASS
         if "plancher" in taux:
-            plancher = taux["plancher"]
-            plafond = PASS_MENSUEL * taux.get("plafond_multiple_pass", Decimal("8"))
+            plancher = self._pass_mensuel
+            plafond = self._pass_mensuel * taux.get("plafond_multiple_pass", Decimal("8"))
             if brut_mensuel <= plancher:
                 return Decimal("0")
             return min(brut_mensuel, plafond) - plancher
@@ -226,7 +230,7 @@ class ContributionRules:
         # FNAL < 50 : plafonnee au PASS
         if type_cotisation == ContributionType.FNAL:
             if self.effectif < SEUIL_EFFECTIF_50:
-                return min(brut_mensuel, PASS_MENSUEL)
+                return min(brut_mensuel, self._pass_mensuel)
             return brut_mensuel
 
         # Pas de plafonnement (totalite)
@@ -294,7 +298,7 @@ class ContributionRules:
             taux_prev = TAUX_COTISATIONS_2026.get(
                 ContributionType.PREVOYANCE_CADRE, {}
             ).get("patronal_minimum", Decimal("0.015"))
-            assiette_prev = min(brut_mensuel, PASS_MENSUEL)
+            assiette_prev = min(brut_mensuel, self._pass_mensuel)
             prevoyance_patronale = (assiette_prev * taux_prev).quantize(
                 Decimal("0.01"), ROUND_HALF_UP
             )
@@ -333,7 +337,7 @@ class ContributionRules:
             ContributionType.CEG_T1,
             ContributionType.CET,
         ]
-        if brut_mensuel > PASS_MENSUEL:
+        if brut_mensuel > self._pass_mensuel:
             retraite.extend([
                 ContributionType.RETRAITE_COMPLEMENTAIRE_T2,
                 ContributionType.CEG_T2,
@@ -629,19 +633,26 @@ class ContributionRules:
             return self.calculer_bulletin_complet(brut_mensuel, est_cadre)
 
         ratio = heures_mensuelles / HEURES_MENSUELLES_LEGALES
+        pass_proratise = (PASS_MENSUEL * ratio).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        smic_proratise = (SMIC_MENSUEL_BRUT * ratio).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-        # Calcul avec plafonds proratas
-        bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+        # Appliquer les plafonds proratas pour le calcul
+        saved_pass = self._pass_mensuel
+        saved_smic = self._smic_mensuel
+        try:
+            self._pass_mensuel = pass_proratise
+            self._smic_mensuel = smic_proratise
+            bulletin = self.calculer_bulletin_complet(brut_mensuel, est_cadre)
+        finally:
+            self._pass_mensuel = saved_pass
+            self._smic_mensuel = saved_smic
+
         bulletin["temps_partiel"] = {
             "heures_mensuelles": float(heures_mensuelles),
             "heures_legales": float(HEURES_MENSUELLES_LEGALES),
             "ratio": float(ratio),
-            "pass_mensuel_proratise": float(
-                (PASS_MENSUEL * ratio).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            ),
-            "smic_mensuel_proratise": float(
-                (SMIC_MENSUEL_BRUT * ratio).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            ),
+            "pass_mensuel_proratise": float(pass_proratise),
+            "smic_mensuel_proratise": float(smic_proratise),
         }
         return bulletin
 
@@ -686,7 +697,7 @@ class ContributionRules:
         Ref: CSS art. L131-6-4 / L241-17, Decret 2019-1215.
         """
         # Seuil d'eligibilite : 75% du PASS mensuel
-        seuil_75_pass = PASS_MENSUEL * Decimal("0.75")
+        seuil_75_pass = self._pass_mensuel * Decimal("0.75")
 
         if brut_mensuel <= 0:
             return {"eligible": False, "exoneration_mensuelle": 0.0, "motif": "brut nul"}
@@ -734,7 +745,7 @@ class ContributionRules:
         Les cotisations patronales beneficient de la reduction
         generale (RGDU) de droit commun.
         """
-        seuil_79_smic = SMIC_MENSUEL_BRUT * Decimal("0.79")
+        seuil_79_smic = self._smic_mensuel * Decimal("0.79")
 
         # Exoneration salariale : pas de cotisations salariales sur
         # la tranche <= 79% du SMIC

@@ -217,6 +217,9 @@ async def security_headers_middleware(request: Request, call_next):
 
 
 # --- Middleware rate limiting ---
+# Note: rate limiting applicatif par processus (defense-in-depth).
+# Le rate limiting principal est assure par nginx (limit_req_zone).
+# Ce store in-memory est complementaire et fonctionne par worker.
 _RATE_LIMIT_WINDOW = 60  # secondes
 _RATE_LIMIT_MAX = int(os.getenv("NORMACHECK_RATE_LIMIT", "60"))  # requetes/minute
 _RATE_LIMIT_AUTH_MAX = 10  # tentatives auth/minute
@@ -461,8 +464,8 @@ def log_action(profil_email: str, action: str, details: str = "", user_override:
                     if resolved_email == "utilisateur":
                         resolved_email = u.get("email", profil_email)
                     tenant_id = u.get("tenant_id", "")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Resolution utilisateur audit: %s", e)
     entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),
@@ -1530,8 +1533,8 @@ def _alimenter_knowledge(result):
                     ccn_code = _CRccn().identifier_ccn(ccn_accord)
                     if ccn_code:
                         ctx["ccn_code"] = ccn_code
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Identification CCN echouee: %s", e)
             kb["contexte_entreprise"] = ctx
         elif fmt == "pv_ag" or doc_type.startswith("pv_ag"):
             if "pv_ag" not in kb["pieces_justificatives"]:
@@ -1846,7 +1849,8 @@ async def analyser_documents(
             orchestrator.analyser_documents(chemins, format_rapport)
         except URSSAFAnalyzerError as e:
             raise HTTPException(422, str(e))
-        except Exception:
+        except Exception as e:
+            logger.error("Erreur interne analyse: %s", e, exc_info=True)
             raise HTTPException(500, "Erreur interne lors de l'analyse")
 
         result = orchestrator.result
@@ -1924,7 +1928,8 @@ async def analyser_documents(
         # Toujours generer le rapport HTML pour l'inclure dans la reponse JSON
         try:
             html_report = orchestrator.report_generator._construire_html(result)
-        except Exception:
+        except Exception as e:
+            logger.warning("Generation rapport HTML echouee: %s", e)
             html_report = ""
 
         if format_rapport == "html":
@@ -2741,7 +2746,8 @@ async def analyser_facture(fichier: UploadFile = File(...)):
                 ocr_result = reader.lire_pdf(chemin)
                 texte = ocr_result.get("texte", "")
                 ecriture_manuscrite = ocr_result.get("ecriture_manuscrite", False)
-            except Exception:
+            except Exception as e:
+                logger.debug("OCR fallback pour %s: %s", chemin.name, e)
                 texte = chemin.read_text(errors="replace")
         else:
             texte = chemin.read_text(errors="replace")
@@ -7292,8 +7298,8 @@ async def knowledge_audit(
                     min_conv_detail = f" | {len(sous_minimum_conv)} sous le minimum conventionnel ({min_conv:.2f} EUR)"
                 else:
                     min_conv_detail = f" | Tous conformes au minimum conventionnel ({min_conv:.2f} EUR)"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Verification minimum conventionnel echouee: %s", e)
     smic_detail = ""
     if salaires_analyses:
         if sous_smic:
@@ -8645,8 +8651,8 @@ async def creer_contrat(
         )
         moteur.ecritures.append(provision)
         cascading["ecriture_comptable"] = {"id": provision.id, "montant_brut": brut}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Provision comptable echouee: %s", e)
 
     contrat["cascading_effects"] = cascading
 
@@ -9034,8 +9040,8 @@ async def generer_bulletin(
                     min_conv_rh = float(ccn_found_rh["salaire_minimum_cadre"])
                 elif ccn_found_rh.get("salaire_minimum_conventionnel"):
                     min_conv_rh = float(ccn_found_rh["salaire_minimum_conventionnel"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Lookup minimum conventionnel RH: %s", e)
         if min_conv_rh and float(brut_base) > 0 and float(brut_base) < min_conv_rh:
             alertes.append({
                 "niveau": "haute",
@@ -9306,8 +9312,8 @@ async def suggestions_comptes(compte: str = Query(""), description: str = Query(
             for r in resultats[:15]:
                 if not any(s["numero"] == r.numero for s in suggestions):
                     suggestions.append({"numero": r.numero, "libelle": r.libelle, "explication": ""})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Recherche plan comptable: %s", e)
 
         # Aussi chercher dans les sous-comptes manuels
         for sc in _sous_comptes:
@@ -9385,8 +9391,8 @@ async def creer_sous_compte(
         resultats = pc.rechercher(racine)
         if resultats:
             parent_valide = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Validation compte parent: %s", e)
     if not parent_valide:
         for cpt_num in pc.comptes:
             if cpt_num.startswith(racine):

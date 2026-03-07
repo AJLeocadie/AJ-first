@@ -447,7 +447,16 @@ class DSNParser(BaseParser):
                 code_ctp = ""
                 if i < len(codes) and codes[i]:
                     code_ctp = codes[i]
-                    c.type_cotisation = CTP_MAPPING.get(codes[i], ContributionType.MALADIE)
+                    mapped_type = CTP_MAPPING.get(codes[i])
+                    if mapped_type is not None:
+                        c.type_cotisation = mapped_type
+                    else:
+                        import logging
+                        logging.getLogger("normacheck.dsn").warning(
+                            "Code CTP inconnu: %s. Cotisation conservee avec type AUTRE.",
+                            codes[i],
+                        )
+                        c.type_cotisation = ContributionType.AUTRE
                 if i < len(bases) and bases[i]:
                     c.base_brute = parser_montant(bases[i])
                     c.assiette = c.base_brute

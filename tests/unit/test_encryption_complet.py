@@ -12,15 +12,25 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from urssaf_analyzer.security.encryption import (
-    chiffrer_fichier, dechiffrer_fichier,
-    chiffrer_donnees, dechiffrer_donnees,
-    chiffrer_champ, dechiffrer_champ,
-    est_chiffre, masquer_champ,
-    HEADER_MAGIC, FORMAT_VERSION,
-    SALT_LENGTH, IV_LENGTH, KEY_LENGTH, ITERATIONS,
+import subprocess
+_crypto_check = subprocess.run(
+    [sys.executable, "-c", "from cryptography.hazmat.primitives.ciphers.aead import AESGCM"],
+    capture_output=True, timeout=5,
 )
+_HAS_CRYPTO = _crypto_check.returncode == 0
+
+if _HAS_CRYPTO:
+    from urssaf_analyzer.security.encryption import (
+        chiffrer_fichier, dechiffrer_fichier,
+        chiffrer_donnees, dechiffrer_donnees,
+        chiffrer_champ, dechiffrer_champ,
+        est_chiffre, masquer_champ,
+        HEADER_MAGIC, FORMAT_VERSION,
+        SALT_LENGTH, IV_LENGTH, KEY_LENGTH, ITERATIONS,
+    )
 from urssaf_analyzer.core.exceptions import EncryptionError
+
+pytestmark = pytest.mark.skipif(not _HAS_CRYPTO, reason="cryptography non disponible")
 
 
 # ==============================

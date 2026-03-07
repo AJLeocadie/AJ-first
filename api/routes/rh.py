@@ -7,8 +7,9 @@ entretiens, visites medicales, planning, alertes.
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Form, Query, Request
+from fastapi import APIRouter, HTTPException, Form, Query, Request, File, UploadFile
 
 from api.state import (
     rh_contrats, rh_avenants, rh_conges, rh_arrets,

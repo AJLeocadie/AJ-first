@@ -13,25 +13,27 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from urssaf_analyzer.core.exceptions import EncryptionError
 
-# Verifier si cryptography est disponible
-try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    HAS_CRYPTOGRAPHY = True
-except ImportError:
-    HAS_CRYPTOGRAPHY = False
-
-from urssaf_analyzer.security.encryption import (
-    chiffrer_fichier,
-    dechiffrer_fichier,
-    chiffrer_donnees,
-    dechiffrer_donnees,
-    HEADER_MAGIC,
-    SALT_LENGTH,
-    IV_LENGTH,
-    KEY_LENGTH,
-    ITERATIONS,
-    _derive_key,
+# Verifier si cryptography est disponible (subprocess pour eviter pyo3 panic)
+import subprocess
+_crypto_check = subprocess.run(
+    [sys.executable, "-c", "from cryptography.hazmat.primitives.ciphers.aead import AESGCM"],
+    capture_output=True, timeout=5,
 )
+HAS_CRYPTOGRAPHY = _crypto_check.returncode == 0
+
+if HAS_CRYPTOGRAPHY:
+    from urssaf_analyzer.security.encryption import (
+        chiffrer_fichier,
+        dechiffrer_fichier,
+        chiffrer_donnees,
+        dechiffrer_donnees,
+        HEADER_MAGIC,
+        SALT_LENGTH,
+        IV_LENGTH,
+        KEY_LENGTH,
+        ITERATIONS,
+        _derive_key,
+    )
 
 pytestmark = pytest.mark.skipif(
     not HAS_CRYPTOGRAPHY,

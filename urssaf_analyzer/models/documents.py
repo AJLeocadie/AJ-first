@@ -60,6 +60,9 @@ class Employe:
     date_embauche: Optional[date] = None
     date_sortie: Optional[date] = None
     statut: str = ""               # cadre, non-cadre, etc.
+    type_contrat: str = ""         # CDI, CDD, apprentissage, stage, etc.
+    lieu_travail: str = ""         # Commune (pour versement mobilite)
+    classification: str = ""       # Coefficient/classification conventionnelle
     temps_travail: Decimal = Decimal("1.0")  # 1.0 = temps plein
     convention_collective: str = ""
     source_document_id: str = ""

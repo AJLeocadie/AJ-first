@@ -32,6 +32,7 @@ MIN_PASSWORD_LENGTH = 12
 # --- Token blacklist (revocation) ---
 # Stocke les JTI (JWT ID) des tokens revoques avec leur date d'expiration
 _token_blacklist: dict[str, float] = {}  # jti -> exp timestamp
+_token_blacklist_store = None
 
 # --- Email verification codes ---
 # Stocke les codes de verification: email -> {code, expires, attempts}
@@ -55,6 +56,8 @@ if _IS_OVH:
         _users = _users_store.load()
         _dashboard_store = PersistentStore("dashboards", default={})
         _dashboards = _dashboard_store.load()
+        _token_blacklist_store = PersistentStore("token_blacklist", default={})
+        _token_blacklist = _token_blacklist_store.load()
     except ImportError:
         pass
 
@@ -132,7 +135,14 @@ def revoke_token(token: str) -> bool:
         return False
     _token_blacklist[jti] = payload.get("exp", time.time() + 86400)
     _cleanup_blacklist()
+    _save_blacklist()
     return True
+
+
+def _save_blacklist():
+    """Persiste la blacklist de tokens."""
+    if _token_blacklist_store:
+        _token_blacklist_store.save(_token_blacklist)
 
 
 def _cleanup_blacklist():
@@ -141,6 +151,8 @@ def _cleanup_blacklist():
     expired = [jti for jti, exp in _token_blacklist.items() if exp < now]
     for jti in expired:
         del _token_blacklist[jti]
+    if expired:
+        _save_blacklist()
 
 
 # =========================================
@@ -251,12 +263,10 @@ _DEFAULT_ADMIN_EMAIL = os.getenv("NORMACHECK_ADMIN_EMAIL", "admin@normacheck.fr"
 _DEFAULT_ADMIN_PASSWORD = os.getenv("NORMACHECK_ADMIN_PASSWORD", "Admin2026!Norma")
 _ADMIN_PW_IS_DEFAULT = os.getenv("NORMACHECK_ADMIN_PASSWORD") is None
 if _ADMIN_PW_IS_DEFAULT and os.getenv("NORMACHECK_ENV") in ("production", "staging"):
-    import logging as _logging
-    _logging.getLogger("normacheck").warning(
-        "SECURITE: NORMACHECK_ADMIN_PASSWORD non defini en %s. "
-        "Le mot de passe admin par defaut sera utilise. "
-        "Definissez NORMACHECK_ADMIN_PASSWORD pour securiser le compte admin.",
-        os.getenv("NORMACHECK_ENV"),
+    raise RuntimeError(
+        "SECURITE: NORMACHECK_ADMIN_PASSWORD doit etre defini en production/staging. "
+        "Generez un mot de passe fort et definissez la variable d'environnement "
+        "NORMACHECK_ADMIN_PASSWORD avant de demarrer l'application."
     )
 
 def bootstrap_admin():

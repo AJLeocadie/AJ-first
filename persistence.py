@@ -192,10 +192,24 @@ def save_uploaded_file(filename: str, content: bytes, analysis_id: str = "") -> 
             dest = date_dir / (filename + ".enc")
             dest.write_bytes(encrypted)
             return dest
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logger = logging.getLogger("normacheck.persistence")
+            if os.getenv("NORMACHECK_ENV") in ("production", "staging"):
+                logger.error(
+                    "SECURITE CRITIQUE: Echec du chiffrement pour %s: %s. "
+                    "Stockage refuse en production.", filename, e,
+                )
+                raise RuntimeError(
+                    f"Echec du chiffrement pour {filename}. "
+                    "Le stockage non chiffre est interdit en production."
+                ) from e
+            logger.warning(
+                "Chiffrement indisponible pour %s: %s. Fallback non chiffre (dev).",
+                filename, e,
+            )
 
-    # Fallback : stockage non chiffre (dev ou si cryptography manquant)
+    # Fallback : stockage non chiffre (dev uniquement)
     dest = date_dir / filename
     dest.write_bytes(content)
     return dest

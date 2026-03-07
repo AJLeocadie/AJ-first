@@ -19,7 +19,21 @@ from urssaf_analyzer.config.settings import AppConfig
 from urssaf_analyzer.core.orchestrator import Orchestrator
 from urssaf_analyzer.database.db_manager import Database
 from urssaf_analyzer.security.integrity import calculer_hash_sha256
-from urssaf_analyzer.security.encryption import chiffrer_fichier, dechiffrer_fichier
+
+def _check_crypto():
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, "-c", "from cryptography.hazmat.primitives.ciphers.aead import AESGCM"],
+        capture_output=True, timeout=5,
+    )
+    return result.returncode == 0
+
+_HAS_CRYPTO = _check_crypto()
+if _HAS_CRYPTO:
+    from urssaf_analyzer.security.encryption import chiffrer_fichier, dechiffrer_fichier
+else:
+    chiffrer_fichier = dechiffrer_fichier = None
+
 from urssaf_analyzer.analyzers.analyzer_engine import AnalyzerEngine
 from urssaf_analyzer.models.documents import Declaration, Employeur, Employe, Cotisation
 from urssaf_analyzer.config.constants import ContributionType, Severity
@@ -182,6 +196,7 @@ class TestIntegritePipeline:
         assert h1 == h2
         assert len(h1) == 64
 
+    @pytest.mark.skipif(not _HAS_CRYPTO, reason="cryptography non disponible")
     def test_encrypt_decrypt_in_pipeline(self, tmp_path):
         """Chiffrement et dechiffrement dans le contexte du pipeline."""
         source = FIXTURES / "sample_paie.csv"

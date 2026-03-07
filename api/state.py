@@ -222,8 +222,11 @@ def log_action(profil_email: str, action: str, details: str = "", user_override:
                     if resolved_email == "utilisateur":
                         resolved_email = u.get("email", profil_email)
                     tenant_id = u.get("tenant_id", "")
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger("normacheck.audit").debug(
+                    "Resolution utilisateur echouee pour audit: %s", e,
+                )
     entry = {
         "id": str(uuid.uuid4())[:8],
         "date": datetime.now().isoformat(),

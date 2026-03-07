@@ -7,6 +7,7 @@ ecritures manuelles, FEC import/export/validation.
 import tempfile
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Form, Query, Request, File, UploadFile
 from fastapi.responses import Response
