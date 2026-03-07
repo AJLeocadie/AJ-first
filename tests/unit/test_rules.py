@@ -36,9 +36,9 @@ class TestContributionRules:
         assert taux == Decimal("0.0855")
 
     def test_taux_vieillesse_deplafonnee_2026(self):
-        """Taux vieillesse deplafonnee patronal 2.02%."""
+        """Taux vieillesse deplafonnee patronal 2.11% (LFSS 2025 art.6)."""
         taux = self.rules.get_taux_attendu_patronal(ContributionType.VIEILLESSE_DEPLAFONNEE)
-        assert taux == Decimal("0.0202")
+        assert taux == Decimal("0.0211")
 
     def test_assiette_plafonnee_sous_pass(self):
         brut = Decimal("3000")

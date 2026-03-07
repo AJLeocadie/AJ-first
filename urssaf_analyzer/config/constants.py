@@ -170,7 +170,7 @@ TAUX_COTISATIONS_2026 = {
     },
 
     ContributionType.VIEILLESSE_DEPLAFONNEE: {
-        "patronal": Decimal("0.0202"),            # 2.02%
+        "patronal": Decimal("0.0211"),            # 2.11% (LFSS 2025 art.6)
         "salarial": Decimal("0.004"),             # 0.40%
         "assiette": "totalite",
         "ref": "CSS art. L241-3, D242-4",
@@ -178,8 +178,8 @@ TAUX_COTISATIONS_2026 = {
 
     ContributionType.ALLOCATIONS_FAMILIALES: {
         "patronal": Decimal("0.0525"),            # 5.25%
-        "patronal_reduit": Decimal("0.0345"),     # 3.45% si <= 3.5 SMIC
-        "seuil_reduction_smic": Decimal("3.5"),   # CSS art. D241-3-1
+        "patronal_reduit": Decimal("0.0345"),     # 3.45% si <= 3.3 SMIC
+        "seuil_reduction_smic": Decimal("3.3"),   # CSS art. D241-3-1 (LFSS 2025 art.17)
         "assiette": "totalite",
         "ref": "CSS art. L241-6, D241-3-1",
     },

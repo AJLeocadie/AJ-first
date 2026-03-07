@@ -101,13 +101,13 @@ def exporter_fec(
             comp_aux_num = ""
             comp_aux_lib = ""
             compte = ligne.compte
-            # Comptes de tiers (401xxx, 411xxx) -> compte auxiliaire
-            if compte.startswith("401") or compte.startswith("411"):
+            # Comptes de tiers (401xxx, 411xxx, 43xxxx) -> compte auxiliaire
+            if compte.startswith(("401", "411", "43")):
                 if len(compte) > 6:
                     comp_aux_num = compte
                     comp_aux_lib = ligne.libelle
-                    # Tronquer au compte general
-                    compte = compte[:6] + "0" * (len(compte) - 6)
+                    # Tronquer au compte general (6 premiers chiffres)
+                    compte = compte[:6]
 
             # Recuperer le libelle du compte depuis le plan comptable
             cpt_obj = moteur.plan.get_compte(ligne.compte)

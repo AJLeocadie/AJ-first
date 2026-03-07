@@ -435,7 +435,7 @@ BAREMES_PAR_ANNEE = {
         "taux_vieillesse_plafonnee_patronal": 0.0855,
         "taux_vieillesse_plafonnee_salarial": 0.069,
         "taux_vieillesse_deplafonnee_patronal": 0.0211,
-        "taux_vieillesse_deplafonnee_salarial": 0.024,
+        "taux_vieillesse_deplafonnee_salarial": 0.004,
         "taux_af_patronal": 0.0525,
         "taux_af_patronal_reduit": 0.0325,
         "seuil_af_reduit_smic": 3.3,  # LFSS 2025 art.17 : abaisse de 3.5 a 3.3 SMIC

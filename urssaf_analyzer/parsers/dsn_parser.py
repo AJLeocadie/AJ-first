@@ -321,7 +321,9 @@ class DSNParser(BaseParser):
             if cotisations:
                 total_s81 = sum(float(c.montant_patronal) for c in cotisations)
                 ecart = abs(total_s81 - s89_totaux["total_cotisations"])
-                reconcilie = ecart < 1.0  # Tolerance 1 EUR
+                # Tolerance adaptive: 1 EUR ou 0.01% du total, le plus grand
+                tolerance = max(1.0, s89_totaux["total_cotisations"] * 0.0001)
+                reconcilie = ecart < tolerance
                 declaration.metadata["s89_reconciliation"] = {
                     "total_s81": round(total_s81, 2),
                     "total_s89": s89_totaux["total_cotisations"],
@@ -342,7 +344,7 @@ class DSNParser(BaseParser):
                             f"Les totaux declares en S89 ({s89_totaux['total_cotisations']:.2f} EUR) "
                             f"ne correspondent pas aux cotisations calculees en S81 "
                             f"({round(total_s81, 2):.2f} EUR). "
-                            f"Ecart de {ecart:.2f} EUR (tolerance: 1.00 EUR). "
+                            f"Ecart de {ecart:.2f} EUR (tolerance: {tolerance:.2f} EUR). "
                             f"Cet ecart peut indiquer une erreur dans la DSN ou "
                             f"des cotisations manquantes/doublonnees."
                         ),
