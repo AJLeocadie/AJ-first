@@ -9,6 +9,7 @@ addopts = [
     "--strict-markers",
     "--tb=short",
     "-x",
+    "--color=yes",
 ]
 markers = [
     "determinisme: tests de determinisme du scoring (ISO 42001)",

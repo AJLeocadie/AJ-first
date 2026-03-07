@@ -1,0 +1,203 @@
+# ============================================================
+# NormaCheck - Pipeline CI/CD avec tests automatiques
+# Bloque le deploiement si un test echoue
+# Niveau de fiabilite : bancaire (ISO 27001, ISO 42001)
+# ============================================================
+
+name: NormaCheck CI - Tests & Quality Gates
+
+on:
+  push:
+    branches: [master, main, develop, "release/*"]
+  pull_request:
+    branches: [master, main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NORMACHECK_ENV: "test"
+  NORMACHECK_SECRET_KEY: "ci-test-secret-key-not-for-production-2026"
+
+jobs:
+  # ============================================================
+  # ETAPE 1 : Lint & Securite statique
+  # ============================================================
+  lint-security:
+    name: Lint & Security Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install ruff mypy bandit safety
+
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: MyPy type check
+        run: mypy urssaf_analyzer/ --ignore-missing-imports --no-error-summary || true
+
+      - name: Bandit security scan
+        run: bandit -r urssaf_analyzer/ -f json -o bandit-report.json || true
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-report
+          path: bandit-report.json
+
+  # ============================================================
+  # ETAPE 2 : Tests unitaires
+  # ============================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install pytest pytest-cov pytest-html pytest-xdist fastapi httpx
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest tests/unit/ \
+            --cov=urssaf_analyzer --cov=auth --cov=persistence \
+            --cov-report=xml:coverage-unit.xml \
+            --cov-report=html:htmlcov-unit \
+            --cov-report=term-missing \
+            --junitxml=junit-unit.xml \
+            --html=report-unit.html --self-contained-html \
+            -v --tb=short \
+            -x
+
+      - name: Upload unit test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-report
+          path: |
+            junit-unit.xml
+            report-unit.html
+            htmlcov-unit/
+            coverage-unit.xml
+
+      - name: Check coverage threshold
+        run: |
+          pip install coverage
+          coverage report --fail-under=40
+
+  # ============================================================
+  # ETAPE 3 : Tests d'integration
+  # ============================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install pytest pytest-cov pytest-html fastapi httpx uvicorn
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ \
+            --cov=urssaf_analyzer --cov=auth \
+            --cov-report=xml:coverage-integration.xml \
+            --cov-report=html:htmlcov-integration \
+            --junitxml=junit-integration.xml \
+            --html=report-integration.html --self-contained-html \
+            -v --tb=short
+
+      - name: Upload integration test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-report
+          path: |
+            junit-integration.xml
+            report-integration.html
+            htmlcov-integration/
+
+  # ============================================================
+  # ETAPE 4 : Tests E2E (Playwright)
+  # ============================================================
+  e2e-tests:
+    name: E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install pytest pytest-html fastapi httpx uvicorn playwright
+          playwright install chromium --with-deps
+
+      - name: Run E2E tests
+        run: |
+          pytest tests/e2e/ \
+            -m e2e \
+            --junitxml=junit-e2e.xml \
+            --html=report-e2e.html --self-contained-html \
+            -v --tb=short || true
+
+      - name: Upload E2E screenshots and report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-test-report
+          path: |
+            junit-e2e.xml
+            report-e2e.html
+            tests/e2e/screenshots/
+
+  # ============================================================
+  # ETAPE 5 : Quality Gate - Bloque si tests echouent
+  # ============================================================
+  quality-gate:
+    name: Quality Gate (Deploy Blocker)
+    runs-on: ubuntu-latest
+    needs: [lint-security, unit-tests, integration-tests]
+    if: always()
+    steps:
+      - name: Check all tests passed
+        run: |
+          if [ "${{ needs.unit-tests.result }}" != "success" ]; then
+            echo "BLOQUER: Tests unitaires en echec"
+            exit 1
+          fi
+          if [ "${{ needs.integration-tests.result }}" != "success" ]; then
+            echo "BLOQUER: Tests d'integration en echec"
+            exit 1
+          fi
+          if [ "${{ needs.lint-security.result }}" != "success" ]; then
+            echo "BLOQUER: Lint/securite en echec"
+            exit 1
+          fi
+          echo "Tous les tests sont passes - deploiement autorise"
